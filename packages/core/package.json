@@ -1,0 +1,34 @@
+{
+  "name": "@retrival-mcp/core",
+  "version": "0.1.0",
+  "description": "Core types, schema, and DB adapter for retrival-mcp",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^v12.4.5",
+    "sqlite-vec": "^0.1.6",
+    "uuid": "^10.0.0",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.0",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

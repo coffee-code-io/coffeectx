@@ -1,0 +1,30 @@
+{
+  "name": "@retrival-mcp/server",
+  "version": "0.1.0",
+  "description": "MCP server for efficient retrieval of memories, architecture, and local decisions",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "retrival-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@retrival-mcp/core": "*",
+    "@qwen-code/sdk": "file:../qwen-code/packages/sdk-typescript",
+    "yaml": "^2.7.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

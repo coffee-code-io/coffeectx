@@ -1,0 +1,113 @@
+# types:
+#   Decision:
+#     description: A general architectural or implementation decision — what was chosen, why, and what was rejected.
+#     kind: Map
+#     fields:
+#       title: Symbol
+#       rationale: Meaning      # why this choice was made
+#       choice: Meaning         # what was decided
+#       alternatives:
+#         kind: List
+#         item: Symbol          # options that were considered but rejected
+#       date: Symbol            # ISO date string, e.g. "2026-03-07"
+#       author: Symbol
+
+#   LibraryDecision:
+#     description: A preference for one library or approach over alternatives, with rationale.
+#     kind: Map
+#     fields:
+#       preferred: Symbol       # chosen library or approach name
+#       alternatives:
+#         kind: List
+#         item: Symbol          # rejected options
+#       rationale: Meaning
+#       context: Meaning        # scope where this applies, e.g. "HTTP clients in backend services"
+
+#   CopyVsPublic:
+#     description: A decision to copy code rather than expose an internal API or patch an external library.
+#     kind: Map
+#     fields:
+#       component: Symbol       # the thing being copied (function/class/module name)
+#       source: Symbol          # original package or file path
+#       rationale: Meaning      # why copy was preferred
+#       location: Symbol        # where the copy lives in this repo
+
+#   TemporaryImpl:
+#     description: A known temporary implementation that must be replaced — with a ticket and deadline.
+#     kind: Map
+#     fields:
+#       description: Meaning
+#       reason: Meaning         # why it is temporary
+#       ticket: Symbol          # issue / PR reference, e.g. "GH-123"
+#       deadline: Symbol        # ISO date or milestone name
+
+#   Assumption:
+#     description: An assumption about the environment, users, or external systems — with risk assessment.
+#     kind: Map
+#     fields:
+#       description: Meaning
+#       basis: Meaning          # evidence or reasoning behind the assumption
+#       risk: Meaning           # consequence if the assumption turns out to be wrong
+#       validated: Symbol       # "true" | "false" | "partial"
+
+#   ChangeEvent:
+#     description: A recorded event that caused a significant change in architecture or behaviour.
+#     kind: Map
+#     fields:
+#       name: Symbol
+#       description: Meaning
+#       timestamp: Symbol       # ISO datetime
+#       impact: Meaning         # what changed and which parts of the codebase are affected
+#       author: Symbol
+
+# skills:
+#   ArchitecturalDecisionIndexing:
+#     description: Capture architectural decisions, library preferences, technical debt, and assumptions.
+#     prompt: |
+#       When reading architecture docs, ADRs, code comments, or PR descriptions, extract:
+
+#       Decision — for any general choice that shaped the codebase:
+#         title: short imperative title (e.g. "Use event sourcing for order state")
+#         rationale: semantic explanation of WHY this was the best option
+#         choice: semantic description of WHAT was decided
+#         alternatives: list of option names that were considered and rejected
+#         date: ISO date of the decision
+#         author: person or team who made it
+
+#       LibraryDecision — when a specific library or framework was chosen over alternatives:
+#         preferred: the chosen library name (e.g. "better-sqlite3")
+#         alternatives: rejected alternatives (e.g. ["sql.js", "knex"])
+#         rationale: why the chosen library wins (performance, API, maintenance, etc.)
+#         context: where this applies (e.g. "all SQLite access in the backend")
+
+#       CopyVsPublic — when code was deliberately duplicated rather than exposed or patched:
+#         component: what was copied (function/class/module)
+#         source: original package or file
+#         rationale: why copy was safer/simpler than the alternative
+#         location: path to the copy in this repo
+
+#       TemporaryImpl — for any known hack, stub, or placeholder:
+#         description: what the temporary implementation does
+#         reason: why it is temporary (e.g. "waiting for upstream fix")
+#         ticket: linked issue or PR
+#         deadline: when it should be replaced
+
+#       Assumption — for beliefs about the environment or users:
+#         description: the assumption itself
+#         basis: why this was assumed (data, prior art, domain knowledge)
+#         risk: what breaks if the assumption is wrong
+#         validated: "true" if verified, "false" if untested, "partial" if partially validated
+
+#       ChangeEvent — for significant migrations, refactors, or external events:
+#         name: event name
+#         description: what happened and why
+#         timestamp: when
+#         impact: which parts of the system were affected and how
+#         author: who drove the change
+#     types:
+#       - Decision
+#       - LibraryDecision
+#       - CopyVsPublic
+#       - TemporaryImpl
+#       - Assumption
+#       - ChangeEvent

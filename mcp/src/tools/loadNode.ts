@@ -1,0 +1,42 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import type { Db } from '@retrival-mcp/core';
+import { formatDeepNode } from '@retrival-mcp/core';
+
+export function registerLoadNodeTool(server: McpServer, db: Db): void {
+  server.tool(
+    'load_node',
+    'Load a knowledge-graph node by ID, expanding the tree to a configurable depth.\n' +
+      'Container nodes beyond the depth limit are returned as `{ $ref: id }` so you can load them separately.\n' +
+      'Cycles are represented as `{ $cycle: id }`. Use verbose=true to include full type definitions and meaning vectors.',
+    {
+      id: z.string().describe('Node ID to load'),
+      depth: z
+        .number()
+        .int()
+        .min(0)
+        .max(20)
+        .default(10)
+        .describe('How many container levels to expand (default 10; atoms always expanded)'),
+      verbose: z
+        .boolean()
+        .default(false)
+        .describe('Return raw DeepNode with full type definitions and vectors (default: compact form)'),
+    },
+    ({ id, depth, verbose }) => {
+      let node;
+      try {
+        node = db.loadNodeDeep(id, depth);
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+      const output = verbose ? { id, node } : { id, node: formatDeepNode(node) };
+      return {
+        content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+      };
+    },
+  );
+}

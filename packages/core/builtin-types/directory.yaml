@@ -1,0 +1,65 @@
+types:
+  File:
+    description: A file on disk — its repo-relative path, basename, and semantic description.
+    kind: Map
+    fields:
+      path: Symbol        # absolute or repo-relative path
+      name: Symbol        # basename, e.g. "db.ts"
+      folder: Folder
+      description: Meaning
+
+  Folder:
+    description: A directory on disk — its path, name, and purpose description.
+    kind: Map
+    fields:
+      path: Symbol
+      name: Symbol
+      description: Meaning
+
+  Location:
+    description: A precise point in source code — file, line, and optional column.
+    kind: Map
+    fields:
+      file: File
+      line: Symbol        # "42"
+      column: Symbol      # "7" — optional by convention
+
+  Span:
+    description: A contiguous source range defined by a start and end Location.
+    kind: Map
+    fields:
+      start: Location
+      end: Location
+
+skills:
+  FilesystemIndexing:
+    description: Extract filesystem structure — files, folders, and source locations.
+    prompt: |
+      When traversing a repository or directory tree, extract the following node types:
+
+      File — one per meaningful source file:
+        path: repo-relative or absolute path (e.g. "src/db/index.ts")
+        name: basename (e.g. "index.ts")
+        description: one-sentence semantic summary of what the file does
+
+      Folder — one per directory containing relevant source files:
+        path: directory path
+        name: directory basename
+        description: brief summary of the directory's purpose
+
+      Location — whenever you need to pin a finding to a specific line:
+        file: the File node for that file
+        line: line number as a string (e.g. "42")
+        column: column number as a string (optional)
+
+      Span — when you need both a start and end position (e.g. a function body):
+        start: Location node
+        end: Location node
+
+      Index all source files including config, build scripts, and tests.
+      Skip binary files, lock files, and generated output directories (dist/, node_modules/).
+    types:
+      - File
+      - Folder
+      - Location
+      - Span

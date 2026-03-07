@@ -1,0 +1,189 @@
+types:
+  # ── Shared base fields ────────────────────────────────────────────────────────
+  # Every LSP symbol type below uses:
+  #   name: Symbol          — the short identifier (e.g. "createUser")
+  #   containerName: Symbol — fully qualified parent (e.g. "UserService"), empty if top-level
+  #   detail: Symbol        — type signature or other detail string from the server
+  #   location: Location    — source position (from directory.yaml)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  LspModule:
+    description: A module symbol (SymbolKind 2) — a source file treated as a named module.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol
+      location: Location
+
+  LspNamespace:
+    description: A namespace or package symbol (SymbolKind 3) — a named scope grouping related declarations.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol
+      location: Location
+
+  LspClass:
+    description: A class declaration (SymbolKind 5) — a named type with fields and methods.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol        # e.g. "extends Base implements IFoo"
+      location: Location
+
+  LspMethod:
+    description: A method on a class or object (SymbolKind 6) — a named function scoped to a class.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol  # owning class name
+      detail: Symbol         # signature, e.g. "(id: string): Promise<User>"
+      location: Location
+
+  LspProperty:
+    description: An object or class property (SymbolKind 7) — an accessor or computed member.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol         # declared type
+      location: Location
+
+  LspField:
+    description: A class field or struct member (SymbolKind 8) — a stored data member.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol         # declared type
+      location: Location
+
+  LspConstructor:
+    description: A constructor function (SymbolKind 9) — the initializer for a class.
+    kind: Map
+    fields:
+      name: Symbol           # usually the class name
+      containerName: Symbol
+      detail: Symbol         # parameter list
+      location: Location
+
+  LspEnum:
+    description: An enum declaration (SymbolKind 10) — a named set of constant members.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol
+      location: Location
+
+  LspInterface:
+    description: An interface declaration (SymbolKind 11) — a structural type contract without implementation.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol
+      location: Location
+
+  LspFunction:
+    description: A top-level or module-scoped function (SymbolKind 12) — not a method.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol         # signature
+      location: Location
+
+  LspVariable:
+    description: A mutable variable declaration (SymbolKind 13) — let or var binding.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol         # inferred or declared type
+      location: Location
+
+  LspConstant:
+    description: An immutable constant binding (SymbolKind 14) — const declaration or enum-like value.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol
+      detail: Symbol
+      location: Location
+
+  LspEnumMember:
+    description: A single member of an enum (SymbolKind 22) — a named constant within an LspEnum.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol  # parent LspEnum name
+      detail: Symbol         # numeric or string value
+      location: Location
+
+  LspTypeParameter:
+    description: A generic type parameter (SymbolKind 26) — e.g. the T in Array<T>.
+    kind: Map
+    fields:
+      name: Symbol
+      containerName: Symbol  # owning class/function name
+      detail: Symbol         # constraint, e.g. "extends object"
+      location: Location
+
+skills:
+  CodeStructureIndexing:
+    description: |
+      Index source-code symbols by running a Language Server Protocol server over the repository.
+
+      Type relationships:
+        All symbol types embed a Location (from FilesystemIndexing) to anchor them to source.
+        containerName chains symbols into a hierarchy: LspEnumMember → LspEnum, LspMethod/LspField/LspConstructor/LspProperty → LspClass or LspInterface, LspFunction/LspVariable/LspConstant → LspModule or LspNamespace.
+        LspClass and LspInterface are the structural roots — they own LspMethod, LspField, LspProperty, and LspConstructor nodes.
+        LspEnum owns LspEnumMember nodes via containerName.
+        LspModule and LspNamespace are the file-level roots — everything else appears beneath them.
+        LspTypeParameter is owned by whichever class or function declares the generic.
+    prompt: |
+      When given access to a Language Server Protocol server, extract document symbols from each
+      source file and create one node per symbol, using the most specific type:
+
+      LspModule      — SymbolKind 2: a source file that is a named module
+      LspNamespace   — SymbolKind 3: a named namespace or package declaration
+      LspClass       — SymbolKind 5: a class declaration
+      LspMethod      — SymbolKind 6: a class or interface method
+      LspProperty    — SymbolKind 7: a computed/accessor property
+      LspField       — SymbolKind 8: a stored class/struct field
+      LspConstructor — SymbolKind 9: a constructor function
+      LspEnum        — SymbolKind 10: an enum declaration
+      LspInterface   — SymbolKind 11: an interface or type declaration
+      LspFunction    — SymbolKind 12: a top-level function
+      LspVariable    — SymbolKind 13: a mutable variable (let/var)
+      LspConstant    — SymbolKind 14: an immutable constant (const)
+      LspEnumMember  — SymbolKind 22: a member inside an enum
+      LspTypeParameter — SymbolKind 26: a generic type parameter
+
+      For every node set:
+        name: symbol.name (short identifier)
+        containerName: symbol.containerName or parent symbol name (empty string if top-level)
+        detail: symbol.detail from the server (signature, type annotation)
+        location: Location pointing to symbol.selectionRange.start (file + line + column)
+
+      Use workspace/symbol to get a flat list, or textDocument/documentSymbol for the full
+      hierarchical tree (preferred — richer containerName info).
+    types:
+      - LspModule
+      - LspNamespace
+      - LspClass
+      - LspMethod
+      - LspProperty
+      - LspField
+      - LspConstructor
+      - LspEnum
+      - LspInterface
+      - LspFunction
+      - LspVariable
+      - LspConstant
+      - LspEnumMember
+      - LspTypeParameter

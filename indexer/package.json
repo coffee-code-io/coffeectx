@@ -1,0 +1,30 @@
+{
+  "name": "@retrival-mcp/indexer",
+  "version": "0.1.0",
+  "description": "CLI indexer — uses qwen-code to read repos/logs/artifacts and populate the retrival-mcp knowledge graph",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "retrival-index": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@retrival-mcp/core": "*",
+    "@qwen-code/sdk": "file:../qwen-code/packages/sdk-typescript",
+    "vscode-jsonrpc": "^8.2.0",
+    "vscode-languageserver-protocol": "^3.17.5",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

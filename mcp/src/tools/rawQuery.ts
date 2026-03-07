@@ -1,0 +1,90 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import type { Db } from '@retrival-mcp/core';
+import { parseQuery, executeQuery, formatDeepNode } from '@retrival-mcp/core';
+
+const SYNTAX = `
+Query       = Clause (',' Clause)*                          AND semantics
+Clause      = 'Symbol'  STRING                              exact symbol match
+            | 'Regex'   STRING                              regex on symbol (case-insensitive)
+            | 'Meaning' STRING                              semantic similarity search
+            | TypeQuery                                     filter by named type
+            | MapQuery                                      filter map nodes by field contents
+            | ListQuery                                     filter list nodes by items
+            | '(' Query ')'                                 grouping
+
+TypeQuery   = 'IsType' STRING (',' 'IsType' STRING)*        OR semantics; STRING is named type
+MapQuery    = 'Field' STRING SubQuery (',' 'Field' STRING SubQuery)*
+ListQuery   = 'HasItem' SubQuery
+SubQuery    = '(' Query ')' | Clause
+
+Examples:
+  Symbol "main"
+  Meaning "authentication flow"
+  IsType "Project", Field "title" Meaning "auth"
+  Field "tags" Symbol "security", Field "author" Regex "^alice"
+  HasItem (Symbol "step1"), IsType "Workflow"
+`.trim();
+
+export function registerRawQueryTool(server: McpServer, db: Db): void {
+  server.tool(
+    'raw_query',
+    `Query the knowledge graph using the retrival query language.\n\nSyntax:\n${SYNTAX}`,
+    {
+      query: z.string().describe('Query expression in the retrival query language'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .default(50)
+        .describe('Max nodes to return'),
+      depth: z
+        .number()
+        .int()
+        .min(0)
+        .max(20)
+        .default(10)
+        .describe('How many container levels to expand per node (default 10)'),
+      verbose: z
+        .boolean()
+        .default(false)
+        .describe('Return raw DeepNode with full type definitions and vectors (default: compact form)'),
+    },
+    async ({ query, limit, depth, verbose }) => {
+      let parsed;
+      try {
+        parsed = parseQuery(query);
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Parse error: ${(err as Error).message}\n\nSyntax reference:\n${SYNTAX}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const ids = (await executeQuery(parsed, db)).slice(0, limit);
+      const results = ids.map(id => {
+        try {
+          const node = db.loadNodeDeep(id, depth);
+          return { id, node: verbose ? node : formatDeepNode(node) };
+        } catch {
+          return { id, node: null };
+        }
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ count: results.length, results }, null, 2),
+          },
+        ],
+      };
+    },
+  );
+}

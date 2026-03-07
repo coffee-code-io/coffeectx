@@ -1,0 +1,34 @@
+# Copy this file to: ~/.coffeecode/lsp.yaml
+#
+# Command resolution order for `retrival-index index`:
+# 1) --lsp-command
+# 2) servers.typescript (or other language key if used in future)
+# 3) default (or command+args)
+# 4) built-in fallback: typescript-language-server --stdio
+
+# Global default server (used when a language-specific server is not set).
+default:
+  command: /opt/homebrew/bin/typescript-language-server
+  args:
+    - --stdio
+
+# Optional per-language overrides.
+servers:
+  typescript:
+    command: /opt/homebrew/bin/typescript-language-server
+    args:
+      - --stdio
+
+  javascript: /opt/homebrew/bin/typescript-language-server --stdio
+
+  python:
+    command: /Users/dima/.local/bin/pylsp
+
+  rust:
+    command: /opt/homebrew/bin/rust-analyzer
+
+  go:
+    command: /opt/homebrew/bin/gopls
+
+# You can also use a short form for the default command:
+# default: /opt/homebrew/bin/typescript-language-server --stdio

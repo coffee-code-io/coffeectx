@@ -1,0 +1,1 @@
+{"root":["./src/index.ts","./src/init.ts","./src/projects.ts","./src/typesdot.ts","./src/lsp/client.ts","./src/lsp/config.ts","./src/lsp/indexsymbols.ts"],"version":"5.9.3"}
