@@ -1,22 +1,28 @@
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import { v4 as uuidv4 } from 'uuid';
-import { SCHEMA_DDL, VEC_TABLE_DDL } from './schema.js';
+import { SCHEMA_DDL, makeVecTableDDL } from './schema.js';
 import type { Node, Type, Atom, Sym, EmbedFn, SearchResult, StoredNode, DeepNode, InsertEntry, InsertResult } from './types.js';
 import type { QueryDb } from './query.js';
+
+import { appendFileSync } from 'node:fs';
 
 export interface DbOptions {
   path: string;
   embed: EmbedFn;
+  /** Embedding dimension. Must match the model's output size. Defaults to 1536. */
+  dimensions?: number;
 }
 
 export class Db implements QueryDb {
   private readonly raw: Database.Database;
   private readonly embed: EmbedFn;
+  readonly dims: number;
 
   constructor(options: DbOptions) {
     this.raw = new Database(options.path);
     this.embed = options.embed;
+    this.dims = options.dimensions ?? 1536;
 
     sqliteVec.load(this.raw);
     this.raw.pragma('journal_mode = WAL');
@@ -28,7 +34,7 @@ export class Db implements QueryDb {
     );
 
     this.raw.exec(SCHEMA_DDL);
-    this.raw.exec(VEC_TABLE_DDL);
+    this.raw.exec(makeVecTableDDL(this.dims));
     this.migrate();
   }
 
@@ -357,6 +363,10 @@ export class Db implements QueryDb {
   // Pre-computes all embeddings before writing (better-sqlite3 is synchronous).
 
   async insertNode(node: Node): Promise<string> {
+        var _diagLine = `[mcp] insert node ${node}\n`;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
+    
+
     // 1. Pre-compute all embeddings in the tree
     const embeds = new Map<string, Float32Array>(); // placeholder key → vec
     await this.collectEmbeds(node, embeds);
@@ -371,12 +381,19 @@ export class Db implements QueryDb {
   }
 
   private async collectEmbeds(node: Node, out: Map<string, Float32Array>): Promise<void> {
+    var _diagLine = `[mcp] collectEmbeds ${node}\n`;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
+    
+
+
     if (node.kind === 'atom' && node.atom.kind === 'meaning') {
       const { text, vec } = node.atom.value;
-      // Use the provided vec if already 128-dim; otherwise embed
+      // Use the provided vec if already the right size; otherwise embed
       const key = text;
       if (!out.has(key)) {
-        out.set(key, vec.length === 128 ? vec : await this.embed(text));
+        var _diagLine = `[mcp] db.embed call ${node}\n`;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
+        out.set(key, vec.length === this.dims ? vec : await this.embed(text));
       }
     } else if (node.kind === 'list') {
       for (const item of node.items) await this.collectEmbeds(item, out);
@@ -434,7 +451,7 @@ export class Db implements QueryDb {
       this.raw
         .prepare(`INSERT INTO nodes(id, kind, meaning_text) VALUES(?,?,?)`)
         .run(id, 'meaning', atom.value.text);
-      const vec = embeds.get(atom.value.text) ?? new Float32Array(128);
+      const vec = embeds.get(atom.value.text) ?? new Float32Array(this.dims);
       this.raw
         .prepare(`INSERT INTO meaning_vecs(node_id, embedding) VALUES(?,?)`)
         .run(id, vec);
@@ -444,81 +461,200 @@ export class Db implements QueryDb {
     throw new Error(`Unknown atom kind`);
   }
 
-  // ── Typed batch insert ─────────────────────────────────────────────────────
+  // ── Unified typed upsert ───────────────────────────────────────────────────
   //
-  // Entries are validated against named types, embeddings are pre-computed,
-  // then all nodes are written in a single transaction.
+  // Handles both new insertions and patches of existing nodes in one batch.
   //
-  // Two-phase write enables circular references between top-level entries:
-  //   Phase 1 — INSERT shell rows for every valid top-level map node.
-  //   Phase 2 — INSERT field values (which may $ref a shell from phase 1).
+  // For entries WITHOUT id (insert):
+  //   - All required (non-optional) fields must be present.
+  //   - Two-phase write: INSERT shell first so $ref can point to it, then fields.
+  //   - Use { "$ref": N } in data to reference the N-th entry (0-based).
   //
-  // Use { "$ref": N } in data to reference the N-th entry (0-based) in the
-  // same batch.
+  // For entries WITH id (patch):
+  //   - The node must exist and be a MapType matching the given type.
+  //   - Only fields absent on the node are added; existing keys are skipped.
+  //   - Partial data is accepted — required-field check is relaxed.
 
   async insertEntries(entries: InsertEntry[]): Promise<InsertResult> {
+    var _diagLine = `[mcp] insert entries ${JSON.stringify(entries)}\n`;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
+
     const errors: InsertResult['errors'] = [];
+    const skippedKeys: string[][] = entries.map(() => []);
 
     // ── Phase 1: validate types ─────────────────────────────────────────────
-    const typeInfos: Array<{ typeId: string; schema: Extract<Type, { kind: 'MapType' }> } | null> =
-      [];
+    const typeInfos: Array<{ typeId: string; schema: Extract<Type, { kind: 'MapType' }> } | null> = [];
     for (let i = 0; i < entries.length; i++) {
-      const named = this.loadNamedType(entries[i]!.type);
+      const entry = entries[i]!;
+
+      // For patch entries verify the existing node exists and has a compatible type.
+      if (entry.id) {
+        // Reject empty patch — there's nothing to do.
+        if (Object.keys(entry.data).length === 0) {
+          errors.push({
+            index: i,
+            path: '',
+            message: `Patch entry[${i}] has no fields to add. Provide actual field values in "data".`,
+          });
+          typeInfos.push(null);
+          continue;
+        }
+
+        const row = this.raw
+          .prepare(`SELECT kind, type_id FROM nodes WHERE id=?`)
+          .get(entry.id) as { kind: string; type_id: string | null } | undefined;
+        if (!row) {
+          errors.push({ index: i, path: '', message: `Node not found: "${entry.id}"` });
+          typeInfos.push(null);
+          continue;
+        }
+        if (row.kind !== 'map') {
+          errors.push({ index: i, path: '', message: `Node "${entry.id}" is not a map (got ${row.kind})` });
+          typeInfos.push(null);
+          continue;
+        }
+        if (!row.type_id) {
+          errors.push({ index: i, path: '', message: `Node "${entry.id}" has no type` });
+          typeInfos.push(null);
+          continue;
+        }
+
+        // Verify the caller's stated type matches the node's actual named type.
+        const actualNamed = this.raw
+          .prepare(`SELECT name FROM named_types WHERE type_id=?`)
+          .get(row.type_id) as { name: string } | undefined;
+        if (actualNamed && actualNamed.name !== entry.type) {
+          errors.push({
+            index: i,
+            path: '',
+            message: `Type mismatch for node "${entry.id}": node is type "${actualNamed.name}", but entry specifies type "${entry.type}". Use type "${actualNamed.name}" to patch this node.`,
+          });
+          typeInfos.push(null);
+          continue;
+        }
+
+        const schema = this.loadTypeShallow(row.type_id);
+        if (schema.kind !== 'MapType') {
+          errors.push({ index: i, path: '', message: `Node "${entry.id}" type is not MapType` });
+          typeInfos.push(null);
+          continue;
+        }
+        typeInfos.push({ typeId: row.type_id, schema });
+        continue;
+      }
+
+      // For new entries look up the named type.
+      const named = this.loadNamedType(entry.type);
       if (!named) {
-        errors.push({ index: i, path: '', message: `Unknown named type: "${entries[i]!.type}"` });
+        errors.push({ index: i, path: '', message: `Unknown named type: "${entry.type}"` });
         typeInfos.push(null);
         continue;
       }
-      // Load shallowly so RefType children stay as RefType — required for
-      // upsertType to produce matching content_keys on inline child maps.
       const schema = this.loadTypeShallow(named.typeId);
       if (schema.kind !== 'MapType') {
-        errors.push({
-          index: i,
-          path: '',
-          message: `Type "${entries[i]!.type}" is ${schema.kind}, expected MapType`,
-        });
+        errors.push({ index: i, path: '', message: `Type "${entry.type}" is ${schema.kind}, expected MapType` });
         typeInfos.push(null);
         continue;
       }
       typeInfos.push({ typeId: named.typeId, schema });
     }
 
-    // ── Phase 2: pre-allocate IDs ───────────────────────────────────────────
-    const allocatedIds: (string | null)[] = typeInfos.map(ti => (ti ? uuidv4() : null));
+    // ── Phase 2: allocate IDs ───────────────────────────────────────────────
+    // Patch entries reuse their existing id; new entries get a fresh uuid.
+    const allocatedIds: (string | null)[] = entries.map((e, i) =>
+      typeInfos[i] ? (e.id ?? uuidv4()) : null,
+    );
+
+    // ── Phase 2.5: validate required fields (insert-only) ───────────────────
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      if (entry.id) continue; // patches accept partial data
+      const ti = typeInfos[i];
+      if (!ti) continue;
+      const missing: string[] = [];
+      for (const [key, fieldType] of Object.entries(ti.schema.entries)) {
+        if (fieldType.kind !== 'OptionalType' && entry.data[key] == null) missing.push(key);
+      }
+      if (missing.length > 0) {
+        errors.push({
+          index: i,
+          path: '',
+          message: `Entry[${i}] type "${entry.type}" is missing required fields: ${missing.join(', ')}. Available fields: ${Object.keys(ti.schema.entries).join(', ')}`,
+        });
+        allocatedIds[i] = null;
+      }
+    }
+
+    // ── Phase 2.7: for patches, load existing keys to avoid re-embedding ────
+    const existingKeysPerEntry = new Map<number, Set<string>>();
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      if (!entry.id || !allocatedIds[i]) continue;
+      const rows = this.raw
+        .prepare(`SELECT key FROM map_entries WHERE map_id=?`)
+        .all(entry.id) as { key: string }[];
+      existingKeysPerEntry.set(i, new Set(rows.map(r => r.key)));
+    }
 
     // ── Phase 3: collect meaning texts for embedding ────────────────────────
     const meaningTexts = new Set<string>();
     for (let i = 0; i < entries.length; i++) {
       const ti = typeInfos[i];
-      if (!ti) continue;
-      this.collectEntryMeanings(entries[i]!.data, ti.schema, meaningTexts);
+      if (!ti || !allocatedIds[i]) continue;
+      const entry = entries[i]!;
+      const existingKeys = existingKeysPerEntry.get(i);
+
+      if (existingKeys) {
+        // Patch: only collect meanings for keys we'll actually add.
+        for (const [key, fieldType] of Object.entries(ti.schema.entries)) {
+          if (existingKeys.has(key)) continue;
+          if (entry.data[key] != null) this.collectEntryMeanings(entry.data[key], fieldType, meaningTexts);
+        }
+      } else {
+        this.collectEntryMeanings(entry.data, ti.schema, meaningTexts);
+      }
     }
+
+    var _diagLine2 = `[mcp] meaning texts ${JSON.stringify([...meaningTexts])}\n`;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine2); } catch { /* ignore */ }
+
     const embedMap = new Map<string, Float32Array>();
-    for (const text of meaningTexts) {
-      embedMap.set(text, await this.embed(text));
-    }
+    for (const text of meaningTexts) embedMap.set(text, await this.embed(text));
+
+    var _diagLine2 = `[mcp] embedMap ${JSON.stringify([...embedMap.entries()])}\n`;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine2); } catch { /* ignore */ }
 
     // ── Phase 4: write in a single transaction ──────────────────────────────
     const txn = this.raw.transaction(() => {
-      // First: insert all top-level map shells so $ref can point to them.
+      // Insert shells for new entries first so $ref can resolve them.
       for (let i = 0; i < entries.length; i++) {
         const ti = typeInfos[i];
         const id = allocatedIds[i];
-        if (!ti || !id) continue;
-        this.raw
-          .prepare(`INSERT INTO nodes(id, kind, type_id) VALUES(?,?,?)`)
-          .run(id, 'map', ti.typeId);
+        if (!ti || !id || entries[i]!.id) continue; // skip patches and failed entries
+        this.raw.prepare(`INSERT INTO nodes(id, kind, type_id) VALUES(?,?,?)`).run(id, 'map', ti.typeId);
       }
 
-      // Second: populate map_entries for each entry.
+      // Write field values for all entries.
       for (let i = 0; i < entries.length; i++) {
         const ti = typeInfos[i];
         const id = allocatedIds[i];
         if (!ti || !id) continue;
+
+        const entry = entries[i]!;
+        const existingKeys = existingKeysPerEntry.get(i) ?? null;
+
         for (const [key, fieldType] of Object.entries(ti.schema.entries)) {
-          const value = entries[i]!.data[key];
+          const value = entry.data[key];
           if (value == null) continue;
+
+          // Patch mode: skip keys that already exist on the node.
+          if (existingKeys) {
+            if (existingKeys.has(key)) {
+              skippedKeys[i]!.push(key);
+              continue;
+            }
+          }
+
           let valueId: string;
           try {
             valueId = this.buildEntryNode(value, fieldType, allocatedIds, embedMap, `[${i}].${key}`);
@@ -526,15 +662,16 @@ export class Db implements QueryDb {
             errors.push({ index: i, path: key, message: (err as Error).message });
             continue;
           }
-          this.raw
-            .prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`)
-            .run(id, key, valueId);
+          this.raw.prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`).run(id, key, valueId);
         }
       }
     });
     txn();
 
-    return { ids: allocatedIds, errors };
+    var _diagLine3 = `[mcp] insert many - done\n`;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine3); } catch { /* ignore */ }
+
+    return { ids: allocatedIds, errors, skippedKeys };
   }
 
   /**
@@ -618,7 +755,7 @@ export class Db implements QueryDb {
         throw new Error(`${path}: expected string for MeaningType, got ${typeof value}`);
       const id = uuidv4();
       this.raw.prepare(`INSERT INTO nodes(id, kind, meaning_text) VALUES(?,?,?)`).run(id, 'meaning', value);
-      const vec = embedMap.get(value) ?? new Float32Array(128);
+      const vec = embedMap.get(value) ?? new Float32Array(this.dims);
       this.raw.prepare(`INSERT INTO meaning_vecs(node_id, embedding) VALUES(?,?)`).run(id, vec);
       return id;
     }
@@ -656,13 +793,17 @@ export class Db implements QueryDb {
 
   // ── Map annotation ─────────────────────────────────────────────────────────
   //
-  // Patches absent fields on an existing map node without recreating it.
-  // Existing keys are left untouched (skipped). Unknown keys are rejected.
+  // Thin wrapper around insertEntries for patching an existing map node.
+  // The node's type is looked up automatically; unknown fields are rejected.
 
   async annotateMapNode(
     id: string,
     fields: Record<string, unknown>,
   ): Promise<{ patched: string[]; skipped: string[]; errors: Array<{ key: string; message: string }> }> {
+    var _diagLine = `[mcp] annotate map node ${id} ${JSON.stringify(fields)}\n`;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
+
+    // Look up the named type for this node so insertEntries can validate fields.
     const row = this.raw
       .prepare(`SELECT kind, type_id FROM nodes WHERE id=?`)
       .get(id) as { kind: string; type_id: string | null } | undefined;
@@ -670,48 +811,22 @@ export class Db implements QueryDb {
     if (row.kind !== 'map') throw new Error(`Node ${id} is not a map (got ${row.kind})`);
     if (!row.type_id) throw new Error(`Map node ${id} has no type_id`);
 
-    const schema = this.loadTypeShallow(row.type_id);
-    if (schema.kind !== 'MapType') throw new Error(`Node ${id} type is not MapType`);
+    const namedType = this.raw
+      .prepare(`SELECT name FROM named_types WHERE type_id=?`)
+      .get(row.type_id) as { name: string } | undefined;
+    const typeName = namedType?.name ?? row.type_id;
 
-    const existingRows = this.raw
-      .prepare(`SELECT key FROM map_entries WHERE map_id=?`)
-      .all(id) as { key: string }[];
-    const existingKeys = new Set(existingRows.map(r => r.key));
+    const result = await this.insertEntries([{ type: typeName, data: fields, id }]);
 
-    const toInsert: Array<{ key: string; value: unknown; fieldType: Type }> = [];
-    const skipped: string[] = [];
-    const errors: Array<{ key: string; message: string }> = [];
+    // Convert to the legacy { patched, skipped, errors } shape.
+    const fieldErrors = result.errors
+      .filter(e => e.path !== '')
+      .map(e => ({ key: e.path, message: e.message }));
+    const patched = Object.keys(fields).filter(
+      k => !result.skippedKeys[0]!.includes(k) && !fieldErrors.some(e => e.key === k),
+    );
 
-    for (const [key, value] of Object.entries(fields)) {
-      if (existingKeys.has(key)) { skipped.push(key); continue; }
-      const fieldType = schema.entries[key];
-      if (!fieldType) { errors.push({ key, message: `Field "${key}" not in schema` }); continue; }
-      toInsert.push({ key, value, fieldType });
-    }
-
-    // Pre-embed meanings
-    const meaningTexts = new Set<string>();
-    for (const { value, fieldType } of toInsert) {
-      this.collectEntryMeanings(value, fieldType, meaningTexts);
-    }
-    const embedMap = new Map<string, Float32Array>();
-    for (const text of meaningTexts) embedMap.set(text, await this.embed(text));
-
-    const patched: string[] = [];
-    const txn = this.raw.transaction(() => {
-      for (const { key, value, fieldType } of toInsert) {
-        try {
-          const valueId = this.buildEntryNode(value, fieldType, [], embedMap, key);
-          this.raw.prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`).run(id, key, valueId);
-          patched.push(key);
-        } catch (err) {
-          errors.push({ key, message: (err as Error).message });
-        }
-      }
-    });
-    txn();
-
-    return { patched, skipped, errors };
+    return { patched, skipped: result.skippedKeys[0]!, errors: fieldErrors };
   }
 
   // ── Node loading ───────────────────────────────────────────────────────────
@@ -736,7 +851,7 @@ export class Db implements QueryDb {
       const vecRow = this.raw
         .prepare(`SELECT embedding FROM meaning_vecs WHERE node_id=?`)
         .get(id) as { embedding: Buffer } | undefined;
-      const vec = vecRow ? new Float32Array(vecRow.embedding.buffer) : new Float32Array(128);
+      const vec = vecRow ? new Float32Array(vecRow.embedding.buffer) : new Float32Array(this.dims);
       return { kind: 'atom', atom: { kind: 'meaning', value: { text: row.meaningText!, vec } } };
     }
 
@@ -794,7 +909,7 @@ export class Db implements QueryDb {
       const vecRow = this.raw
         .prepare(`SELECT embedding FROM meaning_vecs WHERE node_id=?`)
         .get(id) as { embedding: Buffer } | undefined;
-      const vec = vecRow ? new Float32Array(vecRow.embedding.buffer) : new Float32Array(128);
+      const vec = vecRow ? new Float32Array(vecRow.embedding.buffer) : new Float32Array(this.dims);
       return { kind: 'atom', atom: { kind: 'meaning', value: { text: row.meaningText!, vec } } };
     }
 
@@ -833,6 +948,11 @@ export class Db implements QueryDb {
   }
 
   // ── QueryDb interface ──────────────────────────────────────────────────────
+
+  queryById(id: string): string[] {
+    const row = this.raw.prepare(`SELECT id FROM nodes WHERE id=?`).get(id) as { id: string } | undefined;
+    return row ? [row.id] : [];
+  }
 
   querySymbolExact(value: string): string[] {
     const rows = this.raw

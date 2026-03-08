@@ -27,7 +27,10 @@ export function loadAuth(): AuthConfig {
   if (!existsSync(AUTH_PATH)) return {};
   try {
     const raw = readFileSync(AUTH_PATH, 'utf-8');
-    return (parse(raw) as AuthConfig) ?? {};
+    const parsed = (parse(raw) as Record<string, unknown>) ?? {};
+    // Support both flat { authType, apiKey, ... } and nested { auth: { authType, ... } }
+    const config = (parsed['auth'] as AuthConfig | undefined) ?? (parsed as AuthConfig);
+    return config ?? {};
   } catch {
     return {};
   }

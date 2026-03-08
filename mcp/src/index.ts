@@ -14,8 +14,22 @@ import { registerInsertEntriesTool } from './tools/insertEntries.js';
 import { registerAnnotateNodeTool } from './tools/annotateNode.js';
 
 const config = loadConfig();
-const embed = createEmbedFn(config.embed);
-const db = new Db({ path: config.db.path, embed });
+import { appendFileSync } from 'node:fs';
+const _diagLine = `[mcp] embed provider=${config.embed.provider} apiKey=${config.embed.apiKey} dbPath=${config.db.path} pid=${process.pid}\n`;
+try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
+const _rawEmbed = createEmbedFn(config.embed);
+const embed: typeof _rawEmbed = async (text) => {
+  try {
+    const vec = await _rawEmbed(text);
+    const nonzero = vec.filter(v => v !== 0).length;
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', `embed(${JSON.stringify(text.slice(0,40))}) → nonzero=${nonzero}\n`); } catch { /* ignore */ }
+    return vec;
+  } catch (err) {
+    try { appendFileSync('/tmp/retrival-mcp-diag.log', `embed(${JSON.stringify(text.slice(0,40))}) THREW: ${(err as Error).message}\n`); } catch { /* ignore */ }
+    throw err;
+  }
+};
+const db = new Db({ path: config.db.path, embed, dimensions: config.embed.dimensions });
 
 const server = new McpServer({ name: 'retrival-mcp', version: '0.1.0' });
 
@@ -26,10 +40,10 @@ if (config.tools.raw_query) registerRawQueryTool(server, db);
 if (config.tools.skills) registerSkillsTools(server, db);
 if (config.tools.load_node) registerLoadNodeTool(server, db);
 if (config.tools.insert) {
-  registerInsertTool(server, db);
+  // registerInsertTool(server, db);
   registerInsertEntriesTool(server, db);
 }
-registerAnnotateNodeTool(server, db);
+// registerAnnotateNodeTool(server, db);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

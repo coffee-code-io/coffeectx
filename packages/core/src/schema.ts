@@ -97,10 +97,15 @@ CREATE INDEX IF NOT EXISTS idx_type_children_type ON type_children(type_id);
 CREATE INDEX IF NOT EXISTS idx_type_map_type      ON type_map_entries(type_id);
 `;
 
-/** Virtual table for 128-dim meaning embeddings (sqlite-vec). */
-export const VEC_TABLE_DDL = `
+/** Generate the DDL for the sqlite-vec virtual table with the given embedding dimension. */
+export function makeVecTableDDL(dims: number): string {
+  return `
 CREATE VIRTUAL TABLE IF NOT EXISTS meaning_vecs USING vec0(
   node_id TEXT PRIMARY KEY,
-  embedding float[128]
+  embedding float[${dims}]
 );
 `;
+}
+
+/** @deprecated Use makeVecTableDDL(dims) instead. */
+export const VEC_TABLE_DDL = makeVecTableDDL(1536);

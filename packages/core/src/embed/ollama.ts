@@ -3,15 +3,18 @@ import type { EmbedFn } from '../types.js';
 export interface OllamaEmbedConfig {
   baseUrl?: string;
   model?: string;
+  /** Target embedding dimension. Defaults to 1536. */
+  dimensions?: number;
 }
 
 /**
  * Create an EmbedFn backed by a local Ollama instance.
- * Always returns a 128-dim Float32Array (truncated or padded).
+ * Returns a Float32Array of `dimensions` length (default 1536), truncated or padded as needed.
  */
 export function createOllamaEmbed(cfg: OllamaEmbedConfig): EmbedFn {
   const base = cfg.baseUrl ?? 'http://localhost:11434';
   const model = cfg.model ?? 'nomic-embed-text';
+  const dims = cfg.dimensions ?? 1536;
 
   return async (text: string): Promise<Float32Array> => {
     const res = await fetch(`${base}/api/embed`, {
@@ -24,10 +27,10 @@ export function createOllamaEmbed(cfg: OllamaEmbedConfig): EmbedFn {
     const json = (await res.json()) as { embeddings: number[][] };
     const raw = json.embeddings[0]!;
 
-    if (raw.length === 128) return new Float32Array(raw);
+    if (raw.length === dims) return new Float32Array(raw);
 
-    const vec = new Float32Array(128);
-    for (let i = 0; i < Math.min(raw.length, 128); i++) vec[i] = raw[i]!;
+    const vec = new Float32Array(dims);
+    for (let i = 0; i < Math.min(raw.length, dims); i++) vec[i] = raw[i]!;
     return vec;
   };
 }

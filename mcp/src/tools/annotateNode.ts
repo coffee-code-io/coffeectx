@@ -5,32 +5,56 @@ import type { Db } from '@retrival-mcp/core';
 export function registerAnnotateNodeTool(server: McpServer, db: Db): void {
   server.tool(
     'annotate_node',
-    `Patch absent fields on an existing map node without recreating it.
+    `Patch absent fields on an existing map node.
 
-Useful for enriching previously-indexed nodes (LSP symbols, log events) with
-optional metadata: semantic comments, cross-references, tags, etc.
+Accepts a single entry in the same format as \`insert_entries\`:
+  - \`$type\` (required) — named type of the node (must match the node's actual type)
+  - \`$id\`   (required) — UUID of the existing node to patch
+  - other keys — field values to add (string for Symbol/Meaning, string[] for List)
 
-Only fields that are NOT already set on the node are written. Existing values
-are never overwritten. Unknown field names (not in the node's schema) are
-rejected with an error entry.
+Only fields NOT already present on the node are written. Existing values are never overwritten.
+Unknown field names (not in the node's schema) are rejected.
+Embeddings for Meaning fields are computed automatically.
 
-Field values follow the same rules as insert_entries:
-  - Symbol fields:   plain string
-  - Meaning fields:  plain string (embedding is computed automatically)
-  - List fields:     array of strings (items are inserted as symbol nodes)
+Returns \`{ patched, skipped, errors }\` listing which keys were added, already present, or invalid.
 
-Returns { patched, skipped, errors } listing which keys were added, already
-present, or invalid.`,
+Examples:
+  Add a missing rationale to an existing Decision node:
+    { "$type": "Decision", "$id": "a3f2c1...", "rationale": "Chosen for simplicity and zero-config deployment" }
+
+  Annotate a FileOperation event with inferred intent:
+    { "$type": "FileOperation", "$id": "b9e0...", "intent": "Refactoring database layer" }`,
     {
-      id: z.string().describe('ID of the map node to annotate'),
-      fields: z
-        .record(z.union([z.string(), z.array(z.string())]))
-        .describe('Field values to patch in (string for scalar, string[] for list)'),
+      entry: z
+        .record(z.unknown())
+        .describe('Entry with required "$type" and "$id", plus fields to add'),
     },
-    async ({ id, fields }) => {
+    async ({ entry }) => {
+      const $type = entry['$type'];
+      const $id = entry['$id'];
+
+      if (typeof $type !== 'string' || $type === '') {
+        return {
+          content: [{ type: 'text', text: 'Error: entry missing required "$type" field' }],
+          isError: true,
+        };
+      }
+      if (typeof $id !== 'string' || $id === '') {
+        return {
+          content: [{ type: 'text', text: 'Error: annotate_node requires "$id" (the UUID of the node to patch)' }],
+          isError: true,
+        };
+      }
+
+      const data: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(entry)) {
+        if (k === '$type' || k === '$id') continue;
+        data[k] = v;
+      }
+
       let result;
       try {
-        result = await db.annotateMapNode(id, fields);
+        result = await db.annotateMapNode($id, data);
       } catch (err) {
         return {
           content: [{ type: 'text', text: `Error: ${(err as Error).message}` }],

@@ -1,7 +1,7 @@
 /**
  * Grammar:
  *   symbol  = string
- *   meaning = string ',' vec128
+ *   meaning = string ',' vec
  *   atom    = symbol | meaning
  *   node    = atom | list | map ':' type
  *   map     = 'Map' | map symbol ':' node ';'
@@ -15,7 +15,7 @@ export type Sym = string;
 
 export interface Meaning {
   text: string;
-  vec: Float32Array; // exactly 128 dimensions
+  vec: Float32Array; // dimension determined by the DB's embed config
 }
 
 // Atom
@@ -94,12 +94,20 @@ export type DeepNode =
 export interface InsertEntry {
   type: string;
   data: Record<string, unknown>;
+  /**
+   * If provided, patch this existing map node instead of creating a new one.
+   * Only fields absent on the node are added; existing keys are skipped.
+   * Required-field validation is relaxed — partial data is accepted.
+   */
+  id?: string;
 }
 
 export interface InsertResult {
-  /** IDs of successfully inserted top-level nodes, in input order. Null where type validation failed. */
+  /** IDs of top-level nodes in input order. For new entries: the new ID (null on failure). For patches: the existing node ID. */
   ids: (string | null)[];
   errors: Array<{ index: number; path: string; message: string }>;
+  /** Per-entry lists of keys skipped because they already existed (only meaningful for patch entries). */
+  skippedKeys: string[][];
 }
 
 export interface SearchResult {

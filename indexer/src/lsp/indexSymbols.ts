@@ -118,6 +118,7 @@ function symbolEntry(rec: SymbolRecord, relPath: string): InsertEntry {
         line: String(rec.line + 1),   // LSP is 0-based
         column: String(rec.column + 1),
       },
+      agentEvents: [], // Will be filled later.
     },
   };
 }

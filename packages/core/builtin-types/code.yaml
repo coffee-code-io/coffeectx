@@ -206,8 +206,11 @@ skills:
         LspModule and LspNamespace are the file-level roots — everything else appears beneath them.
         LspTypeParameter is owned by whichever class or function declares the generic.
     prompt: |
-      When given access to a Language Server Protocol server, extract document symbols from each
-      source file and create one node per symbol, using the most specific type:
+      You are provided with agent logs and you have raw_query tool to access symbols parsed from Lsp. Your job is to enrich LSP symbols. You don't 
+      have to process each log, consider only the logs that might relate to symbols.
+      Use annotate_node tool to add these annotations. Use raw_query tool to find more information about
+      knowledge database.
+      Here are types you can enrich.
 
       LspModule      — SymbolKind 2: a source file that is a named module
       LspNamespace   — SymbolKind 3: a named namespace or package declaration
@@ -224,14 +227,6 @@ skills:
       LspEnumMember  — SymbolKind 22: a member inside an enum
       LspTypeParameter — SymbolKind 26: a generic type parameter
 
-      For every node set:
-        name: symbol.name (short identifier)
-        containerName: symbol.containerName or parent symbol name (empty string if top-level)
-        detail: symbol.detail from the server (signature, type annotation)
-        location: Location pointing to symbol.selectionRange.start (file + line + column)
-
-      Use workspace/symbol to get a flat list, or textDocument/documentSymbol for the full
-      hierarchical tree (preferred — richer containerName info).
     types:
       - LspModule
       - LspNamespace

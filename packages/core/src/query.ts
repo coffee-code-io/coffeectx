@@ -6,6 +6,7 @@
  *   Clause      = 'Symbol'  STRING                              -- exact symbol match
  *               | 'Regex'   STRING                              -- regex on symbol value
  *               | 'Meaning' STRING                              -- semantic search
+ *               | 'Id'      STRING                              -- exact node ID lookup
  *               | TypeQuery                                     -- filter by named type
  *               | MapQuery                                      -- filter map nodes by fields
  *               | ListQuery                                     -- filter list nodes by items
@@ -35,6 +36,7 @@ export type QueryClause =
   | { kind: 'Symbol'; value: string }
   | { kind: 'Regex'; pattern: string }
   | { kind: 'Meaning'; text: string }
+  | { kind: 'IdQuery'; id: string }
   | { kind: 'TypeQuery'; types: string[] } // OR across IsType values
   | { kind: 'MapQuery'; fields: MapField[] } // AND across fields
   | { kind: 'ListQuery'; item: Query }
@@ -47,7 +49,7 @@ export interface MapField {
 
 // ── Lexer ─────────────────────────────────────────────────────────────────────
 
-const KEYWORDS = new Set(['Symbol', 'Regex', 'Meaning', 'IsType', 'Field', 'HasItem']);
+const KEYWORDS = new Set(['Symbol', 'Regex', 'Meaning', 'Id', 'IsType', 'Field', 'HasItem']);
 
 type Token =
   | { type: 'KW'; value: string }
@@ -169,6 +171,10 @@ class Parser {
         this.consume();
         return { kind: 'Meaning', text: this.expectStr() };
       }
+      case 'Id': {
+        this.consume();
+        return { kind: 'IdQuery', id: this.expectStr() };
+      }
       case 'IsType':
         return this.parseTypeQuery();
       case 'Field':
@@ -246,6 +252,7 @@ export interface QueryDb {
   querySymbolExact(value: string): string[];
   querySymbolRegex(pattern: string): string[];
   queryMeaning(text: string, limit: number): Promise<string[]>;
+  queryById(id: string): string[];
   queryByNamedType(names: string[]): string[];
   queryMapsByField(key: string, valueIds: string[]): string[];
   queryListsByItem(itemIds: string[]): string[];
@@ -285,6 +292,9 @@ async function executeClause(clause: QueryClause, db: QueryDb): Promise<string[]
 
     case 'Meaning':
       return db.queryMeaning(clause.text, 50);
+
+    case 'IdQuery':
+      return db.queryById(clause.id);
 
     case 'TypeQuery':
       return db.queryByNamedType(clause.types);

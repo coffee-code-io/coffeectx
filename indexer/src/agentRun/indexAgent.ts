@@ -1,7 +1,7 @@
 import type { Db } from '@retrival-mcp/core';
 import { formatDeepNode } from '@retrival-mcp/core';
 import { loadAuth, authToQueryOptions } from './auth.js';
-import { runSkill } from './runSkill.js';
+import { runSkill, formatTypeSchema } from './runSkill.js';
 
 export interface IndexAgentOptions {
   db: Db;
@@ -84,6 +84,18 @@ export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentRes
     result.skills++;
     let batchIndex = 0;
 
+    // Helper to load and format type schemas for this skill
+    const getTypeSchema = (typeName: string): string | null => {
+      try {
+        const namedType = db.loadNamedType(typeName);
+        if (!namedType) return null;
+        const typeObj = db.loadType(namedType.typeId);
+        return formatTypeSchema(typeObj);
+      } catch {
+        return null;
+      }
+    };
+
     for (let i = 0; i < events.length; i += batchStep) {
       batchIndex++;
       const suffixEnd = Math.min(i + batchStep, events.length);
@@ -101,6 +113,8 @@ export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentRes
           dbPath,
           queryOptions: qOpts,
           pathToQwenExecutable,
+          skillTypeNames: skill.types,
+          getTypeSchema,
         });
         result.batches++;
       } catch (err) {

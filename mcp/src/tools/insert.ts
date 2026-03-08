@@ -1,69 +1,64 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { Db, Node } from '@retrival-mcp/core';
-
-// Annotated as ZodType<unknown> to break the circular lazy reference;
-// type field is opaque JSON validated at the DB layer. Cast to Node at usage.
-const NodeSchema: z.ZodType<unknown> = z.lazy(() =>
-  z.discriminatedUnion('kind', [
-    z.object({
-      kind: z.literal('atom'),
-      atom: z.discriminatedUnion('kind', [
-        z.object({ kind: z.literal('symbol'), value: z.string() }),
-        z.object({
-          kind: z.literal('meaning'),
-          value: z.object({
-            text: z.string(),
-            // vec is optional — will be computed by the embed function if absent
-            vec: z
-              .array(z.number())
-              .length(128)
-              .optional()
-              .transform(v => (v ? new Float32Array(v) : new Float32Array(128))),
-          }),
-        }),
-      ]),
-    }),
-    z.object({ kind: z.literal('list'), items: z.array(NodeSchema) }),
-    z.object({
-      kind: z.literal('map'),
-      entries: z.record(NodeSchema),
-      type: z.any(), // Type is complex; validated loosely here
-    }),
-  ]),
-);
+import type { Db } from '@retrival-mcp/core';
 
 export function registerInsertTool(server: McpServer, db: Db): void {
   server.tool(
     'insert',
-    'Insert a node into the knowledge graph. The node must conform to the Node schema (atom | list | map). Meanings without a vec will have their embedding computed automatically.',
+    `Insert a single typed node into the knowledge graph.
+
+Accepts one entry in the same flat JSON format as \`insert_entries\`:
+  - \`$type\` (required) — named MapType to validate against
+  - other keys — field values (string for Symbol/Meaning, string[] for List)
+
+All required (non-optional) fields must be present.
+Embeddings for Meaning fields are computed automatically.
+Returns \`{ id }\` on success or an error with the list of missing/invalid fields.
+
+For batch inserts or patching existing nodes, use \`insert_entries\`.
+
+Examples:
+  { "$type": "Decision", "title": "Use SQLite", "rationale": "Simple, embedded" }
+  { "$type": "FunctionDef", "name": "parseQuery", "file": "src/query.ts", "tags": ["parser", "core"] }`,
     {
-      node: z
-        .string()
-        .describe('JSON-encoded Node value. See schema: { kind: "atom"|"list"|"map", ... }'),
+      entry: z
+        .record(z.unknown())
+        .describe('Entry object with required "$type" and field values'),
     },
-    async ({ node: nodeJson }) => {
-      let raw: unknown;
+    async ({ entry }) => {
+      const $type = entry['$type'];
+      if (typeof $type !== 'string' || $type === '') {
+        return {
+          content: [{ type: 'text', text: 'Error: entry missing required "$type" field' }],
+          isError: true,
+        };
+      }
+
+      const data: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(entry)) {
+        if (k === '$type') continue;
+        data[k] = v;
+      }
+
+      let result;
       try {
-        raw = JSON.parse(nodeJson);
-      } catch {
+        result = await db.insertEntries([{ type: $type, data }]);
+      } catch (err) {
         return {
-          content: [{ type: 'text', text: 'Invalid JSON' }],
+          content: [{ type: 'text', text: `Error: ${(err as Error).message}` }],
           isError: true,
         };
       }
 
-      const parsed = NodeSchema.safeParse(raw);
-      if (!parsed.success) {
+      if (result.errors.length > 0) {
         return {
-          content: [{ type: 'text', text: `Validation error: ${parsed.error.message}` }],
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           isError: true,
         };
       }
 
-      const id = await db.insertNode(parsed.data as Node);
       return {
-        content: [{ type: 'text', text: JSON.stringify({ id }) }],
+        content: [{ type: 'text', text: JSON.stringify({ id: result.ids[0] }) }],
       };
     },
   );

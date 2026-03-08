@@ -23,8 +23,8 @@ import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { writeFileSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
-import { Db, syncAllTypes, syncTypesFromDir, parseQuery, executeQuery, formatDeepNode } from '@retrival-mcp/core';
-import type { EmbedFn, InsertEntry } from '@retrival-mcp/core';
+import { Db, syncAllTypes, syncTypesFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadEmbedConfig } from '@retrival-mcp/core';
+import type { InsertEntry } from '@retrival-mcp/core';
 import { initProject, promptProjectName } from './init.js';
 import {
   loadProjects,
@@ -55,7 +55,8 @@ function positional(index: number): string | undefined {
   return args[index]?.startsWith('--') ? undefined : args[index];
 }
 
-const embedStub: EmbedFn = async () => new Float32Array(128);
+const embedCfg = loadEmbedConfig();
+const embedFn = createEmbedFn(embedCfg);
 
 // ── init — does not need an existing DB ───────────────────────────────────────
 
@@ -144,7 +145,7 @@ try {
   process.exit(1);
 }
 
-const db = new Db({ path: project.db, embed: embedStub });
+const db = new Db({ path: project.db, embed: embedFn, dimensions: embedCfg.dimensions });
 
 switch (command) {
   case 'sync-types': {
@@ -205,26 +206,43 @@ switch (command) {
     const filePath = positional(1);
     if (!filePath) {
       console.error('Usage: retrival-index insert-entries <file.json> [--project <name>]');
-      console.error('  file.json must be an array of { type, data } objects.');
+      console.error('  file.json must be an array of flat entry objects with "$type" required.');
+      console.error('  Example: [{ "$type": "Decision", "title": "Use SQLite", "rationale": "..." }]');
       db.close();
       process.exit(1);
     }
-    let entries: InsertEntry[];
+    let rawEntries: Array<Record<string, unknown>>;
     try {
       const raw = readFileSync(resolve(filePath), 'utf-8');
-      entries = JSON.parse(raw) as InsertEntry[];
-      if (!Array.isArray(entries)) throw new Error('Top-level value must be an array');
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) throw new Error('Top-level value must be an array');
+      rawEntries = parsed as Array<Record<string, unknown>>;
     } catch (err) {
       console.error(`Failed to read entries: ${(err as Error).message}`);
       db.close();
       process.exit(1);
     }
+    // Convert flat $type/$id format to InsertEntry
+    const entries: InsertEntry[] = [];
+    for (let i = 0; i < rawEntries.length; i++) {
+      const raw = rawEntries[i]!;
+      const $type = raw['$type'];
+      if (typeof $type !== 'string' || $type === '') {
+        console.error(`Entry[${i}] missing required "$type" field`);
+        db.close();
+        process.exit(1);
+      }
+      const $id = raw['$id'];
+      const data: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        if (k === '$type' || k === '$id') continue;
+        data[k] = v;
+      }
+      entries.push({ type: $type, id: typeof $id === 'string' ? $id : undefined, data });
+    }
     const result = await db.insertEntries(entries);
     console.log(JSON.stringify(result, null, 2));
-    if (result.errors.length > 0) {
-      db.close();
-      process.exit(1);
-    }
+    if (result.errors.length > 0) process.exit(1);
     break;
   }
 

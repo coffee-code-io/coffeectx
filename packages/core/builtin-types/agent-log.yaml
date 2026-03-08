@@ -81,7 +81,11 @@ skills:
       List fields (relatedFiles, relatedSymbols, touchedSymbols) use empty list [] when
       no items are found. comment is left absent unless explicitly annotated.
     prompt: |
-      Parse `.claude` JSONL session logs and insert the following node types:
+      You are provided with Claude code logs, and your job is to enrich them. You don't 
+      have to process each log, consider only the logs that might contain major changes, 
+      API/interface change, contract agreements and decisions and add meta-information to them.
+      Use annotate_node tool to add these annotations. Use raw_query tool to find more information about
+      knowledge database
 
       AgentSession — one per unique sessionId found in the file:
         sessionId:   the UUID string

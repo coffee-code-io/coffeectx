@@ -8,6 +8,7 @@ Query       = Clause (',' Clause)*                          AND semantics
 Clause      = 'Symbol'  STRING                              exact symbol match
             | 'Regex'   STRING                              regex on symbol (case-insensitive)
             | 'Meaning' STRING                              semantic similarity search
+            | 'Id'      STRING                              exact node ID lookup
             | TypeQuery                                     filter by named type
             | MapQuery                                      filter map nodes by field contents
             | ListQuery                                     filter list nodes by items

@@ -85,6 +85,10 @@ async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult
     const batch = entries.slice(i, i + BATCH);
     const insertResult = await db.insertEntries(batch);
     result.inserted += insertResult.ids.filter(id => id !== null).length;
+    for (const err of insertResult.errors) {
+        const errorMsg = `Batch ${i / BATCH + 1}, entry ${err.index}${err.path ? `.${err.path}` : ''}: ${err.message}`;
+        console.error(`[indexLogs] ${errorMsg}`);
+    }
   }
 }
 
@@ -98,6 +102,8 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           uuid: event.uuid,
           timestamp: event.timestamp,
           text: event.text ?? '',
+          relatedFiles: [],
+          relatedSymbols: [],
         },
       };
 
@@ -112,6 +118,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           operation: event.kind === 'file_create' ? 'create' : 'edit',
           path: event.path ?? '',
           preview: event.preview ?? '',
+          touchedSymbols: [],
         },
       };
 
@@ -135,6 +142,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           uuid: event.uuid,
           timestamp: event.timestamp,
           question: event.question ?? '',
+          relatedSymbols: []
         },
       };
 

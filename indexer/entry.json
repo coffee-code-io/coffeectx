@@ -1,0 +1,20 @@
+[
+    {
+        "$type": "LspFunction",
+        "name": "huiVGovne",
+        "containerName": "govno",
+        "location": {
+            "$type": "Location",
+            "file": {
+                "$type": "File",
+                "path": "src/lsp/huiVGovne.ts",
+                "name": "huiVGovne.ts"
+            },
+            "line": "131",
+            "column": "23"
+        },
+        "detail": "Function for submerging hui into govno",
+        "comment": "The function implements the procedure of submerging entity named 'hui' into substance denoted 'govno'",
+        "agentEvents": []
+    }
+]

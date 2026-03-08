@@ -13,6 +13,8 @@ export interface Config {
     model?: string;
     baseUrl?: string;
     apiKey?: string;
+    /** Target embedding dimension. Defaults to 1536. */
+    dimensions?: number;
   };
   tools: {
     search: boolean;    // semantic similarity search
@@ -55,7 +57,9 @@ interface AuthYaml {
 function loadAuthYaml(): AuthYaml {
   if (!existsSync(AUTH_PATH)) return {};
   try {
-    return (parse(readFileSync(AUTH_PATH, 'utf-8')) as AuthYaml) ?? {};
+    const parsed = (parse(readFileSync(AUTH_PATH, 'utf-8')) as Record<string, unknown>) ?? {};
+    // Support both flat { apiKey, ... } and nested { auth: { apiKey, ... } }
+    return ((parsed['auth'] as AuthYaml | undefined) ?? (parsed as AuthYaml)) ?? {};
   } catch {
     return {};
   }
