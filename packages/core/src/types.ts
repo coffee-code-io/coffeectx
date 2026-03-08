@@ -42,7 +42,13 @@ export type Type =
    * Stored as a single lightweight row in the types table; resolved at load time.
    * Enables graph (not tree) storage and supports circular type definitions.
    */
-  | { kind: 'RefType'; name: string };
+  | { kind: 'RefType'; name: string }
+  /**
+   * Marks a map field as optional — the field may be absent when inserting or
+   * loading. Wraps any inner type. YAML shorthand: append `?` to the type name
+   * (e.g. `Meaning?`, `Symbol?`, `Location?`) or use `kind: Optional`.
+   */
+  | { kind: 'OptionalType'; inner: Type };
 
 // DB-level representations (with stable IDs for storage)
 export interface StoredNode {
@@ -58,7 +64,7 @@ export interface StoredNode {
 
 export interface StoredType {
   id: string;
-  kind: 'SymbolType' | 'MeaningType' | 'ListType' | 'OrType' | 'AndType' | 'MapType' | 'RefType';
+  kind: 'SymbolType' | 'MeaningType' | 'ListType' | 'OrType' | 'AndType' | 'MapType' | 'RefType' | 'OptionalType';
   refName?: string; // set when kind='RefType'
 }
 

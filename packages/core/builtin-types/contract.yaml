@@ -1,113 +1,113 @@
-# types:
-#   TextContract:
-#     description: A natural-language agreement between components or teams — parties, obligations.
-#     kind: Map
-#     fields:
-#       description: Meaning
-#       parties:
-#         kind: List
-#         item: Symbol          # component, service, or team names
-#       obligations:
-#         kind: List
-#         item: Meaning         # each obligation as a semantic statement
+types:
+  TextContract:
+    description: A natural-language agreement between components or teams — parties, obligations.
+    kind: Map
+    fields:
+      description: Meaning
+      parties:
+        kind: List
+        item: Symbol          # component, service, or team names
+      obligations:
+        kind: List
+        item: Meaning         # each obligation as a semantic statement
 
-#   ArgValidator:
-#     description: A validation rule on a function argument — the invariant and expected error.
-#     kind: Map
-#     fields:
-#       function: Symbol        # fully qualified function name
-#       argument: Symbol        # argument name
-#       rule: Meaning           # invariant or constraint (e.g. "must be a positive integer")
-#       errorMessage: Meaning
+  ArgValidator:
+    description: A validation rule on a function argument — the invariant and expected error.
+    kind: Map
+    fields:
+      function: Symbol        # fully qualified function name
+      argument: Symbol        # argument name
+      rule: Meaning           # invariant or constraint (e.g. "must be a positive integer")
+      errorMessage: Meaning
 
-#   SyncValidator:
-#     description: A concurrency invariant on a shared resource — the condition and how it is enforced.
-#     kind: Map
-#     fields:
-#       resource: Symbol        # shared resource name
-#       invariant: Meaning      # must-hold condition (e.g. "exactly one writer at a time")
-#       enforcement: Symbol     # "lock" | "atomic" | "queue" | "actor" | "none"
+  SyncValidator:
+    description: A concurrency invariant on a shared resource — the condition and how it is enforced.
+    kind: Map
+    fields:
+      resource: Symbol        # shared resource name
+      invariant: Meaning      # must-hold condition (e.g. "exactly one writer at a time")
+      enforcement: Symbol     # "lock" | "atomic" | "queue" | "actor" | "none"
 
-#   EntityMapping:
-#     description: A cardinality relationship between two domain entities.
-#     kind: Map
-#     fields:
-#       from: Symbol            # source entity name
-#       to: Symbol              # target entity name
-#       cardinality: Symbol     # "1-1" | "1-many" | "many-1" | "many-many"
-#       description: Meaning
+  EntityMapping:
+    description: A cardinality relationship between two domain entities.
+    kind: Map
+    fields:
+      from: Symbol            # source entity name
+      to: Symbol              # target entity name
+      cardinality: Symbol     # "1-1" | "1-many" | "many-1" | "many-many"
+      description: Meaning
 
-#   Unique:
-#     description: A uniqueness constraint — the set of fields that together must be unique for an entity.
-#     kind: Map
-#     fields:
-#       entity: Symbol
-#       fields:
-#         kind: List
-#         item: Symbol          # field names forming the unique key
-#       description: Meaning
+  Unique:
+    description: A uniqueness constraint — the set of fields that together must be unique for an entity.
+    kind: Map
+    fields:
+      entity: Symbol
+      fields:
+        kind: List
+        item: Symbol          # field names forming the unique key
+      description: Meaning
 
-#   Relation:
-#     description: A named directed relation between two entities — type, cardinality, and semantics.
-#     kind: Map
-#     fields:
-#       from: Symbol
-#       to: Symbol
-#       name: Symbol            # relation label, e.g. "owns" | "depends-on" | "subscribes-to"
-#       type: Symbol            # "association" | "aggregation" | "composition" | "dependency"
-#       cardinality: Symbol     # "1-1" | "1-many" | "many-many"
-#       description: Meaning
+  Relation:
+    description: A named directed relation between two entities — type, cardinality, and semantics.
+    kind: Map
+    fields:
+      from: Symbol
+      to: Symbol
+      name: Symbol            # relation label, e.g. "owns" | "depends-on" | "subscribes-to"
+      type: Symbol            # "association" | "aggregation" | "composition" | "dependency"
+      cardinality: Symbol     # "1-1" | "1-many" | "many-many"
+      description: Meaning
 
-# skills:
-#   ContractIndexing:
-#     description: Capture data contracts, validators, entity relationships, and concurrency invariants.
-#     prompt: |
-#       When analyzing interface definitions, data models, validation logic, or design documents, extract:
+skills:
+  ContractIndexing:
+    description: Capture data contracts, validators, entity relationships, and concurrency invariants.
+    prompt: |
+      When analyzing interface definitions, data models, validation logic, or design documents, extract:
 
-#       TextContract — for informal agreements between components or teams:
-#         description: what the contract says, semantically
-#         parties: list of component/service/team names involved
-#         obligations: list of obligations, one per party or shared responsibility
+      TextContract — for informal agreements between components or teams:
+        description: what the contract says, semantically
+        parties: list of component/service/team names involved
+        obligations: list of obligations, one per party or shared responsibility
 
-#       ArgValidator — for each validation rule on a function parameter:
-#         function: fully qualified function name (e.g. "UserService.createUser")
-#         argument: parameter name (e.g. "email")
-#         rule: the invariant in natural language (e.g. "must be a valid RFC 5322 email address")
-#         errorMessage: the error message returned when violated
+      ArgValidator — for each validation rule on a function parameter:
+        function: fully qualified function name (e.g. "UserService.createUser")
+        argument: parameter name (e.g. "email")
+        rule: the invariant in natural language (e.g. "must be a valid RFC 5322 email address")
+        errorMessage: the error message returned when violated
 
-#       SyncValidator — for concurrency or ordering invariants on shared state:
-#         resource: the resource being protected (e.g. "OrderQueue", "db connection pool")
-#         invariant: the must-hold condition (e.g. "no two writers may hold the lock simultaneously")
-#         enforcement: the mechanism used ("lock" | "atomic" | "queue" | "actor" | "none")
+      SyncValidator — for concurrency or ordering invariants on shared state:
+        resource: the resource being protected (e.g. "OrderQueue", "db connection pool")
+        invariant: the must-hold condition (e.g. "no two writers may hold the lock simultaneously")
+        enforcement: the mechanism used ("lock" | "atomic" | "queue" | "actor" | "none")
 
-#       EntityMapping — for every significant entity relationship:
-#         from: source entity name
-#         to: target entity name
-#         cardinality: "1-1" | "1-many" | "many-1" | "many-many"
-#         description: semantic meaning of the relationship
+      EntityMapping — for every significant entity relationship:
+        from: source entity name
+        to: target entity name
+        cardinality: "1-1" | "1-many" | "many-1" | "many-many"
+        description: semantic meaning of the relationship
 
-#       Unique — for uniqueness constraints (database indexes, business rules):
-#         entity: entity/table name
-#         fields: list of field names forming the unique key
-#         description: why this uniqueness constraint exists
+      Unique — for uniqueness constraints (database indexes, business rules):
+        entity: entity/table name
+        fields: list of field names forming the unique key
+        description: why this uniqueness constraint exists
 
-#       Relation — for named directed relationships in the domain model:
-#         from / to: entity names
-#         name: a verb or phrase labeling the relation (e.g. "owns", "subscribes-to")
-#         type: "association" | "aggregation" | "composition" | "dependency"
-#         cardinality: "1-1" | "1-many" | "many-many"
-#         description: semantic explanation
+      Relation — for named directed relationships in the domain model:
+        from / to: entity names
+        name: a verb or phrase labeling the relation (e.g. "owns", "subscribes-to")
+        type: "association" | "aggregation" | "composition" | "dependency"
+        cardinality: "1-1" | "1-many" | "many-many"
+        description: semantic explanation
 
-#       Look for contracts in:
-#         - Interface and type definitions
-#         - Database schema files (SQL, Prisma, Drizzle)
-#         - Validation libraries (Zod, Joi, Yup)
-#         - JSDoc @param constraints
-#         - README sections titled "Contract", "API", or "Data model"
-#     types:
-#       - TextContract
-#       - ArgValidator
-#       - SyncValidator
-#       - EntityMapping
-#       - Unique
-#       - Relation
+      Look for contracts in:
+        - Interface and type definitions
+        - Database schema files (SQL, Prisma, Drizzle)
+        - Validation libraries (Zod, Joi, Yup)
+        - JSDoc @param constraints
+        - README sections titled "Contract", "API", or "Data model"
+    types:
+      - TextContract
+      - ArgValidator
+      - SyncValidator
+      - EntityMapping
+      - Unique
+      - Relation

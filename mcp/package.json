@@ -15,8 +15,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "@retrival-mcp/core": "*",
     "@qwen-code/sdk": "file:../qwen-code/packages/sdk-typescript",
+    "@retrival-mcp/core": "*",
     "yaml": "^2.7.0",
     "zod": "^3.25.0"
   },

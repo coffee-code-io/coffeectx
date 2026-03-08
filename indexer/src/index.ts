@@ -13,7 +13,8 @@
  *   query <expression>                      Parse and execute a retrival query expression
  *   insert-entries <file.json>              Insert typed entries from a JSON file
  *   load-node <id> [--depth <n>]            Load a node by ID with recursive expansion
- *   index [<path>] [--lsp-command <cmd>]   Index repo with LSP (uses stored repoPath if omitted)
+ *   index-lsp [<path>] [--lsp-command <cmd>]  Index repo with LSP (uses stored repoPath if omitted)
+ *   index-logs [<path>...]                    Index Claude Code JSONL logs (uses stored logsPath if omitted)
  *
  * All DB commands accept --project <name> to target a specific project.
  */
@@ -28,6 +29,7 @@ import { initProject, promptProjectName } from './init.js';
 import {
   loadProjects,
   setActiveProject,
+  setProjectLogs,
   getActiveProject,
   PROJECTS_PATH,
   DB_DIR,
@@ -35,6 +37,8 @@ import {
 import { indexWithLsp } from './lsp/indexSymbols.js';
 import { resolveLspCommand, LSP_CONFIG_PATH, DEFAULT_LSP_COMMAND } from './lsp/config.js';
 import { generateTypesDot } from './typesDot.js';
+import { indexLogs } from './agentLog/indexLogs.js';
+import { indexAgent } from './agentRun/indexAgent.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -58,6 +62,7 @@ const embedStub: EmbedFn = async () => new Float32Array(128);
 if (command === 'init') {
   const nameArg = flag('--name') ?? positional(1);
   const repoArg = flag('--repo');
+  const logsArg = flag('--logs-path');
   const name = nameArg ?? (await promptProjectName());
 
   if (!name) {
@@ -66,13 +71,15 @@ if (command === 'init') {
   }
 
   const repoPath = repoArg ? resolve(repoArg) : undefined;
-  const result = initProject(name, repoPath);
+  const logsPath = logsArg ? resolve(logsArg) : undefined;
+  const result = initProject(name, repoPath, logsPath);
 
   console.log(result.alreadyExisted
     ? `Re-initialized existing project "${result.name}"`
     : `Initialized project "${result.name}"`);
   console.log(`  DB:    ${result.dbPath}`);
   if (result.repoPath) console.log(`  Repo:  ${result.repoPath}`);
+  if (result.logsPath) console.log(`  Logs:  ${result.logsPath}`);
   console.log(`  Types: synced ${result.sync.types.synced.length} types, ${result.sync.skills.synced.length} skills`);
 
   if (result.sync.types.errors.length > 0 || result.sync.skills.errors.length > 0) {
@@ -295,7 +302,7 @@ switch (command) {
     break;
   }
 
-  case 'index': {
+  case 'index-lsp': {
     // Resolve repo path: explicit arg > --repo flag > stored project repoPath
     const pathArg = positional(1);
     const repoFlag = flag('--repo');
@@ -342,14 +349,88 @@ switch (command) {
     break;
   }
 
+  case 'index-agent': {
+    const skillArg = flag('--skill');
+    const batchStepArg = flag('--batch-step');
+    const suffixLenArg = flag('--suffix-len');
+    const qwenPathArg = flag('--qwen-path');
+
+    const batchStep = batchStepArg !== undefined ? parseInt(batchStepArg, 10) : undefined;
+    const suffixLen = suffixLenArg !== undefined ? parseInt(suffixLenArg, 10) : undefined;
+
+    if ((batchStep !== undefined && isNaN(batchStep)) || (suffixLen !== undefined && isNaN(suffixLen))) {
+      console.error('--batch-step and --suffix-len must be integers');
+      db.close();
+      process.exit(1);
+    }
+
+    console.log(`Running agent indexer for project "${project.name}"...`);
+    if (skillArg) console.log(`  Skill filter: ${skillArg}`);
+
+    const result = await indexAgent({
+      db,
+      dbPath: project.db,
+      skillFilter: skillArg,
+      batchStep,
+      suffixLen,
+      pathToQwenExecutable: qwenPathArg ? resolve(qwenPathArg) : undefined,
+    });
+
+    console.log(`  Skills: ${result.skills}`);
+    console.log(`  Batches: ${result.batches}`);
+    if (result.errors.length > 0) {
+      console.error(`  Errors: ${result.errors.length}`);
+      for (const { skill, batch, error } of result.errors) {
+        console.error(`    ${skill} batch ${batch}: ${error}`);
+      }
+      db.close();
+      process.exit(1);
+    }
+    break;
+  }
+
+  case 'index-logs': {
+    // --logs-path <path> saves the path and uses it; otherwise fall back to stored value
+    const logsPathFlag = flag('--logs-path');
+    if (logsPathFlag) {
+      const resolved = resolve(logsPathFlag);
+      setProjectLogs(project.name, resolved);
+      project.logsPath = resolved;
+    }
+    // Resolve log paths: explicit positional args > stored project logsPath
+    const explicitPaths = args.slice(1).filter(a => !a.startsWith('--')).map(p => resolve(p));
+    const logPaths = explicitPaths.length > 0 ? explicitPaths
+      : project.logsPath ? [project.logsPath]
+      : [];
+    if (logPaths.length === 0) {
+      console.error('Usage: retrival-index index-logs [<path>...] [--logs-path <path>] [--project <name>]');
+      console.error('  Paths may be .jsonl files or directories. --logs-path saves the path for future runs.');
+      db.close();
+      process.exit(1);
+    }
+    console.log(`Indexing agent logs for project "${project.name}"...`);
+    const result = await indexLogs(db, logPaths);
+    console.log(`  Files:    ${result.files}`);
+    console.log(`  Sessions: ${result.sessions}`);
+    console.log(`  Events:   ${result.events}`);
+    console.log(`  Inserted: ${result.inserted} nodes`);
+    if (result.errors.length > 0) {
+      console.error(`  Errors: ${result.errors.length}`);
+      for (const { file, error } of result.errors) console.error(`    ${file}: ${error}`);
+      db.close();
+      process.exit(1);
+    }
+    break;
+  }
+
   default: {
     const active = projects.active ? `"${projects.active}"` : 'none';
     console.log(`retrival-index — knowledge graph indexer
 
 Commands:
-  init [--name <name>] [--repo <path>]  Create a new project DB
-  use <name>                             Switch the active project
-  list-projects                          List all registered projects
+  init [--name <name>] [--repo <path>] [--logs-path <path>]  Create a new project DB
+  use <name>                                                   Switch the active project
+  list-projects                                                List all registered projects
 
   sync-types [--user-dir <path>]         Sync built-in YAML types into active DB
   load-types <dir>                       Load user-defined YAML types from a directory
@@ -357,12 +438,15 @@ Commands:
   types-dot [--out <path>]               Generate Graphviz DOT for named type graph
   query <expression>                     Parse and execute a retrival query expression
   insert-entries <file.json>             Insert typed entries from a JSON file
-  load-node <id> [--depth <n>]          Load a node by ID, expanding to depth (default 10)
-  index [<path>] [--lsp-command <cmd>]  Index repo with LSP (default: typescript-language-server --stdio)
+  load-node <id> [--depth <n>]           Load a node by ID, expanding to depth (default 10)
+  index-lsp [<path>] [--lsp-command <cmd>]                        Index repo with LSP (default: typescript-language-server --stdio)
+  index-logs [<path>...]                                           Index Claude Code JSONL logs (uses stored logsPath if none given)
+  index-agent [--skill <name>] [--batch-step <n>] [--suffix-len <n>] [--qwen-path <path>]  Run agent to extract entities from indexed log events
 
 Options:
   --project <name>       Target a specific project
-  --repo <path>          Override/set the repo path for the index command
+  --repo <path>          Override/set the repo path for index-lsp
+  --logs-path <path>     Set default logs path for index-logs (stored in projects.yaml)
   --lsp-command <cmd>    Override LSP command (otherwise uses ${LSP_CONFIG_PATH} or ${DEFAULT_LSP_COMMAND})
 
 Active project: ${active}

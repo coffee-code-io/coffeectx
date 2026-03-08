@@ -20,6 +20,7 @@ export const PROJECTS_PATH = join(COFFEECODE_DIR, 'projects.yaml');
 export interface ProjectEntry {
   db: string;
   repoPath?: string;
+  logsPath?: string;   // path to .claude/projects/<id>/ or a specific .jsonl file
   created: string;
 }
 
@@ -38,15 +39,24 @@ function saveProjects(data: ProjectsFile): void {
   writeFileSync(PROJECTS_PATH, stringifyYaml(data), 'utf-8');
 }
 
-export function registerProject(name: string, dbPath: string, repoPath?: string): void {
+export function registerProject(name: string, dbPath: string, repoPath?: string, logsPath?: string): void {
   const data = loadProjects();
   const existing = data.projects[name];
   data.projects[name] = {
     db: dbPath,
     repoPath: repoPath ?? existing?.repoPath,
+    logsPath: logsPath ?? existing?.logsPath,
     created: existing?.created ?? new Date().toISOString(),
   };
   if (!data.active) data.active = name;
+  saveProjects(data);
+}
+
+export function setProjectLogs(name: string, logsPath: string): void {
+  const data = loadProjects();
+  const entry = data.projects[name];
+  if (!entry) throw new Error(`Project "${name}" not found`);
+  entry.logsPath = logsPath;
   saveProjects(data);
 }
 

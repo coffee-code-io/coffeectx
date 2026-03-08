@@ -60,13 +60,38 @@ export class Db implements QueryDb {
         CREATE TABLE types_new (
           id          TEXT PRIMARY KEY,
           kind        TEXT NOT NULL CHECK(kind IN (
-            'SymbolType','MeaningType','ListType','OrType','AndType','MapType','RefType'
+            'SymbolType','MeaningType','ListType','OrType','AndType','MapType','RefType','OptionalType'
           )),
           ref_name    TEXT,
           content_key TEXT
         );
         INSERT INTO types_new(id, kind, ref_name)
           SELECT id, kind, ref_name FROM types;
+        DROP TABLE types;
+        ALTER TABLE types_new RENAME TO types;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_types_content_key
+          ON types(content_key) WHERE content_key IS NOT NULL;
+      `);
+      this.raw.pragma('foreign_keys = ON');
+    }
+
+    // Recreate types table if the CHECK constraint doesn't include 'OptionalType'.
+    try {
+      this.raw.exec(`INSERT INTO types(id, kind) VALUES('__opttype_probe__', 'OptionalType')`);
+      this.raw.exec(`DELETE FROM types WHERE id='__opttype_probe__'`);
+    } catch {
+      this.raw.pragma('foreign_keys = OFF');
+      this.raw.exec(`
+        CREATE TABLE types_new (
+          id          TEXT PRIMARY KEY,
+          kind        TEXT NOT NULL CHECK(kind IN (
+            'SymbolType','MeaningType','ListType','OrType','AndType','MapType','RefType','OptionalType'
+          )),
+          ref_name    TEXT,
+          content_key TEXT
+        );
+        INSERT INTO types_new(id, kind, ref_name, content_key)
+          SELECT id, kind, ref_name, content_key FROM types;
         DROP TABLE types;
         ALTER TABLE types_new RENAME TO types;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_types_content_key
@@ -137,6 +162,16 @@ export class Db implements QueryDb {
         this.raw
           .prepare(`INSERT INTO type_children(type_id, position, child_type_id) VALUES(?,1,?)`)
           .run(id, rightId);
+      });
+    }
+
+    if (type.kind === 'OptionalType') {
+      const innerId = this.upsertType(type.inner, cache);
+      const contentKey = `OPT:{${innerId}}`;
+      return this.upsertStructural('OptionalType', contentKey, cache, type, id => {
+        this.raw
+          .prepare(`INSERT INTO type_children(type_id, position, child_type_id) VALUES(?,0,?)`)
+          .run(id, innerId);
       });
     }
 
@@ -269,6 +304,16 @@ export class Db implements QueryDb {
         .prepare(`SELECT child_type_id FROM type_children WHERE type_id=? AND position=0`)
         .get(id) as { child_type_id: string };
       (result as Extract<Type, { kind: 'ListType' }>).itemType = this.loadTypeImpl(child.child_type_id, cache, resolveRefs);
+      return result;
+    }
+
+    if (kind === 'OptionalType') {
+      const result: Type = { kind: 'OptionalType', inner: { kind: 'SymbolType' } };
+      cache.set(id, result);
+      const child = this.raw
+        .prepare(`SELECT child_type_id FROM type_children WHERE type_id=? AND position=0`)
+        .get(id) as { child_type_id: string };
+      (result as Extract<Type, { kind: 'OptionalType' }>).inner = this.loadTypeImpl(child.child_type_id, cache, resolveRefs);
       return result;
     }
 
@@ -506,6 +551,10 @@ export class Db implements QueryDb {
       this.collectEntryMeanings(value, this.loadTypeShallow(named.typeId), out);
       return;
     }
+    if (type.kind === 'OptionalType') {
+      this.collectEntryMeanings(value, type.inner, out);
+      return;
+    }
     if (type.kind === 'MeaningType' && typeof value === 'string') {
       out.add(value);
       return;
@@ -542,6 +591,11 @@ export class Db implements QueryDb {
       if (id == null)
         throw new Error(`$ref[${idx}]: entry does not exist or failed type validation`);
       return id;
+    }
+
+    // OptionalType — unwrap and delegate; empty/null already filtered at call sites
+    if (type.kind === 'OptionalType') {
+      return this.buildEntryNode(value, type.inner, allocatedIds, embedMap, path);
     }
 
     // RefType — inline map/list whose schema is defined under a named type
@@ -598,6 +652,66 @@ export class Db implements QueryDb {
     }
 
     throw new Error(`${path}: unsupported type kind "${type.kind}"`);
+  }
+
+  // ── Map annotation ─────────────────────────────────────────────────────────
+  //
+  // Patches absent fields on an existing map node without recreating it.
+  // Existing keys are left untouched (skipped). Unknown keys are rejected.
+
+  async annotateMapNode(
+    id: string,
+    fields: Record<string, unknown>,
+  ): Promise<{ patched: string[]; skipped: string[]; errors: Array<{ key: string; message: string }> }> {
+    const row = this.raw
+      .prepare(`SELECT kind, type_id FROM nodes WHERE id=?`)
+      .get(id) as { kind: string; type_id: string | null } | undefined;
+    if (!row) throw new Error(`Node not found: ${id}`);
+    if (row.kind !== 'map') throw new Error(`Node ${id} is not a map (got ${row.kind})`);
+    if (!row.type_id) throw new Error(`Map node ${id} has no type_id`);
+
+    const schema = this.loadTypeShallow(row.type_id);
+    if (schema.kind !== 'MapType') throw new Error(`Node ${id} type is not MapType`);
+
+    const existingRows = this.raw
+      .prepare(`SELECT key FROM map_entries WHERE map_id=?`)
+      .all(id) as { key: string }[];
+    const existingKeys = new Set(existingRows.map(r => r.key));
+
+    const toInsert: Array<{ key: string; value: unknown; fieldType: Type }> = [];
+    const skipped: string[] = [];
+    const errors: Array<{ key: string; message: string }> = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (existingKeys.has(key)) { skipped.push(key); continue; }
+      const fieldType = schema.entries[key];
+      if (!fieldType) { errors.push({ key, message: `Field "${key}" not in schema` }); continue; }
+      toInsert.push({ key, value, fieldType });
+    }
+
+    // Pre-embed meanings
+    const meaningTexts = new Set<string>();
+    for (const { value, fieldType } of toInsert) {
+      this.collectEntryMeanings(value, fieldType, meaningTexts);
+    }
+    const embedMap = new Map<string, Float32Array>();
+    for (const text of meaningTexts) embedMap.set(text, await this.embed(text));
+
+    const patched: string[] = [];
+    const txn = this.raw.transaction(() => {
+      for (const { key, value, fieldType } of toInsert) {
+        try {
+          const valueId = this.buildEntryNode(value, fieldType, [], embedMap, key);
+          this.raw.prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`).run(id, key, valueId);
+          patched.push(key);
+        } catch (err) {
+          errors.push({ key, message: (err as Error).message });
+        }
+      }
+    });
+    txn();
+
+    return { patched, skipped, errors };
   }
 
   // ── Node loading ───────────────────────────────────────────────────────────

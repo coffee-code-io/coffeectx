@@ -7,6 +7,7 @@ types:
       name: Symbol        # basename, e.g. "db.ts"
       folder: Folder
       description: Meaning
+      comment: Meaning?   # optional analyst annotation
 
   Folder:
     description: A directory on disk — its path, name, and purpose description.
@@ -15,6 +16,7 @@ types:
       path: Symbol
       name: Symbol
       description: Meaning
+      comment: Meaning?   # optional analyst annotation
 
   Location:
     description: A precise point in source code — file, line, and optional column.
@@ -23,6 +25,7 @@ types:
       file: File
       line: Symbol        # "42"
       column: Symbol      # "7" — optional by convention
+      comment: Meaning?   # optional analyst annotation
 
   Span:
     description: A contiguous source range defined by a start and end Location.

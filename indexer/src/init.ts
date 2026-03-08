@@ -8,6 +8,7 @@ export interface InitResult {
   name: string;
   dbPath: string;
   repoPath?: string;
+  logsPath?: string;
   alreadyExisted: boolean;
   sync: SyncResult;
 }
@@ -20,7 +21,7 @@ export interface InitResult {
  * - Registers the project in ~/.coffeecode/projects.yaml
  * - Sets it as active if no other project is active yet
  */
-export function initProject(name: string, repoPath?: string): InitResult {
+export function initProject(name: string, repoPath?: string, logsPath?: string): InitResult {
   const safe = sanitizeName(name);
   if (!safe) throw new Error(`"${name}" is not a valid project name`);
 
@@ -34,9 +35,9 @@ export function initProject(name: string, repoPath?: string): InitResult {
   const sync = syncAllTypes(db);
   db.close();
 
-  registerProject(safe, dbPath, repoPath);
+  registerProject(safe, dbPath, repoPath, logsPath);
 
-  return { name: safe, dbPath, repoPath, alreadyExisted, sync };
+  return { name: safe, dbPath, repoPath, logsPath, alreadyExisted, sync };
 }
 
 /** Prompt for a project name interactively (TTY only). */

@@ -1,96 +1,96 @@
-# types:
-#   Endpoint:
-#     description: An HTTP route handler — URL pattern, HTTP method, handler function, and description.
-#     kind: Map
-#     fields:
-#       path: Symbol            # URL pattern, e.g. "/users/:id"
-#       method: Symbol          # "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS"
-#       description: Meaning
-#       handler: Symbol         # function or controller name
-#       tags:
-#         kind: List
-#         item: Symbol          # grouping tags (e.g. "auth", "admin")
+types:
+  Endpoint:
+    description: An HTTP route handler — URL pattern, HTTP method, handler function, and description.
+    kind: Map
+    fields:
+      path: Symbol            # URL pattern, e.g. "/users/:id"
+      method: Symbol          # "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS"
+      description: Meaning
+      handler: Symbol         # function or controller name
+      tags:
+        kind: List
+        item: Symbol          # grouping tags (e.g. "auth", "admin")
 
-#   QueryParam:
-#     description: A URL query parameter — name, type, whether it is required, and its purpose.
-#     kind: Map
-#     fields:
-#       name: Symbol
-#       type: Symbol            # declared type string, e.g. "string" | "number"
-#       required: Symbol        # "true" | "false"
-#       description: Meaning
+  QueryParam:
+    description: A URL query parameter — name, type, whether it is required, and its purpose.
+    kind: Map
+    fields:
+      name: Symbol
+      type: Symbol            # declared type string, e.g. "string" | "number"
+      required: Symbol        # "true" | "false"
+      description: Meaning
 
-#   SchemaField:
-#     description: A single field in a request or response body schema — name, type, and requiredness.
-#     kind: Map
-#     fields:
-#       name: Symbol
-#       type: Symbol            # e.g. "string" | "number" | "User[]"
-#       required: Symbol        # "true" | "false"
-#       description: Meaning
+  SchemaField:
+    description: A single field in a request or response body schema — name, type, and requiredness.
+    kind: Map
+    fields:
+      name: Symbol
+      type: Symbol            # e.g. "string" | "number" | "User[]"
+      required: Symbol        # "true" | "false"
+      description: Meaning
 
-#   ApiSchema:
-#     description: A named data schema or DTO — the contract shape shared between client and server.
-#     kind: Map
-#     fields:
-#       name: Symbol
-#       description: Meaning
-#       fields:
-#         kind: List
-#         item: SchemaField
+  ApiSchema:
+    description: A named data schema or DTO — the contract shape shared between client and server.
+    kind: Map
+    fields:
+      name: Symbol
+      description: Meaning
+      fields:
+        kind: List
+        item: SchemaField
 
-#   ServiceMethod:
-#     description: A typed service method — gRPC procedure, tRPC route, or GraphQL resolver.
-#     kind: Map
-#     fields:
-#       service: Symbol         # service or router name
-#       name: Symbol            # method name
-#       description: Meaning
-#       input: ApiSchema
-#       output: ApiSchema
+  ServiceMethod:
+    description: A typed service method — gRPC procedure, tRPC route, or GraphQL resolver.
+    kind: Map
+    fields:
+      service: Symbol         # service or router name
+      name: Symbol            # method name
+      description: Meaning
+      input: ApiSchema
+      output: ApiSchema
 
-# skills:
-#   ApiSurfaceIndexing:
-#     description: Extract the public API surface — endpoints, schemas, and service methods.
-#     prompt: |
-#       When analyzing a web service, REST API, gRPC service, or GraphQL schema, extract:
+skills:
+  ApiSurfaceIndexing:
+    description: Extract the public API surface — endpoints, schemas, and service methods.
+    prompt: |
+      When analyzing a web service, REST API, gRPC service, or GraphQL schema, extract:
 
-#       Endpoint — one per HTTP route or WebSocket handler:
-#         path: the URL pattern (e.g. "/api/v1/users/:id")
-#         method: HTTP verb in uppercase ("GET", "POST", "PUT", "DELETE", "PATCH", "WS")
-#         description: what this endpoint does semantically
-#         handler: name of the handler function or controller method
-#         tags: grouping tags such as feature area, auth level, etc.
+      Endpoint — one per HTTP route or WebSocket handler:
+        path: the URL pattern (e.g. "/api/v1/users/:id")
+        method: HTTP verb in uppercase ("GET", "POST", "PUT", "DELETE", "PATCH", "WS")
+        description: what this endpoint does semantically
+        handler: name of the handler function or controller method
+        tags: grouping tags such as feature area, auth level, etc.
 
-#       QueryParam — for each documented query parameter on an endpoint:
-#         name: parameter name
-#         type: TypeScript or OpenAPI type string
-#         required: "true" or "false"
-#         description: what the parameter controls
+      QueryParam — for each documented query parameter on an endpoint:
+        name: parameter name
+        type: TypeScript or OpenAPI type string
+        required: "true" or "false"
+        description: what the parameter controls
 
-#       SchemaField — building blocks for ApiSchema:
-#         name: field name
-#         type: TypeScript type string
-#         required: "true" or "false"
-#         description: field semantics
+      SchemaField — building blocks for ApiSchema:
+        name: field name
+        type: TypeScript type string
+        required: "true" or "false"
+        description: field semantics
 
-#       ApiSchema — one per named DTO, request body, or response shape:
-#         name: schema/type name
-#         description: what data this shape represents
-#         fields: list of SchemaField nodes
+      ApiSchema — one per named DTO, request body, or response shape:
+        name: schema/type name
+        description: what data this shape represents
+        fields: list of SchemaField nodes
 
-#       ServiceMethod — for gRPC, tRPC, or GraphQL:
-#         service: service or router name
-#         name: method/procedure name
-#         description: method semantics
-#         input: the input ApiSchema node
-#         output: the output ApiSchema node
+      ServiceMethod — for gRPC, tRPC, or GraphQL:
+        service: service or router name
+        name: method/procedure name
+        description: method semantics
+        input: the input ApiSchema node
+        output: the output ApiSchema node
 
-#       Derive descriptions from JSDoc, OpenAPI spec, or code comments.
-#       If no explicit description exists, infer from the handler/method name and body.
-#     types:
-#       - Endpoint
-#       - QueryParam
-#       - SchemaField
-#       - ApiSchema
-#       - ServiceMethod
+      Derive descriptions from JSDoc, OpenAPI spec, or code comments.
+      If no explicit description exists, infer from the handler/method name and body.
+    types:
+      - Endpoint
+      - QueryParam
+      - SchemaField
+      - ApiSchema
+      - ServiceMethod

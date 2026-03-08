@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS map_entries (
 CREATE TABLE IF NOT EXISTS types (
   id          TEXT PRIMARY KEY,
   kind        TEXT NOT NULL CHECK(kind IN (
-    'SymbolType', 'MeaningType', 'ListType', 'OrType', 'AndType', 'MapType', 'RefType'
+    'SymbolType', 'MeaningType', 'ListType', 'OrType', 'AndType', 'MapType', 'RefType', 'OptionalType'
   )),
   ref_name    TEXT,
   content_key TEXT

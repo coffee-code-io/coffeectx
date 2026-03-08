@@ -40,11 +40,12 @@ import type { Db } from './db.js';
 
 /** The structural part of a type spec (no description here). */
 export type YamlTypeSpec =
-  | string // "Symbol" | "Meaning" | "TypeName" (ref)
+  | string // "Symbol" | "Meaning" | "TypeName" (ref); append "?" for Optional, e.g. "Meaning?"
   | { kind: 'Map'; fields: Record<string, YamlTypeSpec> }
   | { kind: 'List'; item: YamlTypeSpec }
   | { kind: 'Or'; types: YamlTypeSpec[] }
-  | { kind: 'And'; types: YamlTypeSpec[] };
+  | { kind: 'And'; types: YamlTypeSpec[] }
+  | { kind: 'Optional'; item: YamlTypeSpec };
 
 /** A named type entry — spec plus optional human-readable description. */
 export interface YamlNamedTypeEntry {
@@ -143,6 +144,11 @@ export function resolveYamlType(
   registry: Map<string, YamlTypeSpec>,
 ): Type {
   if (typeof spec === 'string') {
+    // "?" suffix — Optional wrapper shorthand: "Meaning?" | "Symbol?" | "TypeName?"
+    if (spec.endsWith('?')) {
+      const inner = resolveYamlType(spec.slice(0, -1) as YamlTypeSpec, registry);
+      return { kind: 'OptionalType', inner };
+    }
     if (spec === 'Symbol') return { kind: 'SymbolType' };
     if (spec === 'Meaning') return { kind: 'MeaningType' };
     if (!registry.has(spec)) throw new Error(`Unknown type reference: "${spec}"`);
@@ -178,6 +184,10 @@ export function resolveYamlType(
       result = { kind: 'AndType', left: result, right: resolveYamlType(spec.types[i]!, registry) };
     }
     return result;
+  }
+
+  if (spec.kind === 'Optional') {
+    return { kind: 'OptionalType', inner: resolveYamlType(spec.item, registry) };
   }
 
   throw new Error(`Unknown YAML type spec kind: ${JSON.stringify(spec)}`);
