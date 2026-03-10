@@ -5,7 +5,7 @@ import { SCHEMA_DDL, makeVecTableDDL } from './schema.js';
 import type { Node, Type, Atom, Sym, EmbedFn, SearchResult, StoredNode, DeepNode, InsertEntry, InsertResult } from './types.js';
 import type { QueryDb } from './query.js';
 
-import { appendFileSync } from 'node:fs';
+import { log } from './logger.js';
 
 export interface DbOptions {
   path: string;
@@ -363,9 +363,7 @@ export class Db implements QueryDb {
   // Pre-computes all embeddings before writing (better-sqlite3 is synchronous).
 
   async insertNode(node: Node): Promise<string> {
-        var _diagLine = `[mcp] insert node ${node}\n`;
-    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
-    
+
 
     // 1. Pre-compute all embeddings in the tree
     const embeds = new Map<string, Float32Array>(); // placeholder key → vec
@@ -381,18 +379,11 @@ export class Db implements QueryDb {
   }
 
   private async collectEmbeds(node: Node, out: Map<string, Float32Array>): Promise<void> {
-    var _diagLine = `[mcp] collectEmbeds ${node}\n`;
-    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
-    
-
-
     if (node.kind === 'atom' && node.atom.kind === 'meaning') {
       const { text, vec } = node.atom.value;
       // Use the provided vec if already the right size; otherwise embed
       const key = text;
       if (!out.has(key)) {
-        var _diagLine = `[mcp] db.embed call ${node}\n`;
-    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
         out.set(key, vec.length === this.dims ? vec : await this.embed(text));
       }
     } else if (node.kind === 'list') {
@@ -476,8 +467,7 @@ export class Db implements QueryDb {
   //   - Partial data is accepted — required-field check is relaxed.
 
   async insertEntries(entries: InsertEntry[]): Promise<InsertResult> {
-    var _diagLine = `[mcp] insert entries ${JSON.stringify(entries)}\n`;
-    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
+    log(`insertEntries: ${entries.length} entries`);
 
     const errors: InsertResult['errors'] = [];
     const skippedKeys: string[][] = entries.map(() => []);
@@ -615,14 +605,9 @@ export class Db implements QueryDb {
       }
     }
 
-    var _diagLine2 = `[mcp] meaning texts ${JSON.stringify([...meaningTexts])}\n`;
-    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine2); } catch { /* ignore */ }
-
+    log(`insertEntries: embedding ${meaningTexts.size} texts`);
     const embedMap = new Map<string, Float32Array>();
     for (const text of meaningTexts) embedMap.set(text, await this.embed(text));
-
-    var _diagLine2 = `[mcp] embedMap ${JSON.stringify([...embedMap.entries()])}\n`;
-    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine2); } catch { /* ignore */ }
 
     // ── Phase 4: write in a single transaction ──────────────────────────────
     const txn = this.raw.transaction(() => {
@@ -668,9 +653,7 @@ export class Db implements QueryDb {
     });
     txn();
 
-    var _diagLine3 = `[mcp] insert many - done\n`;
-    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine3); } catch { /* ignore */ }
-
+    log(`insertEntries: done, ${errors.length} errors`);
     return { ids: allocatedIds, errors, skippedKeys };
   }
 
@@ -789,44 +772,6 @@ export class Db implements QueryDb {
     }
 
     throw new Error(`${path}: unsupported type kind "${type.kind}"`);
-  }
-
-  // ── Map annotation ─────────────────────────────────────────────────────────
-  //
-  // Thin wrapper around insertEntries for patching an existing map node.
-  // The node's type is looked up automatically; unknown fields are rejected.
-
-  async annotateMapNode(
-    id: string,
-    fields: Record<string, unknown>,
-  ): Promise<{ patched: string[]; skipped: string[]; errors: Array<{ key: string; message: string }> }> {
-    var _diagLine = `[mcp] annotate map node ${id} ${JSON.stringify(fields)}\n`;
-    try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
-
-    // Look up the named type for this node so insertEntries can validate fields.
-    const row = this.raw
-      .prepare(`SELECT kind, type_id FROM nodes WHERE id=?`)
-      .get(id) as { kind: string; type_id: string | null } | undefined;
-    if (!row) throw new Error(`Node not found: ${id}`);
-    if (row.kind !== 'map') throw new Error(`Node ${id} is not a map (got ${row.kind})`);
-    if (!row.type_id) throw new Error(`Map node ${id} has no type_id`);
-
-    const namedType = this.raw
-      .prepare(`SELECT name FROM named_types WHERE type_id=?`)
-      .get(row.type_id) as { name: string } | undefined;
-    const typeName = namedType?.name ?? row.type_id;
-
-    const result = await this.insertEntries([{ type: typeName, data: fields, id }]);
-
-    // Convert to the legacy { patched, skipped, errors } shape.
-    const fieldErrors = result.errors
-      .filter(e => e.path !== '')
-      .map(e => ({ key: e.path, message: e.message }));
-    const patched = Object.keys(fields).filter(
-      k => !result.skippedKeys[0]!.includes(k) && !fieldErrors.some(e => e.key === k),
-    );
-
-    return { patched, skipped: result.skippedKeys[0]!, errors: fieldErrors };
   }
 
   // ── Node loading ───────────────────────────────────────────────────────────
@@ -1011,17 +956,40 @@ export class Db implements QueryDb {
     return rows.map(r => r.list_id);
   }
 
+  /**
+   * Find the nearest ancestor of nodeId that is a named-type map node.
+   * Returns { id, typeName } or null if none is found within 20 hops.
+   */
+  findNamedParent(nodeId: string): { id: string; typeName: string } | null {
+    const row = this.raw.prepare(`
+      WITH RECURSIVE container(id, depth) AS (
+        SELECT map_id AS id, 1 AS depth FROM map_entries WHERE value_id = ?
+        UNION ALL
+        SELECT list_id AS id, 1 AS depth FROM list_items WHERE item_id = ?
+        UNION ALL
+        SELECT me.map_id, c.depth + 1 FROM map_entries me JOIN container c ON me.value_id = c.id WHERE c.depth < 20
+        UNION ALL
+        SELECT li.list_id, c.depth + 1 FROM list_items li JOIN container c ON li.item_id = c.id WHERE c.depth < 20
+      )
+      SELECT c.id, nt.name AS typeName FROM container c
+      JOIN nodes n ON n.id = c.id
+      JOIN named_types nt ON nt.type_id = n.type_id
+      ORDER BY c.depth ASC LIMIT 1
+    `).get(nodeId, nodeId) as { id: string; typeName: string } | undefined;
+    return row ?? null;
+  }
+
   // ── Vector search (with full node loading) ─────────────────────────────────
 
-  async searchByText(query: string, limit = 10): Promise<SearchResult[]> {
+  async searchByText(query: string, limit = 10, offset = 0): Promise<SearchResult[]> {
     const vec = await this.embed(query);
     const rows = this.raw
       .prepare(
         `SELECT node_id, distance FROM meaning_vecs
          WHERE embedding MATCH ? AND k=? ORDER BY distance`,
       )
-      .all(vec, limit) as { node_id: string; distance: number }[];
-    return rows.map(r => ({
+      .all(vec, limit + offset) as { node_id: string; distance: number }[];
+    return rows.slice(offset).map(r => ({
       nodeId: r.node_id,
       node: this.loadNode(r.node_id),
       distance: r.distance,

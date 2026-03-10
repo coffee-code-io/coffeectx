@@ -40,6 +40,12 @@ export function registerRawQueryTool(server: McpServer, db: Db): void {
         .max(500)
         .default(50)
         .describe('Max nodes to return'),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe('Skip this many results (for pagination)'),
       depth: z
         .number()
         .int()
@@ -52,7 +58,7 @@ export function registerRawQueryTool(server: McpServer, db: Db): void {
         .default(false)
         .describe('Return raw DeepNode with full type definitions and vectors (default: compact form)'),
     },
-    async ({ query, limit, depth, verbose }) => {
+    async ({ query, limit, offset, depth, verbose }) => {
       let parsed;
       try {
         parsed = parseQuery(query);
@@ -68,7 +74,7 @@ export function registerRawQueryTool(server: McpServer, db: Db): void {
         };
       }
 
-      const ids = (await executeQuery(parsed, db)).slice(0, limit);
+      const ids = (await executeQuery(parsed, db)).slice(offset, offset + limit);
       const results = ids.map(id => {
         try {
           const node = db.loadNodeDeep(id, depth);

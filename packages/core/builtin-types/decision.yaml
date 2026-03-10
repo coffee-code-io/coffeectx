@@ -1,113 +1,83 @@
 types:
   Decision:
-    description: A general architectural or implementation decision — what was chosen, why, and what was rejected.
+    description: A choice that shaped the codebase — what was decided and why.
     kind: Map
     fields:
-      title: Symbol
-      rationale: Meaning      # why this choice was made
-      choice: Meaning         # what was decided
-      alternatives:
-        kind: List
-        item: Symbol          # options that were considered but rejected
-      date: Symbol            # ISO date string, e.g. "2026-03-07"
-      author: Symbol
+      title: Symbol           # short imperative title, e.g. "Use SQLite for storage"
+      rationale: Meaning      # why this was the right choice
 
-  LibraryDecision:
-    description: A preference for one library or approach over alternatives, with rationale.
+  Alternative:
+    description: An option that was considered but rejected in favour of something else.
     kind: Map
     fields:
-      preferred: Symbol       # chosen library or approach name
-      alternatives:
-        kind: List
-        item: Symbol          # rejected options
-      rationale: Meaning
-      context: Meaning        # scope where this applies, e.g. "HTTP clients in backend services"
-
-  CopyVsPublic:
-    description: A decision to copy code rather than expose an internal API or patch an external library.
-    kind: Map
-    fields:
-      component: Symbol       # the thing being copied (function/class/module name)
-      source: Symbol          # original package or file path
-      rationale: Meaning      # why copy was preferred
-      location: Symbol        # where the copy lives in this repo
-
-  TemporaryImpl:
-    description: A known temporary implementation that must be replaced — with a ticket and deadline.
-    kind: Map
-    fields:
-      description: Meaning
-      reason: Meaning         # why it is temporary
-      ticket: Symbol          # issue / PR reference, e.g. "GH-123"
-      deadline: Symbol        # ISO date or milestone name
+      option: Symbol          # name of the rejected option, e.g. "PostgreSQL"
+      reason: Meaning         # why it was not chosen
 
   Assumption:
-    description: An assumption about the environment, users, or external systems — with risk assessment.
+    description: A belief about the environment, users, or system that has not been verified.
     kind: Map
     fields:
-      description: Meaning
-      basis: Meaning          # evidence or reasoning behind the assumption
-      risk: Meaning           # consequence if the assumption turns out to be wrong
-      validated: Symbol       # "true" | "false" | "partial"
+      description: Meaning    # the assumption itself
+      risk: Meaning           # what breaks if the assumption is wrong
 
   ChangeEvent:
-    description: A recorded event that caused a significant change in architecture or behaviour.
+    description: A significant change to architecture, behavior, or dependencies that occurred at a point in time.
     kind: Map
     fields:
-      name: Symbol
-      description: Meaning
-      timestamp: Symbol       # ISO datetime
-      impact: Meaning         # what changed and which parts of the codebase are affected
-      author: Symbol
+      name: Symbol            # short event name, e.g. "Switched embed model to text-embedding-3-small"
+      description: Meaning    # what changed and why
 
 skills:
   ArchitecturalDecisionIndexing:
-    description: Capture architectural decisions, library preferences, technical debt, and assumptions.
+    description: Extract decisions, rejected alternatives, assumptions, and notable change events from agent logs.
     prompt: |
-      When reading architecture docs, ADRs, code comments, or PR descriptions, extract:
+      Read the agent log events below and extract coding decisions.
+      Cast a wide net — extract both local implementation choices AND broader design decisions.
+      Only extract entries you are confident about from the event data.
 
-      Decision — for any general choice that shaped the codebase:
-        title: short imperative title (e.g. "Use event sourcing for order state")
-        rationale: semantic explanation of WHY this was the best option
-        choice: semantic description of WHAT was decided
-        alternatives: list of option names that were considered and rejected
-        date: ISO date of the decision
-        author: person or team who made it
+      ── Decision ──────────────────────────────────────────────────────────────
+      Any deliberate choice made while writing or changing code.
+      This includes small local decisions, not just big architecture ones.
+      Extract when you see a function, module, or approach chosen for a reason.
+        title     — short imperative phrase describing what was decided
+        rationale — why this choice was made; be specific
 
-      LibraryDecision — when a specific library or framework was chosen over alternatives:
-        preferred: the chosen library name (e.g. "better-sqlite3")
-        alternatives: rejected alternatives (e.g. ["sql.js", "knex"])
-        rationale: why the chosen library wins (performance, API, maintenance, etc.)
-        context: where this applies (e.g. "all SQLite access in the backend")
+      Examples:
+        { "$type": "Decision", "title": "Rewrite annotateNode to call insertEntries internally", "rationale": "Eliminated duplicated validation and embedding logic by routing through the single insertEntries path" }
+        { "$type": "Decision", "title": "Use better-sqlite3 over sql.js", "rationale": "Synchronous API fits the use case; no WASM overhead; significantly faster for embedded use" }
+        { "$type": "Decision", "title": "Return verbose errors from insertEntries instead of throwing", "rationale": "Lets the caller report all failures at once rather than stopping on the first error" }
 
-      CopyVsPublic — when code was deliberately duplicated rather than exposed or patched:
-        component: what was copied (function/class/module)
-        source: original package or file
-        rationale: why copy was safer/simpler than the alternative
-        location: path to the copy in this repo
+      ── Alternative ───────────────────────────────────────────────────────────
+      An option that was considered and rejected in favour of something else.
+      Extract when you see something explicitly ruled out or compared unfavorably.
+        option  — name or short description of the rejected option
+        reason  — why it was not chosen
 
-      TemporaryImpl — for any known hack, stub, or placeholder:
-        description: what the temporary implementation does
-        reason: why it is temporary (e.g. "waiting for upstream fix")
-        ticket: linked issue or PR
-        deadline: when it should be replaced
+      Examples:
+        { "$type": "Alternative", "option": "Separate annotateNode tool", "reason": "Would duplicate validation and embed logic already in insertEntries" }
+        { "$type": "Alternative", "option": "Postgres", "reason": "Requires a server process; too heavy for an embedded CLI tool" }
 
-      Assumption — for beliefs about the environment or users:
-        description: the assumption itself
-        basis: why this was assumed (data, prior art, domain knowledge)
-        risk: what breaks if the assumption is wrong
-        validated: "true" if verified, "false" if untested, "partial" if partially validated
+      ── Assumption ────────────────────────────────────────────────────────────
+      A belief taken for granted but not verified — about environment, users, or code behavior.
+      Extract when you see "we assume", "assuming", or an implicit constraint that could break.
+        description — the assumption itself
+        risk        — what breaks if it is wrong
 
-      ChangeEvent — for significant migrations, refactors, or external events:
-        name: event name
-        description: what happened and why
-        timestamp: when
-        impact: which parts of the system were affected and how
-        author: who drove the change
+      Examples:
+        { "$type": "Assumption", "description": "embed dimension matches the vec table dimension in the existing DB", "risk": "sqlite-vec will reject inserts if dimensions differ" }
+        { "$type": "Assumption", "description": "Users run a single MCP server per project", "risk": "Multiple servers would write to the same DB without locking" }
+
+      ── ChangeEvent ───────────────────────────────────────────────────────────
+      A concrete change that was made to code, config, dependencies, or behavior.
+      Extract when you see a refactor, rename, migration, or any notable modification completed.
+        name        — short label for the change
+        description — what changed and why
+
+      Examples:
+        { "$type": "ChangeEvent", "name": "Unified annotateNode into insertEntries", "description": "annotateNode now delegates to insertEntries instead of having its own DB write path, removing duplicate validation" }
+        { "$type": "ChangeEvent", "name": "Made embedding dimension configurable", "description": "Replaced hardcoded 128-dim vectors with a runtime dims parameter; default changed to 1536 to match text-embedding-3-small native size" }
     types:
       - Decision
-      - LibraryDecision
-      - CopyVsPublic
-      - TemporaryImpl
+      - Alternative
       - Assumption
       - ChangeEvent

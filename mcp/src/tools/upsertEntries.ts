@@ -31,9 +31,9 @@ function parseEntry(raw: Record<string, unknown>, index: number): { ok: true; en
   return { ok: true, entry: { type: $type, id: $id as string | undefined, data } };
 }
 
-export function registerInsertEntriesTool(server: McpServer, db: Db): void {
+export function registerUpsertEntriesTool(server: McpServer, db: Db): void {
   server.tool(
-    'insert_entries',
+    'upsert_entries',
     `Insert or patch typed nodes in the knowledge graph.
 
 Each entry is a plain JSON object in the same format that \`load_node\` and \`raw_query\` return:
@@ -63,9 +63,9 @@ Examples:
     ]`,
     {
       entries: z
-        .array(z.record(z.unknown()))
+        .array(z.object({ $type: z.string(), $id: z.string().optional() }).catchall(z.unknown()))
         .min(1)
-        .describe('Array of entries. Each must have "$type". Use "$id" to patch existing nodes.'),
+        .describe('Array of entries. "$type" is required. "$id" (string) patches an existing node.'),
     },
     async ({ entries }) => {
       // Parse entries, collecting parse errors

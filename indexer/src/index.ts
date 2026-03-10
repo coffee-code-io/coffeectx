@@ -11,6 +11,9 @@
  *   list-types                              List all named types in active DB
  *   types-dot [--out <path>]                Generate Graphviz DOT for named type graph
  *   query <expression>                      Parse and execute a retrival query expression
+ *   search <text>                           Semantic similarity search
+ *   exact <value>                           Exact symbol match
+ *   regex <pattern>                         Regex symbol match (case-insensitive)
  *   insert-entries <file.json>              Insert typed entries from a JSON file
  *   load-node <id> [--depth <n>]            Load a node by ID with recursive expansion
  *   index-lsp [<path>] [--lsp-command <cmd>]  Index repo with LSP (uses stored repoPath if omitted)
@@ -53,6 +56,13 @@ function flag(name: string): string | undefined {
 function positional(index: number): string | undefined {
   // Return args[index] if it doesn't look like a flag
   return args[index]?.startsWith('--') ? undefined : args[index];
+}
+
+function flagInt(name: string, defaultValue: number): number {
+  const raw = flag(name);
+  if (raw === undefined) return defaultValue;
+  const n = parseInt(raw, 10);
+  return isNaN(n) ? defaultValue : n;
 }
 
 const embedCfg = loadEmbedConfig();
@@ -276,12 +286,13 @@ switch (command) {
 
   case 'query': {
     const verbose = args.includes('--verbose') || args.includes('-v');
-    const depthArg = flag('--depth');
-    const depth = depthArg !== undefined ? parseInt(depthArg, 10) : 10;
+    const depth = flagInt('--depth', 10);
+    const limit = flagInt('--limit', 50);
+    const offset = flagInt('--offset', 0);
 
     // Build query text: drop flags and their values from the token list.
     const flagsWithValues = new Set<number>();
-    for (const f of ['--depth', '--project']) {
+    for (const f of ['--depth', '--project', '--limit', '--offset']) {
       const i = args.indexOf(f);
       if (i !== -1) { flagsWithValues.add(i); flagsWithValues.add(i + 1); }
     }
@@ -292,7 +303,7 @@ switch (command) {
       .trim();
 
     if (!queryInput) {
-      console.error('Usage: retrival-index query <expression> [-v] [--depth <n>] [--project <name>]');
+      console.error('Usage: retrival-index query <expression> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -306,7 +317,8 @@ switch (command) {
       process.exit(1);
     }
 
-    const ids = await executeQuery(parsed, db);
+    const allIds = await executeQuery(parsed, db);
+    const ids = allIds.slice(offset, offset + limit);
     const results = ids.map(id => {
       try {
         const node = db.loadNodeDeep(id, depth);
@@ -316,7 +328,115 @@ switch (command) {
       }
     });
 
-    console.log(JSON.stringify({ count: results.length, results }, null, 2));
+    console.log(JSON.stringify({ total: allIds.length, count: results.length, offset, results }, null, 2));
+    break;
+  }
+
+  case 'search': {
+    const verbose = args.includes('--verbose') || args.includes('-v');
+    const limit = flagInt('--limit', 10);
+    const offset = flagInt('--offset', 0);
+    const depth = flagInt('--depth', 3);
+
+    const flagsWithValues = new Set<number>();
+    for (const f of ['--limit', '--offset', '--depth', '--project']) {
+      const i = args.indexOf(f);
+      if (i !== -1) { flagsWithValues.add(i); flagsWithValues.add(i + 1); }
+    }
+    const text = args
+      .slice(1)
+      .filter((a, i) => !flagsWithValues.has(i + 1) && a !== '--verbose' && a !== '-v')
+      .join(' ')
+      .trim();
+
+    if (!text) {
+      console.error('Usage: retrival-index search <text> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--project <name>]');
+      db.close();
+      process.exit(1);
+    }
+
+    const results = await db.searchByText(text, limit, offset);
+    const mapped = results.map(r => {
+      if (verbose) return { id: r.nodeId, distance: r.distance, node: r.node };
+      const parent = db.findNamedParent(r.nodeId);
+      if (parent) {
+        try {
+          const node = formatDeepNode(db.loadNodeDeep(parent.id, depth));
+          return { id: parent.id, typeName: parent.typeName, distance: r.distance, node, matchedId: r.nodeId };
+        } catch { /* fall through */ }
+      }
+      return { id: r.nodeId, distance: r.distance, node: r.node };
+    });
+
+    console.log(JSON.stringify({ count: mapped.length, results: mapped }, null, 2));
+    break;
+  }
+
+  case 'exact': {
+    const verbose = args.includes('--verbose') || args.includes('-v');
+    const limit = flagInt('--limit', 50);
+    const offset = flagInt('--offset', 0);
+    const depth = flagInt('--depth', 3);
+    const value = positional(1);
+
+    if (!value) {
+      console.error('Usage: retrival-index exact <value> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--project <name>]');
+      db.close();
+      process.exit(1);
+    }
+
+    const allIds = db.querySymbolExact(value);
+    const ids = allIds.slice(offset, offset + limit);
+    const results = ids.map(id => {
+      if (verbose) return { id, node: db.loadNode(id) };
+      const parent = db.findNamedParent(id);
+      if (parent) {
+        try {
+          const node = formatDeepNode(db.loadNodeDeep(parent.id, depth));
+          return { id: parent.id, typeName: parent.typeName, node, matchedId: id };
+        } catch { /* fall through */ }
+      }
+      return { id, node: db.loadNode(id) };
+    });
+
+    console.log(JSON.stringify({ total: allIds.length, count: results.length, offset, results }, null, 2));
+    break;
+  }
+
+  case 'regex': {
+    const verbose = args.includes('--verbose') || args.includes('-v');
+    const limit = flagInt('--limit', 50);
+    const offset = flagInt('--offset', 0);
+    const depth = flagInt('--depth', 3);
+    const pattern = positional(1);
+
+    if (!pattern) {
+      console.error('Usage: retrival-index regex <pattern> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--project <name>]');
+      db.close();
+      process.exit(1);
+    }
+
+    try { new RegExp(pattern); } catch {
+      console.error(`Invalid regex: ${pattern}`);
+      db.close();
+      process.exit(1);
+    }
+
+    const allIds = db.querySymbolRegex(pattern);
+    const ids = allIds.slice(offset, offset + limit);
+    const results = ids.map(id => {
+      if (verbose) return { id, node: db.loadNode(id) };
+      const parent = db.findNamedParent(id);
+      if (parent) {
+        try {
+          const node = formatDeepNode(db.loadNodeDeep(parent.id, depth));
+          return { id: parent.id, typeName: parent.typeName, node, matchedId: id };
+        } catch { /* fall through */ }
+      }
+      return { id, node: db.loadNode(id) };
+    });
+
+    console.log(JSON.stringify({ total: allIds.length, count: results.length, offset, results }, null, 2));
     break;
   }
 
@@ -455,6 +575,9 @@ Commands:
   list-types                             List all named types in active DB
   types-dot [--out <path>]               Generate Graphviz DOT for named type graph
   query <expression>                     Parse and execute a retrival query expression
+  search <text>                          Semantic similarity search
+  exact <value>                          Exact symbol match
+  regex <pattern>                        Regex symbol match (case-insensitive)
   insert-entries <file.json>             Insert typed entries from a JSON file
   load-node <id> [--depth <n>]           Load a node by ID, expanding to depth (default 10)
   index-lsp [<path>] [--lsp-command <cmd>]                        Index repo with LSP (default: typescript-language-server --stdio)
@@ -463,6 +586,10 @@ Commands:
 
 Options:
   --project <name>       Target a specific project
+  --limit <n>            Max results to return (default: 50 for query/exact/regex, 10 for search)
+  --offset <n>           Skip this many results (for pagination)
+  --depth <n>            Node expansion depth (default: 10 for query/load-node, 3 for search/exact/regex)
+  -v / --verbose         Return raw node data instead of formatted output
   --repo <path>          Override/set the repo path for index-lsp
   --logs-path <path>     Set default logs path for index-logs (stored in projects.yaml)
   --lsp-command <cmd>    Override LSP command (otherwise uses ${LSP_CONFIG_PATH} or ${DEFAULT_LSP_COMMAND})

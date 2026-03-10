@@ -1,5 +1,6 @@
 export { Db } from './db.js';
 export type { DbOptions } from './db.js';
+export { log } from './logger.js';
 export { createEmbedFn, createOpenAIEmbed, createOpenRouterEmbed, createOllamaEmbed, stubEmbed, makeStubEmbed, loadEmbedConfig } from './embed/index.js';
 export type { EmbedConfig, EmbedProvider } from './embed/index.js';
 export { TypeCache } from './typeCache.js';

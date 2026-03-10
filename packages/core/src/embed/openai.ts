@@ -11,8 +11,6 @@ export interface OpenAIEmbedConfig {
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
-import { appendFileSync } from 'node:fs';
-
 /**
  * Create an EmbedFn backed by any OpenAI-compatible embeddings API.
  *
@@ -39,24 +37,12 @@ export function createOpenAIEmbed(cfg: OpenAIEmbedConfig): EmbedFn {
   const supportsNativeDims =
     model.startsWith('text-embedding-3') || model.includes('/text-embedding-3');
 
-var _diagLine = `[mcp] embed gen ${model} dims=${dims} native=${supportsNativeDims}\n`;
-try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
-
-
   return async (text: string): Promise<Float32Array> => {
-var _diagLine = `[mcp] call resp ${text}\n`;
-try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
-
-
     const response = await client.embeddings.create({
       model,
       input: text,
       ...(supportsNativeDims ? { dimensions: dims } : {}),
     });
-
-var _diagLine = `[mcp] embed resp ${response}\n`;
-try { appendFileSync('/tmp/retrival-mcp-diag.log', _diagLine); } catch { /* ignore */ }
-
 
     const raw = response.data[0]!.embedding;
     if (raw.length === dims) return new Float32Array(raw);
