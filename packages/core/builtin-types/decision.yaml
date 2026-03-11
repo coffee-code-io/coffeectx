@@ -1,17 +1,13 @@
 types:
   Decision:
-    description: A choice that shaped the codebase — what was decided and why.
+    description: A deliberate architectural or design choice that shaped the codebase — what was decided and why.
     kind: Map
     fields:
-      title: Symbol           # short imperative title, e.g. "Use SQLite for storage"
-      rationale: Meaning      # why this was the right choice
-
-  Alternative:
-    description: An option that was considered but rejected in favour of something else.
-    kind: Map
-    fields:
-      option: Symbol          # name of the rejected option, e.g. "PostgreSQL"
-      reason: Meaning         # why it was not chosen
+      title: Symbol           # short imperative phrase, e.g. "Use SQLite for storage"
+      rationale: Meaning      # why this was the right choice at this scale
+      symbols:                # LSP symbol nodes most directly affected (use { "$id": "uuid" })
+        kind: List
+        item: AnyLspSymbol
 
   Assumption:
     description: A belief about the environment, users, or system that has not been verified.
@@ -19,65 +15,61 @@ types:
     fields:
       description: Meaning    # the assumption itself
       risk: Meaning           # what breaks if the assumption is wrong
+      symbols:                # LSP symbol nodes whose behaviour depends on this assumption (use { "$id": "uuid" })
+        kind: List
+        item: AnyLspSymbol
 
   ChangeEvent:
-    description: A significant change to architecture, behavior, or dependencies that occurred at a point in time.
+    description: A significant change to architecture, behaviour, or dependencies that occurred at a point in time.
     kind: Map
     fields:
       name: Symbol            # short event name, e.g. "Switched embed model to text-embedding-3-small"
       description: Meaning    # what changed and why
+      symbols:                # LSP symbol nodes renamed, replaced, or substantially modified (use { "$id": "uuid" })
+        kind: List
+        item: AnyLspSymbol
 
 skills:
   ArchitecturalDecisionIndexing:
-    description: Extract decisions, rejected alternatives, assumptions, and notable change events from agent logs.
+    description: Extract architectural decisions, assumptions, and notable change events from agent logs.
     prompt: |
-      Read the agent log events below and extract coding decisions.
-      Cast a wide net — extract both local implementation choices AND broader design decisions.
+      Read the agent log events below and extract broader design and architecture decisions.
+      Focus on choices that affect multiple components, cross-cutting concerns, or long-term structure.
       Only extract entries you are confident about from the event data.
 
       ── Decision ──────────────────────────────────────────────────────────────
-      Any deliberate choice made while writing or changing code.
-      This includes small local decisions, not just big architecture ones.
-      Extract when you see a function, module, or approach chosen for a reason.
-        title     — short imperative phrase describing what was decided
+      A deliberate architectural or design choice.
+      Distinct from LocalDecision — these affect the whole system or multiple modules.
+        title   — short imperative phrase describing what was decided
         rationale — why this choice was made; be specific
+        symbols — list of { "$id": "<uuid>" } for LSP symbol nodes most directly affected (use exact/raw_query to find IDs; omit if none found)
 
       Examples:
-        { "$type": "Decision", "title": "Rewrite annotateNode to call insertEntries internally", "rationale": "Eliminated duplicated validation and embedding logic by routing through the single insertEntries path" }
-        { "$type": "Decision", "title": "Use better-sqlite3 over sql.js", "rationale": "Synchronous API fits the use case; no WASM overhead; significantly faster for embedded use" }
-        { "$type": "Decision", "title": "Return verbose errors from insertEntries instead of throwing", "rationale": "Lets the caller report all failures at once rather than stopping on the first error" }
-
-      ── Alternative ───────────────────────────────────────────────────────────
-      An option that was considered and rejected in favour of something else.
-      Extract when you see something explicitly ruled out or compared unfavorably.
-        option  — name or short description of the rejected option
-        reason  — why it was not chosen
-
-      Examples:
-        { "$type": "Alternative", "option": "Separate annotateNode tool", "reason": "Would duplicate validation and embed logic already in insertEntries" }
-        { "$type": "Alternative", "option": "Postgres", "reason": "Requires a server process; too heavy for an embedded CLI tool" }
+        { "$type": "Decision", "title": "Use SQLite over PostgreSQL", "rationale": "Embedded, no server process required; fits CLI tool distribution model", "symbols": [{ "$id": "uuid-of-Db-class" }] }
+        { "$type": "Decision", "title": "Use RefType for named type references", "rationale": "Avoids O(types^depth) row explosion; supports circular type definitions naturally", "symbols": [] }
 
       ── Assumption ────────────────────────────────────────────────────────────
-      A belief taken for granted but not verified — about environment, users, or code behavior.
+      A belief taken for granted but not verified — about environment, users, or code behaviour.
       Extract when you see "we assume", "assuming", or an implicit constraint that could break.
         description — the assumption itself
         risk        — what breaks if it is wrong
+        symbols     — list of { "$id": "<uuid>" } for LSP nodes whose behaviour depends on this assumption
 
       Examples:
-        { "$type": "Assumption", "description": "embed dimension matches the vec table dimension in the existing DB", "risk": "sqlite-vec will reject inserts if dimensions differ" }
-        { "$type": "Assumption", "description": "Users run a single MCP server per project", "risk": "Multiple servers would write to the same DB without locking" }
+        { "$type": "Assumption", "description": "Embed dimension matches the vec table dimension in the existing DB", "risk": "sqlite-vec will reject inserts if dimensions differ", "symbols": [{ "$id": "uuid-of-insertEntries" }] }
+        { "$type": "Assumption", "description": "Users run a single MCP server per project", "risk": "Multiple servers would write to the same DB without locking", "symbols": [] }
 
       ── ChangeEvent ───────────────────────────────────────────────────────────
-      A concrete change that was made to code, config, dependencies, or behavior.
-      Extract when you see a refactor, rename, migration, or any notable modification completed.
+      A concrete architectural change: refactor, migration, renamed interface, removed dependency.
+      Extract when a structural change was completed, not just planned.
         name        — short label for the change
         description — what changed and why
+        symbols     — list of { "$id": "<uuid>" } for LSP nodes renamed, replaced, or substantially modified
 
       Examples:
-        { "$type": "ChangeEvent", "name": "Unified annotateNode into insertEntries", "description": "annotateNode now delegates to insertEntries instead of having its own DB write path, removing duplicate validation" }
-        { "$type": "ChangeEvent", "name": "Made embedding dimension configurable", "description": "Replaced hardcoded 128-dim vectors with a runtime dims parameter; default changed to 1536 to match text-embedding-3-small native size" }
+        { "$type": "ChangeEvent", "name": "Unified annotateNode into insertEntries", "description": "annotateNode now delegates to insertEntries, removing duplicate validation logic", "symbols": [{ "$id": "uuid-of-insertEntries" }] }
+        { "$type": "ChangeEvent", "name": "Replaced Alternative type with Choice", "description": "Alternative only stored the rejected option; Choice also records what was chosen", "symbols": [] }
     types:
       - Decision
-      - Alternative
       - Assumption
       - ChangeEvent

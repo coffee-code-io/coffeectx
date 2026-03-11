@@ -87,9 +87,9 @@ export type DeepNode =
  * `type` must be a named type whose schema is a MapType.
  * `data` provides field values; missing fields are skipped.
  *
- * To create a circular reference between entries in the same batch,
- * use `{ "$ref": N }` as a field value, where N is the 0-based index
- * of the target entry in the entries array.
+ * To reference another entry in the same batch, use `{ "$ref": N }` where N
+ * is the 0-based index of the target entry.
+ * To reference a node already in the DB, use `{ "$id": "uuid" }`.
  */
 export interface InsertEntry {
   type: string;

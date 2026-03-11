@@ -1,35 +1,30 @@
 types:
   TextContract:
-    description: A natural-language agreement between components or teams — parties, obligations.
+    description: A natural-language agreement between two components — what each side is responsible for.
     kind: Map
     fields:
       description: Meaning
       parties:
         kind: List
-        item: Symbol          # component, service, or team names
+        item: Symbol          # component, module, or function names involved
       obligations:
         kind: List
-        item: Meaning         # each obligation as a semantic statement
+        item: Meaning         # one obligation per party or shared responsibility
 
   ArgValidator:
-    description: A validation rule on a function argument — the invariant and expected error.
+    description: A validation rule on a function argument — the invariant that must hold on entry.
     kind: Map
     fields:
-      function: Symbol        # fully qualified function name
-      argument: Symbol        # argument name
-      rule: Meaning           # invariant or constraint (e.g. "must be a positive integer")
+      function: Symbol        # fully qualified function name (e.g. "UserService.createUser")
+      argument: Symbol        # parameter name (e.g. "email")
+      rule: Meaning           # invariant in natural language (e.g. "must be a valid RFC 5322 address")
       errorMessage: Meaning
-
-  SyncValidator:
-    description: A concurrency invariant on a shared resource — the condition and how it is enforced.
-    kind: Map
-    fields:
-      resource: Symbol        # shared resource name
-      invariant: Meaning      # must-hold condition (e.g. "exactly one writer at a time")
-      enforcement: Symbol     # "lock" | "atomic" | "queue" | "actor" | "none"
+      symbol:                 # the LspFunction or LspMethod node for this function (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod]
 
   EntityMapping:
-    description: A cardinality relationship between two domain entities.
+    description: A cardinality relationship between two domain entities — how many of each relate.
     kind: Map
     fields:
       from: Symbol            # source entity name
@@ -38,7 +33,7 @@ types:
       description: Meaning
 
   Unique:
-    description: A uniqueness constraint — the set of fields that together must be unique for an entity.
+    description: A uniqueness constraint — the set of fields that must be unique for an entity.
     kind: Map
     fields:
       entity: Symbol
@@ -53,61 +48,64 @@ types:
     fields:
       from: Symbol
       to: Symbol
-      name: Symbol            # relation label, e.g. "owns" | "depends-on" | "subscribes-to"
+      name: Symbol            # verb or phrase labelling the relation (e.g. "owns", "depends-on")
       type: Symbol            # "association" | "aggregation" | "composition" | "dependency"
       cardinality: Symbol     # "1-1" | "1-many" | "many-many"
       description: Meaning
 
 skills:
   ContractIndexing:
-    description: Capture data contracts, validators, entity relationships, and concurrency invariants.
+    description: Capture local data contracts, argument validators, and entity relationships from implementation code.
     prompt: |
-      When analyzing interface definitions, data models, validation logic, or design documents, extract:
+      When analysing function implementations, data models, or validation logic, extract:
 
-      TextContract — for informal agreements between components or teams:
-        description: what the contract says, semantically
-        parties: list of component/service/team names involved
-        obligations: list of obligations, one per party or shared responsibility
+      TextContract — informal agreements between two modules or functions:
+        description: what the contract says
+        parties: list of function/module names involved (e.g. ["insertEntries", "buildEntryNode"])
+        obligations: list of obligations, one per party
+
+      Examples:
+        { "$type": "TextContract", "description": "Caller must embed all meanings before passing embedMap to buildEntryNode", "parties": ["insertEntries", "buildEntryNode"], "obligations": ["insertEntries pre-computes all embeddings", "buildEntryNode reads from embedMap synchronously"] }
 
       ArgValidator — for each validation rule on a function parameter:
-        function: fully qualified function name (e.g. "UserService.createUser")
-        argument: parameter name (e.g. "email")
-        rule: the invariant in natural language (e.g. "must be a valid RFC 5322 email address")
-        errorMessage: the error message returned when violated
+        function: fully qualified name (e.g. "Db.insertEntries")
+        argument: parameter name
+        rule: the invariant (e.g. "entries must be non-empty")
+        errorMessage: the error returned when violated
+        symbol: { "$id": "<uuid>" } of the LspFunction/LspMethod node if found via exact search
 
-      SyncValidator — for concurrency or ordering invariants on shared state:
-        resource: the resource being protected (e.g. "OrderQueue", "db connection pool")
-        invariant: the must-hold condition (e.g. "no two writers may hold the lock simultaneously")
-        enforcement: the mechanism used ("lock" | "atomic" | "queue" | "actor" | "none")
+      Examples:
+        { "$type": "ArgValidator", "function": "resolveYamlType", "argument": "spec", "rule": "Or/And kinds require at least 2 types in the types array", "errorMessage": "Or requires at least 2 types", "symbol": { "$id": "uuid-of-resolveYamlType" } }
 
-      EntityMapping — for every significant entity relationship:
-        from: source entity name
-        to: target entity name
+      EntityMapping — for significant entity relationships:
+        from / to: entity names
         cardinality: "1-1" | "1-many" | "many-1" | "many-many"
-        description: semantic meaning of the relationship
+        description: meaning of the relationship
 
-      Unique — for uniqueness constraints (database indexes, business rules):
+      Examples:
+        { "$type": "EntityMapping", "from": "Skill", "to": "NamedType", "cardinality": "1-many", "description": "A skill references the named types it creates entries for" }
+
+      Unique — for uniqueness constraints (DB indexes, business rules):
         entity: entity/table name
         fields: list of field names forming the unique key
-        description: why this uniqueness constraint exists
+        description: why this constraint exists
 
       Relation — for named directed relationships in the domain model:
         from / to: entity names
-        name: a verb or phrase labeling the relation (e.g. "owns", "subscribes-to")
+        name: verb or phrase (e.g. "owns", "depends-on")
         type: "association" | "aggregation" | "composition" | "dependency"
         cardinality: "1-1" | "1-many" | "many-many"
         description: semantic explanation
 
       Look for contracts in:
-        - Interface and type definitions
-        - Database schema files (SQL, Prisma, Drizzle)
-        - Validation libraries (Zod, Joi, Yup)
+        - Function pre/post-condition comments
+        - Validation libraries (Zod, Joi, Yup) schemas
         - JSDoc @param constraints
-        - README sections titled "Contract", "API", or "Data model"
+        - DB schema files (SQL, Prisma, Drizzle)
+        - Interface and type definitions with semantic constraints
     types:
       - TextContract
       - ArgValidator
-      - SyncValidator
       - EntityMapping
       - Unique
       - Relation

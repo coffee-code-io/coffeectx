@@ -12,7 +12,7 @@ export interface IndexLogsResult {
   sessions: number;
   events: number;
   inserted: number;
-  errors: Array<{ file: string; error: string }>;
+  errors: Array<{ file: string; error: string; stack?: string }>;
 }
 
 /**
@@ -30,7 +30,7 @@ export async function indexLogs(db: Db, paths: string[]): Promise<IndexLogsResul
     try {
       await indexSingleFile(db, filePath, result);
     } catch (err) {
-      result.errors.push({ file: filePath, error: (err as Error).message });
+      result.errors.push({ file: filePath, error: (err as Error).message, stack: (err as Error).stack });
     }
   }
 
@@ -118,6 +118,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           operation: event.kind === 'file_create' ? 'create' : 'edit',
           path: event.path ?? '',
           preview: event.preview ?? '',
+          ...(event.thought ? { thought: event.thought } : {}),
           touchedSymbols: [],
         },
       };
@@ -131,6 +132,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           timestamp: event.timestamp,
           command: event.command ?? '',
           description: event.description ?? '',
+          ...(event.thought ? { thought: event.thought } : {}),
         },
       };
 
@@ -142,6 +144,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           uuid: event.uuid,
           timestamp: event.timestamp,
           question: event.question ?? '',
+          ...(event.thought ? { thought: event.thought } : {}),
           relatedSymbols: []
         },
       };

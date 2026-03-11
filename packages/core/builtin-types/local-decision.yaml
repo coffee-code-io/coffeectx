@@ -1,0 +1,21 @@
+types:
+  LocalDecision:
+    description: A small implementation choice within a function or module — what approach was taken and why.
+    kind: Map
+    fields:
+      title: Symbol           # short imperative phrase, e.g. "Use early return to reduce nesting"
+      rationale: Meaning      # why this was the right approach for this specific case
+      symbols:                # LSP symbol nodes this decision directly concerns (use { "$id": "uuid" })
+        kind: List
+        item: AnyLspSymbol
+
+  Choice:
+    description: An explicit selection between alternatives — what was chosen, what was rejected, and why.
+    kind: Map
+    fields:
+      chosen: Symbol          # what was selected (e.g. "better-sqlite3")
+      option: Symbol          # the alternative that was rejected (e.g. "sql.js")
+      reason: Meaning         # why the option was not chosen in favour of chosen
+      symbols:                # LSP symbol nodes directly affected by this choice (use { "$id": "uuid" })
+        kind: List
+        item: AnyLspSymbol

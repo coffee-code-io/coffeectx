@@ -1,0 +1,81 @@
+types:
+  ConcurrencyInvariant:
+    description: A must-hold condition on a shared resource — the constraint and how it is enforced.
+    kind: Map
+    fields:
+      resource: Symbol        # shared resource name (e.g. "db connection", "OrderQueue")
+      invariant: Meaning      # the must-hold condition (e.g. "at most one writer at a time")
+      enforcement: Symbol     # mechanism: "lock" | "atomic" | "queue" | "actor" | "transaction" | "none"
+      symbol:                 # the LspFunction/LspMethod/LspClass that owns or enforces this (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod, LspClass]
+
+  HappensBefore:
+    description: An ordering constraint between two operations — A must complete before B starts.
+    kind: Map
+    fields:
+      before: Symbol          # operation, event, or function name that must finish first
+      after: Symbol           # operation that may only start after `before` completes
+      reason: Meaning         # why this ordering is required (race condition, data dependency, etc.)
+      symbolBefore:           # LspFunction/LspMethod node for the `before` operation (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod]
+      symbolAfter:            # LspFunction/LspMethod node for the `after` operation (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod]
+
+  SyncedWith:
+    description: Two values or operations that must be kept in sync with each other.
+    kind: Map
+    fields:
+      a: Symbol               # first entity (variable, cache, field)
+      b: Symbol               # second entity that must stay consistent with a
+      mechanism: Symbol       # how sync is maintained: "transaction" | "event" | "lock" | "observer" | "derived"
+      description: Meaning    # what breaks if they drift out of sync
+      symbol:                 # LspFunction/LspMethod that performs or guards the sync (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod]
+
+skills:
+  ConcurrencyIndexing:
+    description: Extract concurrency invariants, ordering constraints, and synchronisation relationships from implementation code.
+    prompt: |
+      When analysing shared state, locks, async code, queues, or event ordering, extract:
+
+      ConcurrencyInvariant — a must-hold condition on a shared resource:
+        resource: the resource being protected (e.g. "DB connection", "embedding cache")
+        invariant: the condition that must always hold (e.g. "at most one writer holds the lock")
+        enforcement: mechanism used — "lock" | "atomic" | "queue" | "actor" | "transaction" | "none"
+        symbol: { "$id": "<uuid>" } of the LspFunction/LspMethod/LspClass that owns or enforces this
+
+      Examples:
+        { "$type": "ConcurrencyInvariant", "resource": "better-sqlite3 connection", "invariant": "all writes happen inside a single synchronous transaction", "enforcement": "transaction", "symbol": { "$id": "uuid-of-insertEntries" } }
+
+      HappensBefore — an explicit ordering constraint between two operations:
+        before: the operation that must complete first
+        after: the operation that may only run after `before` is done
+        reason: why this ordering is required (data dependency, race condition, etc.)
+        symbolBefore / symbolAfter: { "$id": "<uuid>" } of the LspFunction/LspMethod nodes
+
+      Examples:
+        { "$type": "HappensBefore", "before": "collectEntryMeanings", "after": "buildEntryNode", "reason": "embedMap must be fully populated before the synchronous transaction begins", "symbolBefore": { "$id": "uuid-of-collectEntryMeanings" }, "symbolAfter": { "$id": "uuid-of-buildEntryNode" } }
+
+      SyncedWith — two values that must stay consistent:
+        a / b: the two entities that must match
+        mechanism: "transaction" | "event" | "lock" | "observer" | "derived"
+        description: what breaks if they drift
+        symbol: { "$id": "<uuid>" } of the function that keeps them in sync
+
+      Examples:
+        { "$type": "SyncedWith", "a": "named_types.type_id", "b": "types.id", "mechanism": "transaction", "description": "named_types always references a valid types row; orphans break type resolution", "symbol": { "$id": "uuid-of-upsertNamedType" } }
+
+      Look for concurrency patterns in:
+        - Mutex/lock usage
+        - SQLite transactions
+        - async/await ordering constraints
+        - Event emitter or pub/sub patterns
+        - Comments mentioning "thread-safe", "race condition", "atomic", "before"
+    types:
+      - ConcurrencyInvariant
+      - HappensBefore
+      - SyncedWith

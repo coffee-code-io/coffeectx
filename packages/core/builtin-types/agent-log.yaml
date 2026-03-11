@@ -1,6 +1,7 @@
 types:
   AgentSession:
     description: A Claude Code agent working session — a single conversation from start to finish.
+    hidden: true
     kind: Map
     fields:
       sessionId: Symbol    # unique session UUID
@@ -10,6 +11,7 @@ types:
 
   UserInput:
     description: A message typed by the user to the coding agent — the user's intent or feedback.
+    hidden: true
     kind: Map
     fields:
       sessionId: Symbol
@@ -26,6 +28,7 @@ types:
 
   FileOperation:
     description: A file creation or edit performed by the coding agent — captures what changed and where.
+    hidden: true
     kind: Map
     fields:
       sessionId: Symbol
@@ -34,6 +37,7 @@ types:
       operation: Symbol    # "create" | "edit"
       path: Symbol         # absolute file path
       preview: Meaning     # first lines of new content, or the changed fragment
+      thought: Meaning?    # agent's thinking block that preceded this operation
       comment: Meaning?    # optional analyst annotation
       touchedSymbols:      # IDs of LSP symbol nodes in this file (filled by enricher)
         kind: List
@@ -41,6 +45,7 @@ types:
 
   ShellExecution:
     description: A shell command executed by the coding agent — build steps, test runs, git ops, etc.
+    hidden: true
     kind: Map
     fields:
       sessionId: Symbol
@@ -48,86 +53,21 @@ types:
       timestamp: Symbol
       command: Symbol
       description: Meaning # agent-supplied description of what the command does
+      thought: Meaning?    # agent's thinking block that preceded this command
       comment: Meaning?    # optional analyst annotation
 
   AgentQuestion:
     description: A clarifying question asked by the coding agent to the user before proceeding.
+    hidden: true
     kind: Map
     fields:
       sessionId: Symbol
       uuid: Symbol
       timestamp: Symbol
       question: Meaning    # the question text
+      thought: Meaning?    # agent's thinking block that preceded this question
       comment: Meaning?    # optional analyst annotation
       relatedSymbols:      # symbol names mentioned in the question
         kind: List
         item: Symbol
 
-skills:
-  AgentLogIndexing:
-    description: |
-      Extract important events from Claude Code agent session logs (.claude JSONL format).
-
-      Reads session JSONL files and classifies each message into one of:
-        UserInput      — text typed by the user
-        FileOperation  — Write or Edit tool use (file create / edit)
-        ShellExecution — Bash tool use (non-trivial commands only)
-        AgentQuestion  — AskUserQuestion tool use
-        AgentSession   — one per unique sessionId (synthesised from first message)
-
-      Skips: thinking blocks, Read/Glob/Grep/ToolSearch results, queue-operation entries,
-             IDE-injected system text, trivial bash commands (ls, echo, pwd, …).
-
-      List fields (relatedFiles, relatedSymbols, touchedSymbols) use empty list [] when
-      no items are found. comment is left absent unless explicitly annotated.
-    prompt: |
-      You are provided with Claude code logs, and your job is to enrich them. You don't 
-      have to process each log, consider only the logs that might contain major changes, 
-      API/interface change, contract agreements and decisions and add meta-information to them.
-      Use annotate_node tool to add these annotations. Use raw_query tool to find more information about
-      knowledge database
-
-      AgentSession — one per unique sessionId found in the file:
-        sessionId:   the UUID string
-        projectPath: cwd field of the first user message
-        startTime:   timestamp of the first message in the session
-        model:       model field from the first assistant message
-
-      UserInput — for every "user" type message whose content has a non-empty text item
-      that is not a system injection (does not start with <ide_ or <system-):
-        sessionId:      message.sessionId
-        uuid:           message.uuid
-        timestamp:      message.timestamp
-        text:           the text content (semantic field — captures intent)
-        relatedFiles:   [] (filled by enricher)
-        relatedSymbols: [] (filled by enricher)
-
-      FileOperation — for every "assistant" message containing a Write or Edit tool_use:
-        sessionId:      message.sessionId
-        uuid:           message.uuid
-        timestamp:      message.timestamp
-        operation:      "create" for Write, "edit" for Edit
-        path:           input.file_path
-        preview:        first 300 characters of input.content (Write) or input.new_string (Edit)
-        touchedSymbols: [] (filled by enricher)
-
-      ShellExecution — for every Bash tool_use whose command is non-trivial
-      (skip commands that start with: ls, pwd, echo, cat, head, tail, which, true, false):
-        sessionId:   message.sessionId
-        uuid:        message.uuid
-        timestamp:   message.timestamp
-        command:     input.command
-        description: input.description (semantic field)
-
-      AgentQuestion — for every AskUserQuestion tool_use:
-        sessionId:      message.sessionId
-        uuid:           message.uuid
-        timestamp:      message.timestamp
-        question:       input.question (semantic field)
-        relatedSymbols: [] (filled by enricher)
-    types:
-      - AgentSession
-      - UserInput
-      - FileOperation
-      - ShellExecution
-      - AgentQuestion

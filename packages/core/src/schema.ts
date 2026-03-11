@@ -62,11 +62,13 @@ CREATE TABLE IF NOT EXISTS type_map_entries (
 
 -- Named types: human-readable names → type_id.
 -- source distinguishes 'builtin' (shipped YAML) from 'user' (custom).
+-- hidden=1 means entries of this type are excluded from search/exact/regex by default.
 CREATE TABLE IF NOT EXISTS named_types (
   name        TEXT PRIMARY KEY,
   type_id     TEXT NOT NULL REFERENCES types(id),
   description TEXT,
   source      TEXT NOT NULL DEFAULT 'user',
+  hidden      INTEGER NOT NULL DEFAULT 0,
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

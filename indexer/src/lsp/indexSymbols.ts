@@ -101,8 +101,44 @@ function isDocumentSymbolArray(arr: unknown[]): arr is DocumentSymbol[] {
   return arr.length > 0 && 'selectionRange' in (arr[0] as object);
 }
 
+/**
+ * Build a map from file path (absolute or relative) → [FileOperation event node IDs].
+ * Used to pre-populate `agentEvents` on LSP symbols with events that touched their file.
+ */
+function buildFileEventIndex(db: Db): Map<string, string[]> {
+  const index = new Map<string, string[]>();
+  const eventIds = db.queryByNamedType(['FileOperation']);
+  for (const eventId of eventIds) {
+    try {
+      const node = db.loadNodeDeep(eventId, 2);
+      if (node.kind !== 'map') continue;
+      const pathNode = node.entries['path'];
+      if (pathNode?.kind === 'atom' && pathNode.atom.kind === 'symbol') {
+        const p = pathNode.atom.value;
+        // Index by full path, basename, and last two path segments for flexible matching
+        for (const key of pathVariants(p)) {
+          const arr = index.get(key) ?? [];
+          arr.push(eventId);
+          index.set(key, arr);
+        }
+      }
+    } catch {
+      // best-effort
+    }
+  }
+  return index;
+}
+
+function pathVariants(p: string): string[] {
+  const parts = p.replace(/\\/g, '/').split('/').filter(Boolean);
+  const variants: string[] = [p];
+  if (parts.length >= 1) variants.push(parts[parts.length - 1]!);
+  if (parts.length >= 2) variants.push(parts.slice(-2).join('/'));
+  return [...new Set(variants)];
+}
+
 /** Build an InsertEntry for a single LSP symbol. */
-function symbolEntry(rec: SymbolRecord, relPath: string): InsertEntry {
+function symbolEntry(rec: SymbolRecord, relPath: string, fileEventIds: string[]): InsertEntry {
   return {
     type: rec.typeName,
     data: {
@@ -118,7 +154,7 @@ function symbolEntry(rec: SymbolRecord, relPath: string): InsertEntry {
         line: String(rec.line + 1),   // LSP is 0-based
         column: String(rec.column + 1),
       },
-      agentEvents: [], // Will be filled later.
+      agentEvents: fileEventIds,
     },
   };
 }
@@ -135,6 +171,9 @@ export async function indexWithLsp(
   lspArgs: string[],
 ): Promise<IndexResult> {
   const result: IndexResult = { files: 0, nodes: 0, errors: [] };
+
+  // Build file→event index before starting LSP so agentEvents can be populated.
+  const fileEventIndex = buildFileEventIndex(db);
 
   const client = await LspClient.start(lspCommand, lspArgs, repoPath);
   await new Promise(r => setTimeout(r, 500));
@@ -157,7 +196,13 @@ export async function indexWithLsp(
 
       if (records.length === 0) continue;
 
-      const entries = records.map(rec => symbolEntry(rec, relPath));
+      // Collect event IDs for this file across all path variants
+      const fileEventIds = [...new Set([
+        ...(fileEventIndex.get(relPath) ?? []),
+        ...(fileEventIndex.get(basename(relPath)) ?? []),
+      ])];
+
+      const entries = records.map(rec => symbolEntry(rec, relPath, fileEventIds));
       const insertResult = await db.insertEntries(entries);
       result.nodes += insertResult.ids.filter(id => id !== null).length;
 

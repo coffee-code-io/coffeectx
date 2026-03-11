@@ -34,35 +34,3 @@ types:
       start: Location
       end: Location
 
-skills:
-  FilesystemIndexing:
-    description: Extract filesystem structure — files, folders, and source locations.
-    prompt: |
-      When traversing a repository or directory tree, extract the following node types:
-
-      File — one per meaningful source file:
-        path: repo-relative or absolute path (e.g. "src/db/index.ts")
-        name: basename (e.g. "index.ts")
-        description: one-sentence semantic summary of what the file does
-
-      Folder — one per directory containing relevant source files:
-        path: directory path
-        name: directory basename
-        description: brief summary of the directory's purpose
-
-      Location — whenever you need to pin a finding to a specific line:
-        file: the File node for that file
-        line: line number as a string (e.g. "42")
-        column: column number as a string (optional)
-
-      Span — when you need both a start and end position (e.g. a function body):
-        start: Location node
-        end: Location node
-
-      Index all source files including config, build scripts, and tests.
-      Skip binary files, lock files, and generated output directories (dist/, node_modules/).
-    types:
-      - File
-      - Folder
-      - Location
-      - Span

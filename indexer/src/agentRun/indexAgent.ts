@@ -1,75 +1,105 @@
 import type { Db } from '@retrival-mcp/core';
 import { formatDeepNode } from '@retrival-mcp/core';
 import { loadAuth, authToQueryOptions } from './auth.js';
-import { runSkill, formatTypeSchema } from './runSkill.js';
+import { runSkillInteractive } from './runSkill.js';
 
 export interface IndexAgentOptions {
   db: Db;
   /** Absolute path to the project SQLite database (forwarded to MCP subprocess). */
   dbPath: string;
-  /** If set, only run the skill with this name. */
-  skillFilter?: string;
   /**
    * Explicit path to the qwen CLI executable.
    * Overrides auth.yaml qwenPath and the auto-resolved packaged default.
    */
   pathToQwenExecutable?: string;
   /**
-   * Number of events to advance between batches.
-   * The agent is invoked once per batchStep events.
+   * Number of events per interactive turn (batch).
    * Default: 10.
    */
   batchStep?: number;
-  /**
-   * Number of events in the context window fed to qwen per invocation.
-   * The window is the last suffixLen events up to the current position.
-   * Default: 100.
-   */
-  suffixLen?: number;
 }
 
 export interface IndexAgentResult {
-  skills: number;
   batches: number;
-  errors: Array<{ skill: string; batch: number; error: string }>;
+  errors: Array<{ error: string }>;
 }
 
 /** Named types that represent indexable log events. */
 const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion'];
 
 /**
- * Run the agent indexer for all (or one filtered) skill.
+ * Main prompt for the single indexing session.
  *
- * For each skill, walks the indexed log events in batchStep increments.
- * At each step, the agent sees the last suffixLen events and is instructed
- * to extract entities defined by the skill and insert them into the graph.
+ * Covers local decisions + LSP enrichment as primary tasks.
+ * The agent may call list_skills / get_skill to load additional skill prompts.
+ */
+const MAIN_PROMPT = `You are a software project knowledge graph indexer.
+You will receive batches of agent session events (user inputs, file operations, shell commands).
+
+## Primary tasks
+
+### Task 1 — Index local implementation decisions
+
+For each batch, identify small to medium implementation choices made during coding.
+
+LocalDecision — a deliberate choice within a function or module:
+  title: short imperative phrase (e.g. "Use early return to reduce nesting")
+  rationale: why this was the right approach
+  symbols: list of { "$id": "<uuid>" } for LSP symbol nodes this concerns
+           — find IDs via exact search on function/class name before inserting
+           — omit or use [] if no matching symbols are indexed yet
+
+Choice — when one option was explicitly rejected in favour of another:
+  chosen: what was selected (e.g. "better-sqlite3")
+  option: what was rejected (e.g. "sql.js")
+  reason: why the option was not chosen
+  symbols: list of { "$id": "<uuid>" } for related LSP nodes
+
+Examples:
+  { "$type": "LocalDecision", "title": "Use Map instead of object for accumulator", "rationale": "Map preserves insertion order and has O(1) keyed lookups", "symbols": [{ "$id": "uuid-of-buildIndex" }] }
+  { "$type": "Choice", "chosen": "early return", "option": "nested else", "reason": "Reduces nesting and keeps the happy path at the top level", "symbols": [] }
+
+### Task 2 — Enrich LSP symbols with comments
+
+When file operations in the batch touch source files, use exact or raw_query to find the
+Lsp* symbols for those files. If a symbol has no comment field, add a brief one explaining
+what it does (inferred from the log context).
+
+Use upsert_entries with the existing node id to patch in the comment:
+  { "$type": "LspFunction", "id": "<uuid>", "comment": "Builds the flat symbol to event index used during LSP enrichment" }
+
+### Task 3 — Load additional skills as needed
+
+If you see patterns that match other indexing tasks (contracts, API surface, architectural
+decisions, concurrency), use:
+  list_skills — to see all available skill names and descriptions
+  get_skill   — to load a specific skill's full prompt and apply it to the current batch
+
+## Rules
+- Only extract entries you are confident about from the event data.
+- Do not explain your work. Call tools and continue.
+- If nothing to extract from a batch, say "nothing to extract" and stop.
+- More events will follow in subsequent messages.
+`;
+
+/**
+ * Run a single interactive agent session over all indexed log events.
+ *
+ * Uses one multi-turn qwen session with the main prompt. The agent can
+ * load additional skill prompts via list_skills / get_skill.
  */
 export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentResult> {
-  const { db, dbPath, skillFilter, batchStep = 10, suffixLen = 100, pathToQwenExecutable } = opts;
-  const result: IndexAgentResult = { skills: 0, batches: 0, errors: [] };
+  const { db, dbPath, batchStep = 10, pathToQwenExecutable } = opts;
+  const result: IndexAgentResult = { batches: 0, errors: [] };
 
-  // Load auth from ~/.coffeecode/auth.yaml
   const auth = loadAuth();
   const qOpts = authToQueryOptions(auth);
 
-  // Load skills (with prompts)
-  const skillHeaders = db.listSkills();
-  const skills = (skillFilter
-    ? skillHeaders.filter(s => s.name === skillFilter)
-    : skillHeaders
-  ).map(s => db.getSkill(s.name)).filter(Boolean) as NonNullable<ReturnType<typeof db.getSkill>>[];
-
-  if (skills.length === 0) {
-    return result;
-  }
-
   // Load all indexed event nodes
   const eventIds = db.queryByNamedType(EVENT_TYPES);
-  if (eventIds.length === 0) {
-    return result;
-  }
+  if (eventIds.length === 0) return result;
 
-  // Snapshot events at depth 3 for context (enough to see all top-level fields)
+  // Snapshot events at depth 3
   const events: Array<{ id: string; summary: unknown }> = [];
   for (const id of eventIds) {
     try {
@@ -80,51 +110,26 @@ export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentRes
     }
   }
 
-  for (const skill of skills) {
-    result.skills++;
-    let batchIndex = 0;
+  // Split into batches
+  const eventBatches: string[] = [];
+  for (let i = 0; i < events.length; i += batchStep) {
+    eventBatches.push(JSON.stringify(events.slice(i, i + batchStep), null, 2));
+  }
 
-    // Helper to load and format type schemas for this skill
-    const getTypeSchema = (typeName: string): string | null => {
-      try {
-        const namedType = db.loadNamedType(typeName);
-        if (!namedType) return null;
-        const typeObj = db.loadType(namedType.typeId);
-        return formatTypeSchema(typeObj);
-      } catch {
-        return null;
-      }
-    };
+  console.log(`  Main session: ${eventBatches.length} batches × ${batchStep} events`);
 
-    for (let i = 0; i < events.length; i += batchStep) {
-      batchIndex++;
-      const suffixEnd = Math.min(i + batchStep, events.length);
-      const suffixStart = Math.max(0, suffixEnd - suffixLen);
-      const window = events.slice(suffixStart, suffixEnd);
-
-      const eventsText = JSON.stringify(window, null, 2);
-
-      try {
-        console.log(`    Skill "${skill.name}" batch ${batchIndex}/${Math.ceil(events.length / batchStep)} (events ${suffixStart}–${suffixEnd - 1})`);
-        await runSkill({
-          skillName: skill.name,
-          skillPrompt: skill.prompt,
-          eventsText,
-          dbPath,
-          queryOptions: qOpts,
-          pathToQwenExecutable,
-          skillTypeNames: skill.types,
-          getTypeSchema,
-        });
-        result.batches++;
-      } catch (err) {
-        result.errors.push({
-          skill: skill.name,
-          batch: batchIndex,
-          error: (err as Error).message,
-        });
-      }
-    }
+  try {
+    await runSkillInteractive({
+      skillName: 'MainIndexing',
+      skillPrompt: MAIN_PROMPT,
+      eventBatches,
+      dbPath,
+      queryOptions: qOpts,
+      pathToQwenExecutable,
+    });
+    result.batches = eventBatches.length;
+  } catch (err) {
+    result.errors.push({ error: (err as Error).message });
   }
 
   return result;

@@ -43,6 +43,9 @@ export class Db implements QueryDb {
     // named_types.description (pre-skills schema)
     try { this.raw.exec(`ALTER TABLE named_types ADD COLUMN description TEXT`); } catch { /* ok */ }
 
+    // named_types.hidden (post-initial schema)
+    try { this.raw.exec(`ALTER TABLE named_types ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`); } catch { /* ok */ }
+
     // types.ref_name (pre-RefType schema)
     try { this.raw.exec(`ALTER TABLE types ADD COLUMN ref_name TEXT`); } catch { /* ok */ }
 
@@ -663,7 +666,7 @@ export class Db implements QueryDb {
    */
   private collectEntryMeanings(value: unknown, type: Type, out: Set<string>): void {
     if (value == null) return;
-    if (typeof value === 'object' && '$ref' in (value as object)) return;
+    if (typeof value === 'object' && ('$ref' in (value as object) || '$id' in (value as object))) return;
 
     if (type.kind === 'RefType') {
       const named = this.loadNamedType(type.name);
@@ -696,6 +699,7 @@ export class Db implements QueryDb {
    * Called inside the transaction; must be synchronous.
    *
    * `{ "$ref": N }` resolves to the pre-allocated ID of the N-th top-level entry.
+   * `{ "$id": "uuid" }` references an existing node already present in the DB.
    */
   private buildEntryNode(
     value: unknown,
@@ -704,13 +708,24 @@ export class Db implements QueryDb {
     embedMap: Map<string, Float32Array>,
     path: string,
   ): string {
-    // $ref — circular/forward reference to a top-level entry
+    // $ref — circular/forward reference to a top-level entry in the same batch
     if (value !== null && typeof value === 'object' && '$ref' in (value as object)) {
       const idx = (value as { $ref: number }).$ref;
       const id = allocatedIds[idx];
       if (id == null)
         throw new Error(`$ref[${idx}]: entry does not exist or failed type validation`);
       return id;
+    }
+
+    // $id — reference to an existing node already in the DB
+    if (value !== null && typeof value === 'object' && '$id' in (value as object)) {
+      const nodeId = (value as { $id: string }).$id;
+      if (typeof nodeId !== 'string')
+        throw new Error(`${path}.$id: expected string, got ${typeof nodeId}`);
+      const row = this.raw.prepare(`SELECT id FROM nodes WHERE id=?`).get(nodeId) as { id: string } | undefined;
+      if (!row)
+        throw new Error(`${path}.$id "${nodeId}": node does not exist in the database`);
+      return nodeId;
     }
 
     // OptionalType — unwrap and delegate; empty/null already filtered at call sites
@@ -1010,18 +1025,44 @@ export class Db implements QueryDb {
     typeId: string,
     source: 'builtin' | 'user' = 'user',
     description?: string,
+    hidden?: boolean,
   ): void {
     this.raw
       .prepare(
-        `INSERT INTO named_types(name, type_id, description, source, updated_at)
-         VALUES(?, ?, ?, ?, datetime('now'))
+        `INSERT INTO named_types(name, type_id, description, source, hidden, updated_at)
+         VALUES(?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(name) DO UPDATE
            SET type_id=excluded.type_id,
                description=excluded.description,
                source=excluded.source,
+               hidden=excluded.hidden,
                updated_at=excluded.updated_at`,
       )
-      .run(name, typeId, description ?? null, source);
+      .run(name, typeId, description ?? null, source, hidden ? 1 : 0);
+  }
+
+  /** Returns true if the named type exists and is marked hidden. */
+  isHiddenNamedType(name: string): boolean {
+    const row = this.raw
+      .prepare(`SELECT hidden FROM named_types WHERE name=?`)
+      .get(name) as { hidden: number } | undefined;
+    return row ? row.hidden === 1 : false;
+  }
+
+  /**
+   * If the node itself is a map node whose type_id matches a named type,
+   * returns that named type's name; otherwise returns null.
+   * Used to filter query results where the node IS the named-type root.
+   */
+  getNodeTypeName(nodeId: string): string | null {
+    const row = this.raw
+      .prepare(
+        `SELECT nt.name FROM nodes n
+         JOIN named_types nt ON nt.type_id = n.type_id
+         WHERE n.id = ? AND n.kind = 'map'`,
+      )
+      .get(nodeId) as { name: string } | undefined;
+    return row?.name ?? null;
   }
 
   loadNamedType(name: string): { typeId: string; description: string | null; source: string } | null {

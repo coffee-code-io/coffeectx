@@ -14,6 +14,7 @@ export interface ClassifiedEvent {
   command?: string;     // shell_exec
   description?: string; // shell_exec
   question?: string;    // agent_question
+  thought?: string;     // thinking block that preceded the tool_use (file_create/file_edit/shell_exec/agent_question)
 }
 
 /** Tool names whose uses are never interesting enough to index. */
@@ -62,16 +63,26 @@ function isSystemInjection(text: string): boolean {
  * - KEEP  Edit tool uses    (FileOperation edit)
  * - KEEP  non-trivial Bash  (ShellExecution)
  * - KEEP  AskUserQuestion   (AgentQuestion)
- * - SKIP  thinking blocks, reads, searches, internal tooling
+ * - SKIP  reads, searches, internal tooling
+ *
+ * For assistant messages: the thinking block immediately preceding a tool_use
+ * is captured in the `thought` field of the resulting event.
  */
 export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
   const events: ClassifiedEvent[] = [];
+  // Thinking blocks may appear in a separate assistant message immediately before the
+  // assistant message that contains the tool_use (Claude Code JSONL format). We carry
+  // lastThought across consecutive assistant messages so it can be consumed by the next
+  // tool_use even if it arrives in a different message.
+  let lastThought: string | undefined;
 
   for (const msg of messages) {
     const { type, uuid, sessionId, timestamp } = msg;
     const content = msg.message?.content ?? [];
 
     if (type === 'user') {
+      // A user turn breaks any pending thought accumulation.
+      lastThought = undefined;
       for (const item of content) {
         if (item.type !== 'text') continue;
         if (isSystemInjection(item.text)) continue;
@@ -79,10 +90,30 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
       }
     } else if (type === 'assistant') {
       for (const item of content) {
-        if (item.type !== 'tool_use') continue;
+        if (item.type === 'thinking') {
+          // Capture the most recent thinking block; multiple are concatenated.
+          const text = item.thinking?.trim();
+          if (text) {
+            lastThought = lastThought ? `${lastThought}\n\n${text}` : text;
+          }
+          continue;
+        }
+
+        if (item.type !== 'tool_use') {
+          // Non-thinking, non-tool items (e.g. text) reset the thought accumulator.
+          lastThought = undefined;
+          continue;
+        }
+
         const { name, input } = item as { type: 'tool_use'; name: string; input: Record<string, unknown> };
 
-        if (SKIP_TOOLS.has(name)) continue;
+        if (SKIP_TOOLS.has(name)) {
+          lastThought = undefined;
+          continue;
+        }
+
+        const thought = lastThought;
+        lastThought = undefined; // reset after consuming
 
         if (name === 'Write') {
           const path = (input.file_path as string | undefined) ?? '';
@@ -92,6 +123,7 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
             sessionId, uuid, timestamp,
             path,
             preview: rawContent.slice(0, 300),
+            thought,
           });
         } else if (name === 'Edit') {
           const path = (input.file_path as string | undefined) ?? '';
@@ -101,19 +133,19 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
             sessionId, uuid, timestamp,
             path,
             preview: newStr.slice(0, 300),
+            thought,
           });
         } else if (name === 'Bash') {
           const command = (input.command as string | undefined) ?? '';
           if (isTrivialBash(command)) continue;
           const description = (input.description as string | undefined) ?? '';
-          events.push({ kind: 'shell_exec', sessionId, uuid, timestamp, command, description });
+          events.push({ kind: 'shell_exec', sessionId, uuid, timestamp, command, description, thought });
         } else if (name === 'AskUserQuestion') {
           const question = (input.question as string | undefined) ?? '';
           if (!question.trim()) continue;
-          events.push({ kind: 'agent_question', sessionId, uuid, timestamp, question });
+          events.push({ kind: 'agent_question', sessionId, uuid, timestamp, question, thought });
         }
         // All other tool names (Agent, custom MCP tools, etc.) are skipped.
-        // Add cases here if new interesting tool names emerge.
       }
     }
   }

@@ -50,6 +50,7 @@ export type YamlTypeSpec =
 /** A named type entry — spec plus optional human-readable description. */
 export interface YamlNamedTypeEntry {
   description?: string;
+  hidden?: boolean;
   spec: YamlTypeSpec;
 }
 
@@ -77,9 +78,10 @@ function extractTypeEntry(raw: unknown): YamlNamedTypeEntry {
   if (typeof raw === 'string') return { spec: raw };
 
   const obj = raw as Record<string, unknown>;
-  const { description, ...rest } = obj;
+  const { description, hidden, ...rest } = obj;
   return {
     description: typeof description === 'string' ? description : undefined,
+    hidden: hidden === true,
     spec: rest as YamlTypeSpec,
   };
 }
@@ -222,7 +224,7 @@ export function syncFromDir(
     try {
       const type = resolveYamlType(entry.spec, specRegistry);
       const typeId = db.upsertType(type, typeIdCache);
-      db.upsertNamedType(name, typeId, source, entry.description);
+      db.upsertNamedType(name, typeId, source, entry.description, entry.hidden);
       typesSynced.push(name);
     } catch (err) {
       typesErrors.push({ name, error: (err as Error).message });

@@ -193,52 +193,25 @@ types:
         kind: List
         item: Symbol
 
-skills:
-  CodeStructureIndexing:
-    description: |
-      Index source-code symbols by running a Language Server Protocol server over the repository.
-
-      Type relationships:
-        All symbol types embed a Location (from FilesystemIndexing) to anchor them to source.
-        containerName chains symbols into a hierarchy: LspEnumMember → LspEnum, LspMethod/LspField/LspConstructor/LspProperty → LspClass or LspInterface, LspFunction/LspVariable/LspConstant → LspModule or LspNamespace.
-        LspClass and LspInterface are the structural roots — they own LspMethod, LspField, LspProperty, and LspConstructor nodes.
-        LspEnum owns LspEnumMember nodes via containerName.
-        LspModule and LspNamespace are the file-level roots — everything else appears beneath them.
-        LspTypeParameter is owned by whichever class or function declares the generic.
-    prompt: |
-      You are provided with agent logs and you have raw_query tool to access symbols parsed from Lsp. Your job is to enrich LSP symbols. You don't 
-      have to process each log, consider only the logs that might relate to symbols.
-      Use annotate_node tool to add these annotations. Use raw_query tool to find more information about
-      knowledge database.
-      Here are types you can enrich.
-
-      LspModule      — SymbolKind 2: a source file that is a named module
-      LspNamespace   — SymbolKind 3: a named namespace or package declaration
-      LspClass       — SymbolKind 5: a class declaration
-      LspMethod      — SymbolKind 6: a class or interface method
-      LspProperty    — SymbolKind 7: a computed/accessor property
-      LspField       — SymbolKind 8: a stored class/struct field
-      LspConstructor — SymbolKind 9: a constructor function
-      LspEnum        — SymbolKind 10: an enum declaration
-      LspInterface   — SymbolKind 11: an interface or type declaration
-      LspFunction    — SymbolKind 12: a top-level function
-      LspVariable    — SymbolKind 13: a mutable variable (let/var)
-      LspConstant    — SymbolKind 14: an immutable constant (const)
-      LspEnumMember  — SymbolKind 22: a member inside an enum
-      LspTypeParameter — SymbolKind 26: a generic type parameter
-
+  # ── Union type covering every LSP symbol kind ────────────────────────────────
+  # Use this as a field type when you want a reference to any indexed code symbol.
+  # Example in data: { "$id": "<existing-node-uuid>" }
+  AnyLspSymbol:
+    description: A reference to any indexed LSP code symbol — function, class, method, interface, module, etc.
+    kind: Or
     types:
       - LspModule
       - LspNamespace
       - LspClass
+      - LspInterface
+      - LspEnum
+      - LspFunction
       - LspMethod
       - LspProperty
       - LspField
       - LspConstructor
-      - LspEnum
-      - LspInterface
-      - LspFunction
       - LspVariable
       - LspConstant
       - LspEnumMember
       - LspTypeParameter
+

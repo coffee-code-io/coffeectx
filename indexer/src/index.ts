@@ -286,6 +286,7 @@ switch (command) {
 
   case 'query': {
     const verbose = args.includes('--verbose') || args.includes('-v');
+    const includeHidden = args.includes('--include-hidden');
     const depth = flagInt('--depth', 10);
     const limit = flagInt('--limit', 50);
     const offset = flagInt('--offset', 0);
@@ -298,12 +299,12 @@ switch (command) {
     }
     const queryInput = args
       .slice(1)
-      .filter((a, i) => !flagsWithValues.has(i + 1) && a !== '--verbose' && a !== '-v')
+      .filter((a, i) => !flagsWithValues.has(i + 1) && a !== '--verbose' && a !== '-v' && a !== '--include-hidden')
       .join(' ')
       .trim();
 
     if (!queryInput) {
-      console.error('Usage: retrival-index query <expression> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--project <name>]');
+      console.error('Usage: retrival-index query <expression> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -317,7 +318,16 @@ switch (command) {
       process.exit(1);
     }
 
-    const allIds = await executeQuery(parsed, db);
+    const rawIds = await executeQuery(parsed, db);
+    const allIds = includeHidden
+      ? rawIds
+      : rawIds.filter(id => {
+          const selfType = db.getNodeTypeName(id);
+          if (selfType && db.isHiddenNamedType(selfType)) return false;
+          const parent = db.findNamedParent(id);
+          if (parent && db.isHiddenNamedType(parent.typeName)) return false;
+          return true;
+        });
     const ids = allIds.slice(offset, offset + limit);
     const results = ids.map(id => {
       try {
@@ -334,6 +344,7 @@ switch (command) {
 
   case 'search': {
     const verbose = args.includes('--verbose') || args.includes('-v');
+    const includeHidden = args.includes('--include-hidden');
     const limit = flagInt('--limit', 10);
     const offset = flagInt('--offset', 0);
     const depth = flagInt('--depth', 3);
@@ -345,28 +356,39 @@ switch (command) {
     }
     const text = args
       .slice(1)
-      .filter((a, i) => !flagsWithValues.has(i + 1) && a !== '--verbose' && a !== '-v')
+      .filter((a, i) => !flagsWithValues.has(i + 1) && a !== '--verbose' && a !== '-v' && a !== '--include-hidden')
       .join(' ')
       .trim();
 
     if (!text) {
-      console.error('Usage: retrival-index search <text> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--project <name>]');
+      console.error('Usage: retrival-index search <text> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
       db.close();
       process.exit(1);
     }
 
-    const results = await db.searchByText(text, limit, offset);
-    const mapped = results.map(r => {
-      if (verbose) return { id: r.nodeId, distance: r.distance, node: r.node };
+    const fetchLimit = includeHidden ? limit : limit * 4;
+    const rawResults = await db.searchByText(text, fetchLimit, offset);
+    const mapped: unknown[] = [];
+    for (const r of rawResults) {
+      if (verbose) {
+        mapped.push({ id: r.nodeId, distance: r.distance, node: r.node });
+        if (mapped.length >= limit) break;
+        continue;
+      }
       const parent = db.findNamedParent(r.nodeId);
       if (parent) {
+        if (!includeHidden && db.isHiddenNamedType(parent.typeName)) continue;
         try {
           const node = formatDeepNode(db.loadNodeDeep(parent.id, depth));
-          return { id: parent.id, typeName: parent.typeName, distance: r.distance, node, matchedId: r.nodeId };
+          mapped.push({ id: parent.id, typeName: parent.typeName, distance: r.distance, node, matchedId: r.nodeId });
+          if (mapped.length >= limit) break;
+          continue;
         } catch { /* fall through */ }
       }
-      return { id: r.nodeId, distance: r.distance, node: r.node };
-    });
+      if (!includeHidden) continue;
+      mapped.push({ id: r.nodeId, distance: r.distance, node: r.node });
+      if (mapped.length >= limit) break;
+    }
 
     console.log(JSON.stringify({ count: mapped.length, results: mapped }, null, 2));
     break;
@@ -374,18 +396,25 @@ switch (command) {
 
   case 'exact': {
     const verbose = args.includes('--verbose') || args.includes('-v');
+    const includeHidden = args.includes('--include-hidden');
     const limit = flagInt('--limit', 50);
     const offset = flagInt('--offset', 0);
     const depth = flagInt('--depth', 3);
     const value = positional(1);
 
     if (!value) {
-      console.error('Usage: retrival-index exact <value> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--project <name>]');
+      console.error('Usage: retrival-index exact <value> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
       db.close();
       process.exit(1);
     }
 
-    const allIds = db.querySymbolExact(value);
+    const rawIds = db.querySymbolExact(value);
+    const allIds = includeHidden
+      ? rawIds
+      : rawIds.filter(id => {
+          const parent = db.findNamedParent(id);
+          return !parent || !db.isHiddenNamedType(parent.typeName);
+        });
     const ids = allIds.slice(offset, offset + limit);
     const results = ids.map(id => {
       if (verbose) return { id, node: db.loadNode(id) };
@@ -405,13 +434,14 @@ switch (command) {
 
   case 'regex': {
     const verbose = args.includes('--verbose') || args.includes('-v');
+    const includeHidden = args.includes('--include-hidden');
     const limit = flagInt('--limit', 50);
     const offset = flagInt('--offset', 0);
     const depth = flagInt('--depth', 3);
     const pattern = positional(1);
 
     if (!pattern) {
-      console.error('Usage: retrival-index regex <pattern> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--project <name>]');
+      console.error('Usage: retrival-index regex <pattern> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -422,7 +452,13 @@ switch (command) {
       process.exit(1);
     }
 
-    const allIds = db.querySymbolRegex(pattern);
+    const rawIds = db.querySymbolRegex(pattern);
+    const allIds = includeHidden
+      ? rawIds
+      : rawIds.filter(id => {
+          const parent = db.findNamedParent(id);
+          return !parent || !db.isHiddenNamedType(parent.typeName);
+        });
     const ids = allIds.slice(offset, offset + limit);
     const results = ids.map(id => {
       if (verbose) return { id, node: db.loadNode(id) };
@@ -488,38 +524,31 @@ switch (command) {
   }
 
   case 'index-agent': {
-    const skillArg = flag('--skill');
     const batchStepArg = flag('--batch-step');
-    const suffixLenArg = flag('--suffix-len');
     const qwenPathArg = flag('--qwen-path');
 
     const batchStep = batchStepArg !== undefined ? parseInt(batchStepArg, 10) : undefined;
-    const suffixLen = suffixLenArg !== undefined ? parseInt(suffixLenArg, 10) : undefined;
 
-    if ((batchStep !== undefined && isNaN(batchStep)) || (suffixLen !== undefined && isNaN(suffixLen))) {
-      console.error('--batch-step and --suffix-len must be integers');
+    if (batchStep !== undefined && isNaN(batchStep)) {
+      console.error('--batch-step must be an integer');
       db.close();
       process.exit(1);
     }
 
     console.log(`Running agent indexer for project "${project.name}"...`);
-    if (skillArg) console.log(`  Skill filter: ${skillArg}`);
 
     const result = await indexAgent({
       db,
       dbPath: project.db,
-      skillFilter: skillArg,
       batchStep,
-      suffixLen,
       pathToQwenExecutable: qwenPathArg ? resolve(qwenPathArg) : undefined,
     });
 
-    console.log(`  Skills: ${result.skills}`);
     console.log(`  Batches: ${result.batches}`);
     if (result.errors.length > 0) {
       console.error(`  Errors: ${result.errors.length}`);
-      for (const { skill, batch, error } of result.errors) {
-        console.error(`    ${skill} batch ${batch}: ${error}`);
+      for (const { error } of result.errors) {
+        console.error(`    ${error}`);
       }
       db.close();
       process.exit(1);
@@ -554,7 +583,10 @@ switch (command) {
     console.log(`  Inserted: ${result.inserted} nodes`);
     if (result.errors.length > 0) {
       console.error(`  Errors: ${result.errors.length}`);
-      for (const { file, error } of result.errors) console.error(`    ${file}: ${error}`);
+      for (const { file, error, stack } of result.errors) {
+        console.error(`    ${file}: ${error}`);
+        if (stack) console.error(stack.split('\n').slice(1).map(l => `      ${l}`).join('\n'));
+      }
       db.close();
       process.exit(1);
     }
