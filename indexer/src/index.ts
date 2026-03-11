@@ -323,7 +323,7 @@ switch (command) {
       ? rawIds
       : rawIds.filter(id => {
           const selfType = db.getNodeTypeName(id);
-          if (selfType && db.isHiddenNamedType(selfType)) return false;
+          if (selfType) return !db.isHiddenNamedType(selfType);
           const parent = db.findNamedParent(id);
           if (parent && db.isHiddenNamedType(parent.typeName)) return false;
           return true;

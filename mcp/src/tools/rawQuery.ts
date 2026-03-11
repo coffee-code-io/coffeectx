@@ -59,10 +59,11 @@ export function registerRawQueryTool(server: McpServer, db: Db): void {
       const visibleIds = includeHidden
         ? allIds
         : allIds.filter(id => {
-            // Check if the node itself is a hidden named type (common for IsType queries)
+            // If the node itself is a named-type root, its own type decides visibility.
+            // Don't walk up to ancestors — they may be hidden for unrelated reasons.
             const selfType = db.getNodeTypeName(id);
-            if (selfType && db.isHiddenNamedType(selfType)) return false;
-            // Check if an ancestor is a hidden named type
+            if (selfType) return !db.isHiddenNamedType(selfType);
+            // For internal nodes (fields, list items), check the nearest named ancestor.
             const parent = db.findNamedParent(id);
             if (parent && db.isHiddenNamedType(parent.typeName)) return false;
             return true;
