@@ -118,7 +118,6 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           operation: event.kind === 'file_create' ? 'create' : 'edit',
           path: event.path ?? '',
           preview: event.preview ?? '',
-          ...(event.thought ? { thought: event.thought } : {}),
           touchedSymbols: [],
         },
       };
@@ -132,7 +131,6 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           timestamp: event.timestamp,
           command: event.command ?? '',
           description: event.description ?? '',
-          ...(event.thought ? { thought: event.thought } : {}),
         },
       };
 
@@ -144,8 +142,19 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           uuid: event.uuid,
           timestamp: event.timestamp,
           question: event.question ?? '',
-          ...(event.thought ? { thought: event.thought } : {}),
-          relatedSymbols: []
+          relatedSymbols: [],
+        },
+      };
+
+    case 'agent_thought':
+      return {
+        type: 'AgentThought',
+        data: {
+          sessionId: event.sessionId,
+          uuid: event.uuid,
+          timestamp: event.timestamp,
+          text: event.text ?? '',
+          ...(event.linkedTo ? { linkedTo: event.linkedTo } : {}),
         },
       };
 

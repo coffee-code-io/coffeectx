@@ -6,9 +6,6 @@ types:
   #   detail: Symbol        — type signature or other detail string from the server
   #   location: Location    — source position (from directory.yaml)
   #   comment: Meaning?     — optional analyst/agent annotation
-  #   agentEvents:          — IDs of agent log events that touched this symbol
-  #     kind: List
-  #     item: Symbol
   # ─────────────────────────────────────────────────────────────────────────────
 
   LspModule:
@@ -20,9 +17,6 @@ types:
       detail: Symbol
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspNamespace:
     description: A namespace or package symbol (SymbolKind 3) — a named scope grouping related declarations.
@@ -33,9 +27,6 @@ types:
       detail: Symbol
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspClass:
     description: A class declaration (SymbolKind 5) — a named type with fields and methods.
@@ -46,9 +37,6 @@ types:
       detail: Symbol        # e.g. "extends Base implements IFoo"
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspMethod:
     description: A method on a class or object (SymbolKind 6) — a named function scoped to a class.
@@ -59,9 +47,6 @@ types:
       detail: Symbol         # signature, e.g. "(id: string): Promise<User>"
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspProperty:
     description: An object or class property (SymbolKind 7) — an accessor or computed member.
@@ -72,9 +57,6 @@ types:
       detail: Symbol         # declared type
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspField:
     description: A class field or struct member (SymbolKind 8) — a stored data member.
@@ -85,9 +67,6 @@ types:
       detail: Symbol         # declared type
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspConstructor:
     description: A constructor function (SymbolKind 9) — the initializer for a class.
@@ -98,9 +77,6 @@ types:
       detail: Symbol         # parameter list
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspEnum:
     description: An enum declaration (SymbolKind 10) — a named set of constant members.
@@ -111,9 +87,6 @@ types:
       detail: Symbol
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspInterface:
     description: An interface declaration (SymbolKind 11) — a structural type contract without implementation.
@@ -124,9 +97,6 @@ types:
       detail: Symbol
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspFunction:
     description: A top-level or module-scoped function (SymbolKind 12) — not a method.
@@ -137,9 +107,6 @@ types:
       detail: Symbol         # signature
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspVariable:
     description: A mutable variable declaration (SymbolKind 13) — let or var binding.
@@ -150,9 +117,6 @@ types:
       detail: Symbol         # inferred or declared type
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspConstant:
     description: An immutable constant binding (SymbolKind 14) — const declaration or enum-like value.
@@ -163,9 +127,6 @@ types:
       detail: Symbol
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspEnumMember:
     description: A single member of an enum (SymbolKind 22) — a named constant within an LspEnum.
@@ -176,9 +137,6 @@ types:
       detail: Symbol         # numeric or string value
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   LspTypeParameter:
     description: A generic type parameter (SymbolKind 26) — e.g. the T in Array<T>.
@@ -189,9 +147,6 @@ types:
       detail: Symbol         # constraint, e.g. "extends object"
       location: Location
       comment: Meaning?
-      agentEvents:
-        kind: List
-        item: Symbol
 
   # ── Union type covering every LSP symbol kind ────────────────────────────────
   # Use this as a field type when you want a reference to any indexed code symbol.
@@ -214,4 +169,3 @@ types:
       - LspConstant
       - LspEnumMember
       - LspTypeParameter
-

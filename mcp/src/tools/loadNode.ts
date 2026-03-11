@@ -7,8 +7,7 @@ export function registerLoadNodeTool(server: McpServer, db: Db): void {
   server.tool(
     'load_node',
     'Load a knowledge-graph node by ID, expanding the tree to a configurable depth.\n' +
-      'Container nodes beyond the depth limit are returned as `{ $ref: id }` so you can load them separately.\n' +
-      'Cycles are represented as `{ $cycle: id }`. Use verbose=true to include full type definitions and meaning vectors.',
+      'Container nodes beyond the depth limit are returned as `{ $id: id }` so you can load them separately.\n',
     {
       id: z.string().describe('Node ID to load'),
       depth: z

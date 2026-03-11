@@ -33,8 +33,8 @@ export function formatDeepNode(node: DeepNode): unknown {
       return out;
     }
 
-    case 'ref':   return { $ref: node.id };
-    case 'cycle': return { $cycle: node.id };
+    case 'ref':   return { $id: node.id };
+    case 'cycle': return { $id: node.id };
   }
 }
 

@@ -1,0 +1,124 @@
+[
+  {
+    "$type": "Decision",
+    "title": "Use RefType over Ref for named type references",
+    "rationale": "Avoids O(types^depth) row explosion and supports circular type definitions naturally in the database schema",
+    "symbols": []
+  },
+  {
+    "$type": "Assumption",
+    "description": "Embed dimension matches the vec table dimension in the existing DB",
+    "risk": "sqlite-vec will reject inserts if dimensions differ",
+    "symbols": []
+  },
+  {
+    "$type": "Assumption",
+    "description": "Users run a single MCP server per project",
+    "risk": "Multiple servers would write to the same DB without locking",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Use Map instead of object for accumulator",
+    "rationale": "Map preserves insertion order and has O(1) keyed lookups",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Define loose Node schema for Zod lazy circular ref",
+    "rationale": "Casts parse result as Node to avoid circular ref issues while allowing any ZodType for the schema",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Embed system prompt in first user message",
+    "rationale": "CLI lacks system-prompt arg; embedding in first message ensures it's not compacted during session",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Use z.catchall for zod schema with required $type field",
+    "rationale": "z.object({ $type: z.string() }).catchall(z.unknown()) advertises $type as required while allowing arbitrary keys",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Fix resolveRefValue to return UUID string directly",
+    "rationale": "Changed to return ref string instead of object with $ref property for proper ID resolution",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Add isRefValue helper for reference detection",
+    "rationale": "Centralizes check for { $ref: N } or { $id: uuid } patterns to avoid duplication",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Pass namedKey through upsertType chain for named roots",
+    "rationale": "Maintains named type identity through structural type resolution",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Use namedKey for structural type content key",
+    "rationale": "Guarantees unique type_id for named types with identical structure via NT:{namedKey} prefix",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Throw error when RefType target not found in buildEntryNode",
+    "rationale": "Ensures type safety by validating named type existence before recursive build",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Build file-event index before LSP client start",
+    "rationale": "Pre-populates agentEvents on LSP symbols by indexing file→event mapping upfront",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Remove unused LspClient imports from indexSymbols",
+    "rationale": "Clean up unused imports after refactoring",
+    "symbols": []
+  },
+  {
+    "$type": "Choice",
+    "chosen": "Embed system prompt in first message",
+    "option": "CLI --system-prompt flag",
+    "reason": "CLI uses Gemini/Google AI and lacks built-in system prompt CLI arg; adding would require substantial qwen-code-core changes",
+    "symbols": []
+  },
+  {
+    "$type": "Choice",
+    "chosen": "Use Zod lazy with loose Node schema",
+    "option": "Cast result as Node at usage site",
+    "reason": "Avoids both circular ref issue and type mismatch with z.any() making fields optional",
+    "symbols": []
+  },
+  {
+    "$type": "ChangeEvent",
+    "name": "Unified insertEntries validation logic",
+    "description": "Refactored resolveRefValue and buildNodeForValue to properly handle { $ref: N } and { $id: uuid } references",
+    "symbols": []
+  },
+  {
+    "$type": "Decision",
+    "title": "Embed stub provider defaults for config",
+    "rationale": "Provides safe fallback when no embedding credentials are configured, preventing silent failures",
+    "symbols": []
+  },
+  {
+    "$type": "Assumption",
+    "description": "Config.yaml embed.provider defaults to 'stub' when no credentials present",
+    "risk": "Users may not realize embeddings are disabled and zero vectors are being generated",
+    "symbols": []
+  },
+  {
+    "$type": "LocalDecision",
+    "title": "Update embedded schema fields in type definitions",
+    "rationale": "Added description, hidden, ref_name, content_key columns for better type tracking",
+    "symbols": []
+  }
+]

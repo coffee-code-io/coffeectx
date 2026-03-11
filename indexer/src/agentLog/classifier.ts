@@ -1,6 +1,6 @@
 import type { RawLogMessage } from './reader.js';
 
-export type EventKind = 'user_input' | 'file_create' | 'file_edit' | 'shell_exec' | 'agent_question';
+export type EventKind = 'user_input' | 'file_create' | 'file_edit' | 'shell_exec' | 'agent_question' | 'agent_thought';
 
 export interface ClassifiedEvent {
   kind: EventKind;
@@ -8,13 +8,13 @@ export interface ClassifiedEvent {
   uuid: string;
   timestamp: string;
   // populated per kind:
-  text?: string;        // user_input
+  text?: string;        // user_input | agent_thought
   path?: string;        // file_create | file_edit
   preview?: string;     // file_create | file_edit
   command?: string;     // shell_exec
   description?: string; // shell_exec
   question?: string;    // agent_question
-  thought?: string;     // thinking block that preceded the tool_use (file_create/file_edit/shell_exec/agent_question)
+  linkedTo?: string;    // agent_thought: UUID of the event this thought immediately preceded
 }
 
 /** Tool names whose uses are never interesting enough to index. */
@@ -28,16 +28,31 @@ const SKIP_TOOLS = new Set([
 
 /**
  * Bash commands whose first token is on this list are trivially uninteresting
- * (directory listing, echoes, simple checks) and get skipped.
+ * (directory listing, echoes, simple checks) and get skipped — unless they are
+ * chained with a non-trivial command.
  */
 const TRIVIAL_BASH_FIRST_TOKENS = new Set([
   'ls', 'pwd', 'echo', 'cat', 'head', 'tail', 'which',
   'type', 'whoami', 'date', 'true', 'false', 'printf',
+  'cd', 'mkdir', 'rm', 'cp', 'mv',
 ]);
 
-function isTrivialBash(command: string): boolean {
-  const token = command.trimStart().split(/\s+/)[0] ?? '';
-  return TRIVIAL_BASH_FIRST_TOKENS.has(token);
+/**
+ * Keywords that make a command interesting regardless of its first token.
+ * Matches test runners, build tools, linters, CI steps, etc.
+ */
+const INTERESTING_BASH_RE = /\b(test|spec|jest|vitest|mocha|jasmine|karma|pytest|rspec|build|compile|tsc|webpack|rollup|vite|esbuild|lint|eslint|prettier|typecheck|type-check|check|deploy|publish|run\s+(?:test|build|lint|check|dev)|cargo\s+(?:test|build|check)|go\s+(?:test|build|vet)|make|cmake|bazel|buck)\b/i;
+
+function isTrivialBash(command: string, description: string): boolean {
+  // A command is interesting if it contains known interesting keywords
+  if (INTERESTING_BASH_RE.test(command) || INTERESTING_BASH_RE.test(description)) return false;
+
+  // For compound commands (&&-chained), only trivial if ALL parts are trivial
+  const parts = command.split('&&').map(p => p.trim());
+  return parts.every(part => {
+    const token = part.split(/\s+/)[0] ?? '';
+    return TRIVIAL_BASH_FIRST_TOKENS.has(token);
+  });
 }
 
 function isSystemInjection(text: string): boolean {
@@ -63,18 +78,17 @@ function isSystemInjection(text: string): boolean {
  * - KEEP  Edit tool uses    (FileOperation edit)
  * - KEEP  non-trivial Bash  (ShellExecution)
  * - KEEP  AskUserQuestion   (AgentQuestion)
+ * - KEEP  thinking blocks   (AgentThought, emitted before the event they preceded)
  * - SKIP  reads, searches, internal tooling
  *
- * For assistant messages: the thinking block immediately preceding a tool_use
- * is captured in the `thought` field of the resulting event.
+ * Thinking blocks that immediately precede a tool_use are emitted as separate
+ * AgentThought events (with linkedTo pointing to the subsequent event's uuid)
+ * rather than being attached as a field of the following event.
  */
 export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
   const events: ClassifiedEvent[] = [];
-  // Thinking blocks may appear in a separate assistant message immediately before the
-  // assistant message that contains the tool_use (Claude Code JSONL format). We carry
-  // lastThought across consecutive assistant messages so it can be consumed by the next
-  // tool_use even if it arrives in a different message.
-  let lastThought: string | undefined;
+  // lastThought carries accumulated thinking blocks across consecutive assistant messages.
+  let lastThought: { text: string; uuid: string } | undefined;
 
   for (const msg of messages) {
     const { type, uuid, sessionId, timestamp } = msg;
@@ -94,7 +108,11 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
           // Capture the most recent thinking block; multiple are concatenated.
           const text = item.thinking?.trim();
           if (text) {
-            lastThought = lastThought ? `${lastThought}\n\n${text}` : text;
+            if (lastThought) {
+              lastThought = { text: `${lastThought.text}\n\n${text}`, uuid: lastThought.uuid };
+            } else {
+              lastThought = { text, uuid };
+            }
           }
           continue;
         }
@@ -112,38 +130,42 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
           continue;
         }
 
+        // Snapshot and clear the thought before deciding whether to keep this event.
         const thought = lastThought;
-        lastThought = undefined; // reset after consuming
+        lastThought = undefined;
 
         if (name === 'Write') {
           const path = (input.file_path as string | undefined) ?? '';
           const rawContent = (input.content as string | undefined) ?? '';
-          events.push({
-            kind: 'file_create',
-            sessionId, uuid, timestamp,
-            path,
-            preview: rawContent.slice(0, 300),
-            thought,
-          });
+          if (thought) {
+            events.push({ kind: 'agent_thought', sessionId, uuid: thought.uuid, timestamp, text: thought.text, linkedTo: uuid });
+          }
+          events.push({ kind: 'file_create', sessionId, uuid, timestamp, path, preview: rawContent.slice(0, 300) });
+
         } else if (name === 'Edit') {
           const path = (input.file_path as string | undefined) ?? '';
           const newStr = (input.new_string as string | undefined) ?? '';
-          events.push({
-            kind: 'file_edit',
-            sessionId, uuid, timestamp,
-            path,
-            preview: newStr.slice(0, 300),
-            thought,
-          });
+          if (thought) {
+            events.push({ kind: 'agent_thought', sessionId, uuid: thought.uuid, timestamp, text: thought.text, linkedTo: uuid });
+          }
+          events.push({ kind: 'file_edit', sessionId, uuid, timestamp, path, preview: newStr.slice(0, 300) });
+
         } else if (name === 'Bash') {
           const command = (input.command as string | undefined) ?? '';
-          if (isTrivialBash(command)) continue;
           const description = (input.description as string | undefined) ?? '';
-          events.push({ kind: 'shell_exec', sessionId, uuid, timestamp, command, description, thought });
+          if (isTrivialBash(command, description)) continue;
+          if (thought) {
+            events.push({ kind: 'agent_thought', sessionId, uuid: thought.uuid, timestamp, text: thought.text, linkedTo: uuid });
+          }
+          events.push({ kind: 'shell_exec', sessionId, uuid, timestamp, command, description });
+
         } else if (name === 'AskUserQuestion') {
           const question = (input.question as string | undefined) ?? '';
           if (!question.trim()) continue;
-          events.push({ kind: 'agent_question', sessionId, uuid, timestamp, question, thought });
+          if (thought) {
+            events.push({ kind: 'agent_thought', sessionId, uuid: thought.uuid, timestamp, text: thought.text, linkedTo: uuid });
+          }
+          events.push({ kind: 'agent_question', sessionId, uuid, timestamp, question });
         }
         // All other tool names (Agent, custom MCP tools, etc.) are skipped.
       }

@@ -1,6 +1,5 @@
 import { query, isSDKResultMessage } from '@qwen-code/sdk';
 import type { QueryOptions, SDKUserMessage } from '@qwen-code/sdk';
-import type { Type } from '@retrival-mcp/core';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
@@ -10,6 +9,23 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** Absolute path to the MCP server entry point (mcp/dist/index.js). */
 const MCP_SERVER_PATH = resolve(__dirname, '../../../mcp/dist/index.js');
+
+/** Retrival-mcp project root — used as cwd so the qwen skill manager finds .qwen/skills/. */
+const PROJECT_ROOT = resolve(__dirname, '../../..');
+
+/** Absolute path to the indexer system prompt loaded via QWEN_SYSTEM_MD. */
+const SYSTEM_PROMPT_PATH = join(__dirname, '../../prompts/system.md');
+
+/**
+ * Sentinel markers for ephemeral thought context.
+ *
+ * Content between these markers is injected into the current batch so the
+ * indexing agent can use agent-thought reasoning as context. After each batch
+ * result, `pruneEphemeralContext()` removes these blocks from the conversation
+ * history so they don't accumulate in subsequent batches (curated history).
+ */
+export const EPHEMERAL_CONTEXT_BEGIN = '[EPHEMERAL_CONTEXT_BEGIN]';
+export const EPHEMERAL_CONTEXT_END = '[EPHEMERAL_CONTEXT_END]';
 
 /**
  * Resolve the packaged qwen CLI from the @qwen-code/sdk package.
@@ -41,113 +57,10 @@ export interface RunSkillInteractiveOptions {
   queryOptions: Partial<QueryOptions>;
   /** Override for the qwen CLI path. */
   pathToQwenExecutable?: string;
-  /** Names of entry types this skill is expected to create. */
-  skillTypeNames?: string[];
-  /** Function to load and format type information. */
-  getTypeSchema?: (typeName: string) => string | null;
 }
 
-/**
- * Format a Type into a human-readable schema string.
- * Helps qwen understand what fields to populate when creating entries.
- */
-export function formatTypeSchema(type: Type, indent = 0): string {
-  const spaces = ' '.repeat(indent);
-  const nextIndent = indent + 2;
-  const nextSpaces = ' '.repeat(nextIndent);
-
-  switch (type.kind) {
-    case 'SymbolType':
-      return 'string (symbol)';
-    case 'MeaningType':
-      return 'string (meaningful text to be embedded)';
-    case 'MapType': {
-      const fields = Object.entries(type.entries)
-        .map(([key, fieldType]) => {
-          const fieldSchema = formatTypeSchema(fieldType, nextIndent);
-          return `${nextSpaces}${key}: ${fieldSchema}`;
-        })
-        .join('\n');
-      return `{\n${fields}\n${spaces}}`;
-    }
-    case 'ListType': {
-      const itemSchema = formatTypeSchema(type.itemType, nextIndent);
-      return `[${itemSchema}]`;
-    }
-    case 'RefType':
-      return `${type.name} (named type)`;
-    case 'OrType': {
-      const left = formatTypeSchema(type.left, nextIndent);
-      const right = formatTypeSchema(type.right, nextIndent);
-      return `${left} | ${right}`;
-    }
-    case 'AndType': {
-      const left = formatTypeSchema(type.left, nextIndent);
-      const right = formatTypeSchema(type.right, nextIndent);
-      return `${left} & ${right}`;
-    }
-    case 'OptionalType': {
-      const inner = formatTypeSchema(type.inner, indent);
-      return `${inner}?`;
-    }
-    default:
-      return 'unknown';
-  }
-}
-
-function buildIntroPrompt(
-  skillName: string,
-  skillPrompt: string,
-  firstBatch: string,
-  skillTypeNames?: string[],
-  getTypeSchema?: (typeName: string) => string | null,
-): string {
-  let typeSchemaSection = '';
-  if (skillTypeNames && skillTypeNames.length > 0 && getTypeSchema) {
-    const typeSchemas: string[] = [];
-    for (const typeName of skillTypeNames) {
-      const schema = getTypeSchema(typeName);
-      if (schema) {
-        typeSchemas.push(`${typeName} — schema:\n${schema}\n  Example:\n  { "$type": "${typeName}", "fieldName": "value", ... }`);
-      }
-    }
-    if (typeSchemas.length > 0) {
-      typeSchemaSection = `
-
-## Entry Types You Must Create
-
-Each entry passed to upsert_entries MUST include "$type" (required) and the relevant fields.
-
-${typeSchemas.join('\n\n')}
-`;
-    }
-  }
-
-  return `You are working with a software project knowledge graph.
-
-Skill: ${skillName}
-
-Instructions:
-${skillPrompt}${typeSchemaSection}
-
-## How to call upsert_entries
-
-The tool accepts an "entries" array. Each entry is a flat JSON object where "$type" is required.
-
-Example:
-  upsert_entries({
-    entries: [
-      { "$type": "Decision", "title": "Use SQLite for storage", "rationale": "Simple, embedded, no server needed" },
-      { "$type": "LibraryDecision", "library": "better-sqlite3", "rationale": "Sync API fits the use case" }
-    ]
-  })
-
-Rules:
-- If you find nothing to extract from the events below, say "nothing to extract" and stop.
-- Never call upsert_entries with empty entries like {}.
-- Populate only fields whose values you can determine from the event data.
-- Do not explain your work. Just call the tools and finish.
-- More events will follow in subsequent messages. Process each batch as it arrives.
+function buildIntroPrompt(skillPrompt: string, firstBatch: string): string {
+  return `${skillPrompt}
 
 ---
 ${firstBatch}
@@ -166,12 +79,16 @@ ${eventsText}
  * Run a single interactive multi-turn qwen session for one skill.
  *
  * Each batch of events is sent as a separate user turn. The session stays
- * open across batches so the model accumulates context (subject to compression).
- * Thoughts are included in each batch's events naturally; older batches are
- * retained in the model's conversation history without explicit resending.
+ * open across batches so the model retains continuity (e.g. can cross-reference
+ * decisions from earlier batches).
+ *
+ * **Curated history**: After each batch result, ephemeral thought context
+ * (wrapped in EPHEMERAL_CONTEXT_BEGIN/END markers) is pruned from the
+ * conversation history so agent thoughts don't accumulate across batches.
+ * Regular events remain in history for continuity.
  */
 export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Promise<void> {
-  const { skillName, skillPrompt, eventBatches, dbPath, queryOptions, pathToQwenExecutable, skillTypeNames, getTypeSchema } = opts;
+  const { skillName, skillPrompt, eventBatches, dbPath, queryOptions, pathToQwenExecutable } = opts;
 
   if (eventBatches.length === 0) return;
 
@@ -180,6 +97,7 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
   const mcpEnv: Record<string, string> = {
     RETRIVAL_DB_PATH: dbPath,
     RETRIVAL_INSERT: '1',
+    QWEN_SYSTEM_MD: SYSTEM_PROMPT_PATH,
     ...(queryOptions.env ?? {}),
   };
 
@@ -206,7 +124,7 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
       }
 
       const content = i === 0
-        ? buildIntroPrompt(skillName, skillPrompt, eventBatches[0]!, skillTypeNames, getTypeSchema)
+        ? buildIntroPrompt(skillPrompt, eventBatches[0]!)
         : buildBatchPrompt(i, eventBatches.length, eventBatches[i]!);
 
       yield {
@@ -223,6 +141,7 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
       prompt: generateMessages(),
       options: {
         ...queryOptions,
+        cwd: PROJECT_ROOT,
         env: mcpEnv,
         permissionMode: 'yolo',
         excludeTools: ['Write', 'Edit', 'Bash', 'NotebookEdit', 'Agent'],
@@ -247,6 +166,17 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
       if (isSDKResultMessage(msg)) {
         batchCount++;
         console.log(`[runSkill] Batch ${batchCount}/${eventBatches.length} done (${messageCount} total messages)`);
+
+        // Prune ephemeral thought context from history before the next batch.
+        // This implements curated history: thoughts enrich the current batch
+        // but don't accumulate in the conversation window for subsequent batches.
+        try {
+          await q.pruneEphemeralContext();
+        } catch (pruneErr) {
+          // Non-fatal — log and continue
+          console.warn(`[runSkill] pruneEphemeralContext failed: ${(pruneErr as Error).message}`);
+        }
+
         // Unblock the generator so it can yield the next batch
         turnComplete?.();
         turnComplete = undefined;

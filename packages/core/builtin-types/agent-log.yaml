@@ -37,7 +37,6 @@ types:
       operation: Symbol    # "create" | "edit"
       path: Symbol         # absolute file path
       preview: Meaning     # first lines of new content, or the changed fragment
-      thought: Meaning?    # agent's thinking block that preceded this operation
       comment: Meaning?    # optional analyst annotation
       touchedSymbols:      # LSP symbol nodes in this file — populated during LSP indexing
         kind: List
@@ -53,7 +52,6 @@ types:
       timestamp: Symbol
       command: Symbol
       description: Meaning # agent-supplied description of what the command does
-      thought: Meaning?    # agent's thinking block that preceded this command
       comment: Meaning?    # optional analyst annotation
 
   AgentQuestion:
@@ -65,9 +63,18 @@ types:
       uuid: Symbol
       timestamp: Symbol
       question: Meaning    # the question text
-      thought: Meaning?    # agent's thinking block that preceded this question
       comment: Meaning?    # optional analyst annotation
       relatedSymbols:      # LSP symbol nodes mentioned in the question — populated during LSP indexing
         kind: List
         item: AnyLspSymbol
 
+  AgentThought:
+    description: An internal reasoning/thinking block from the coding agent — captured as a separate entry so it enriches the current indexing batch without polluting later context.
+    hidden: true
+    kind: Map
+    fields:
+      sessionId: Symbol
+      uuid: Symbol         # same UUID as the message that contained this thinking block
+      timestamp: Symbol
+      text: Meaning        # full thinking block content
+      linkedTo: Symbol?    # UUID of the next event (FileOperation/ShellExecution/AgentQuestion) this thought immediately preceded

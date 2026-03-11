@@ -1,0 +1,6 @@
+name: local-decisions
+description: Extracts local decisions, implementation choices, and concrete change events from agent session events
+types:
+  - LocalDecision
+  - Choice
+  - LocalChangeEvent

@@ -1,0 +1,17 @@
+name: lsp-enrichment
+description: Enriches indexed LSP symbols with comments inferred from agent session context
+types:
+  - LspFunction
+  - LspClass
+  - LspMethod
+  - LspInterface
+  - LspEnum
+  - LspModule
+  - LspNamespace
+  - LspField
+  - LspProperty
+  - LspConstructor
+  - LspVariable
+  - LspConstant
+  - LspEnumMember
+  - LspTypeParameter
