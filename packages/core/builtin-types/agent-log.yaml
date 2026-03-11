@@ -22,9 +22,9 @@ types:
       relatedFiles:        # file paths mentioned or implied by the user (empty = none)
         kind: List
         item: Symbol
-      relatedSymbols:      # symbol names mentioned by the user (filled by enricher)
+      relatedSymbols:      # LSP symbol nodes mentioned by the user — populated during LSP indexing
         kind: List
-        item: Symbol
+        item: AnyLspSymbol
 
   FileOperation:
     description: A file creation or edit performed by the coding agent — captures what changed and where.
@@ -39,9 +39,9 @@ types:
       preview: Meaning     # first lines of new content, or the changed fragment
       thought: Meaning?    # agent's thinking block that preceded this operation
       comment: Meaning?    # optional analyst annotation
-      touchedSymbols:      # IDs of LSP symbol nodes in this file (filled by enricher)
+      touchedSymbols:      # LSP symbol nodes in this file — populated during LSP indexing
         kind: List
-        item: Symbol
+        item: AnyLspSymbol
 
   ShellExecution:
     description: A shell command executed by the coding agent — build steps, test runs, git ops, etc.
@@ -67,7 +67,7 @@ types:
       question: Meaning    # the question text
       thought: Meaning?    # agent's thinking block that preceded this question
       comment: Meaning?    # optional analyst annotation
-      relatedSymbols:      # symbol names mentioned in the question
+      relatedSymbols:      # LSP symbol nodes mentioned in the question — populated during LSP indexing
         kind: List
-        item: Symbol
+        item: AnyLspSymbol
 

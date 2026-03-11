@@ -19,3 +19,14 @@ types:
       symbols:                # LSP symbol nodes directly affected by this choice (use { "$id": "uuid" })
         kind: List
         item: AnyLspSymbol
+
+  LocalChangeEvent:
+    description: A concrete local change — a shift in understanding, assumption, interface contract, or implementation within a single file, function, or log session.
+    kind: Map
+    fields:
+      name: Symbol            # short label, e.g. "Switched parseQuery to return null on empty input"
+      description: Meaning    # what changed, why it changed, and what the new behaviour is
+      scope: Symbol           # "file" | "function" | "interface" | "assumption" | "implementation"
+      symbols:                # LSP symbol nodes that were changed or whose contract was updated (use { "$id": "uuid" })
+        kind: List
+        item: AnyLspSymbol

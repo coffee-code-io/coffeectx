@@ -972,6 +972,38 @@ export class Db implements QueryDb {
   }
 
   /**
+   * Return the node ID stored at a specific key in a map node.
+   * Returns null if the map does not have that key.
+   */
+  getMapFieldId(mapId: string, key: string): string | null {
+    const row = this.raw
+      .prepare(`SELECT value_id FROM map_entries WHERE map_id=? AND key=?`)
+      .get(mapId, key) as { value_id: string } | undefined;
+    return row?.value_id ?? null;
+  }
+
+  /**
+   * Append item node IDs to an existing list node.
+   * Items are added after any existing items, preserving their original positions.
+   * No-op if itemIds is empty.
+   */
+  appendListItems(listId: string, itemIds: string[]): void {
+    if (itemIds.length === 0) return;
+    const maxRow = this.raw
+      .prepare(`SELECT COALESCE(MAX(position), -1) AS max FROM list_items WHERE list_id=?`)
+      .get(listId) as { max: number };
+    let pos = maxRow.max + 1;
+    const txn = this.raw.transaction(() => {
+      for (const itemId of itemIds) {
+        this.raw
+          .prepare(`INSERT INTO list_items(list_id, position, item_id) VALUES(?,?,?)`)
+          .run(listId, pos++, itemId);
+      }
+    });
+    txn();
+  }
+
+  /**
    * Find the nearest ancestor of nodeId that is a named-type map node.
    * Returns { id, typeName } or null if none is found within 20 hops.
    */

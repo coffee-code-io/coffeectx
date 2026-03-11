@@ -38,9 +38,9 @@ You will receive batches of agent session events (user inputs, file operations, 
 
 ## Primary tasks
 
-### Task 1 — Index local implementation decisions
+### Task 1 — Index local decisions and local changes
 
-For each batch, identify small to medium implementation choices made during coding.
+For each batch, identify implementation choices and concrete local changes.
 
 LocalDecision — a deliberate choice within a function or module:
   title: short imperative phrase (e.g. "Use early return to reduce nesting")
@@ -55,9 +55,19 @@ Choice — when one option was explicitly rejected in favour of another:
   reason: why the option was not chosen
   symbols: list of { "$id": "<uuid>" } for related LSP nodes
 
+LocalChangeEvent — a concrete local change: a shift in understanding, assumption, interface
+contract, or implementation scoped to a file, function, or this session's log.
+Extract when you see something being corrected, reversed, redefined, or updated at a local level.
+  name: short label (e.g. "parseQuery now returns null on empty input instead of throwing")
+  description: what changed, why, and what the new behaviour or contract is
+  scope: one of "file" | "function" | "interface" | "assumption" | "implementation"
+  symbols: list of { "$id": "<uuid>" } for LSP nodes whose behaviour or contract changed
+
 Examples:
   { "$type": "LocalDecision", "title": "Use Map instead of object for accumulator", "rationale": "Map preserves insertion order and has O(1) keyed lookups", "symbols": [{ "$id": "uuid-of-buildIndex" }] }
   { "$type": "Choice", "chosen": "early return", "option": "nested else", "reason": "Reduces nesting and keeps the happy path at the top level", "symbols": [] }
+  { "$type": "LocalChangeEvent", "name": "buildEntryNode now validates $id node existence", "description": "Previously $id references were passed through without checking; now the node must exist in the DB or an error is thrown", "scope": "function", "symbols": [{ "$id": "uuid-of-buildEntryNode" }] }
+  { "$type": "LocalChangeEvent", "name": "relatedSymbols field changed from List<Symbol> to List<AnyLspSymbol>", "description": "Items now reference actual Lsp* nodes instead of storing plain string identifiers; populated by LSP indexer rather than enricher", "scope": "interface", "symbols": [] }
 
 ### Task 2 — Enrich LSP symbols with comments
 

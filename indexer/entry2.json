@@ -1,0 +1,10 @@
+[
+    {
+        "$type": "LocalDecision",
+        "title": "hui must stink",
+        "rationale": "The perfume qualities of hui are crucial to project success",
+        "symbols": [
+            {"$id": "d96222de-6fc2-46e7-bea3-a87a906fd17b"}
+        ]
+    }
+]
