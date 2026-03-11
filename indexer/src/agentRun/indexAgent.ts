@@ -76,7 +76,7 @@ Lsp* symbols for those files. If a symbol has no comment field, add a brief one 
 what it does (inferred from the log context).
 
 Use upsert_entries with the existing node id to patch in the comment:
-  { "$type": "LspFunction", "id": "<uuid>", "comment": "Builds the flat symbol to event index used during LSP enrichment" }
+  { "$type": "LspFunction", "$id": "<uuid>", "comment": "Builds the flat symbol to event index used during LSP enrichment" }
 
 ### Task 3 — Load additional skills as needed
 

@@ -119,9 +119,17 @@ export class Db implements QueryDb {
   // RefType rows are deduplicated by ref_name.
   // SymbolType / MeaningType are global singletons (at most one row each).
 
-  upsertType(type: Type, cache: Map<Type, string> = new Map()): string {
+  /**
+   * @param namedKey  When set, the root structural type row uses content key
+   *                  `NT:{namedKey}` instead of the structural hash.  This
+   *                  guarantees every named type gets its own `type_id` even
+   *                  when two named types have identical field signatures
+   *                  (e.g. LspFunction and LspModule).  Child types are still
+   *                  deduplicated structurally.
+   */
+  upsertType(type: Type, cache: Map<Type, string> = new Map(), namedKey?: string): string {
     const existing = cache.get(type);
-    if (existing) return existing;
+    if (existing && !namedKey) return existing;
 
     // Global singletons
     if (type.kind === 'SymbolType' || type.kind === 'MeaningType') {
@@ -149,10 +157,10 @@ export class Db implements QueryDb {
       return id;
     }
 
-    // Structural types — deduplicated by content_key
+    // Structural types — deduplicated by content_key (or NT:{namedKey} for named roots)
     if (type.kind === 'ListType') {
       const itemId = this.upsertType(type.itemType, cache);
-      const contentKey = `L:{${itemId}}`;
+      const contentKey = namedKey ? `NT:{${namedKey}}` : `L:{${itemId}}`;
       return this.upsertStructural('ListType', contentKey, cache, type, id => {
         this.raw
           .prepare(`INSERT INTO type_children(type_id, position, child_type_id) VALUES(?,0,?)`)
@@ -163,7 +171,7 @@ export class Db implements QueryDb {
     if (type.kind === 'OrType' || type.kind === 'AndType') {
       const leftId = this.upsertType(type.left, cache);
       const rightId = this.upsertType(type.right, cache);
-      const contentKey = `${type.kind}:{${leftId}}:{${rightId}}`;
+      const contentKey = namedKey ? `NT:{${namedKey}}` : `${type.kind}:{${leftId}}:{${rightId}}`;
       return this.upsertStructural(type.kind, contentKey, cache, type, id => {
         this.raw
           .prepare(`INSERT INTO type_children(type_id, position, child_type_id) VALUES(?,0,?)`)
@@ -176,7 +184,7 @@ export class Db implements QueryDb {
 
     if (type.kind === 'OptionalType') {
       const innerId = this.upsertType(type.inner, cache);
-      const contentKey = `OPT:{${innerId}}`;
+      const contentKey = namedKey ? `NT:{${namedKey}}` : `OPT:{${innerId}}`;
       return this.upsertStructural('OptionalType', contentKey, cache, type, id => {
         this.raw
           .prepare(`INSERT INTO type_children(type_id, position, child_type_id) VALUES(?,0,?)`)
@@ -189,13 +197,14 @@ export class Db implements QueryDb {
       const fieldIds = Object.fromEntries(
         Object.entries(type.entries).map(([k, v]) => [k, this.upsertType(v, cache)]),
       );
-      const contentKey =
-        'M:{' +
-        Object.entries(fieldIds)
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([k, v]) => `${k}=${v}`)
-          .join(',') +
-        '}';
+      const contentKey = namedKey
+        ? `NT:{${namedKey}}`
+        : 'M:{' +
+          Object.entries(fieldIds)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([k, v]) => `${k}=${v}`)
+            .join(',') +
+          '}';
       return this.upsertStructural('MapType', contentKey, cache, type, id => {
         for (const [key, valId] of Object.entries(fieldIds)) {
           this.raw
@@ -707,6 +716,7 @@ export class Db implements QueryDb {
     allocatedIds: (string | null)[],
     embedMap: Map<string, Float32Array>,
     path: string,
+    knownTypeId?: string,
   ): string {
     // $ref — circular/forward reference to a top-level entry in the same batch
     if (value !== null && typeof value === 'object' && '$ref' in (value as object)) {
@@ -737,7 +747,7 @@ export class Db implements QueryDb {
     if (type.kind === 'RefType') {
       const named = this.loadNamedType(type.name);
       if (!named) throw new Error(`${path}: RefType target "${type.name}" not found`);
-      return this.buildEntryNode(value, this.loadTypeShallow(named.typeId), allocatedIds, embedMap, path);
+      return this.buildEntryNode(value, this.loadTypeShallow(named.typeId), allocatedIds, embedMap, path, named.typeId);
     }
 
     if (type.kind === 'SymbolType') {
@@ -774,8 +784,8 @@ export class Db implements QueryDb {
       if (typeof value !== 'object' || value === null || Array.isArray(value))
         throw new Error(`${path}: expected object for MapType, got ${typeof value}`);
       const obj = value as Record<string, unknown>;
-      // upsertType on a shallow MapType finds the existing DB row via content_key.
-      const typeId = this.upsertType(type);
+      // Use the pre-resolved typeId when available (from RefType), otherwise look up by content_key.
+      const typeId = knownTypeId ?? this.upsertType(type);
       const id = uuidv4();
       this.raw.prepare(`INSERT INTO nodes(id, kind, type_id) VALUES(?,?,?)`).run(id, 'map', typeId);
       for (const [key, fieldType] of Object.entries(type.entries)) {

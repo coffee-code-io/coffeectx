@@ -223,7 +223,7 @@ export function syncFromDir(
   for (const [name, entry] of typeRegistry) {
     try {
       const type = resolveYamlType(entry.spec, specRegistry);
-      const typeId = db.upsertType(type, typeIdCache);
+      const typeId = db.upsertType(type, typeIdCache, name);
       db.upsertNamedType(name, typeId, source, entry.description, entry.hidden);
       typesSynced.push(name);
     } catch (err) {
