@@ -7,9 +7,12 @@ import { formatDeepNode } from '@retrival-mcp/core';
 export function registerRegexTool(server: McpServer, db: Db): void {
   server.tool(
     'regex',
-    'Find symbol nodes whose value matches a JavaScript regular expression (case-insensitive). Returns the nearest named-type ancestor of each match. Log event nodes are excluded by default.',
+    'Use this when you know a partial name, prefix, or naming pattern and want to find everything matching it. ' +
+      'Matches symbol values (and meaning text) against a case-insensitive JavaScript regular expression and returns the nearest named-type ancestor of each match. ' +
+      'Good triggers: "all functions starting with auth", "files in the lsp/ folder", "any symbol containing the word cache", browsing a module\'s symbols by pattern. ' +
+      'Log event nodes are excluded by default.',
     {
-      pattern: z.string().describe('JavaScript RegExp pattern, e.g. "^auth.*"'),
+      pattern: z.string().describe('JavaScript RegExp pattern (case-insensitive), e.g. "^auth" or "cache"'),
       limit: z.number().int().min(1).max(500).default(50),
       offset: z.number().int().min(0).default(0).describe('Skip this many results (for pagination)'),
       includeHidden: z.boolean().default(false).describe('Include log event nodes (UserInput, FileOperation, etc.) that are normally hidden'),

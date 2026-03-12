@@ -7,9 +7,13 @@ import { formatDeepNode } from '@retrival-mcp/core';
 export function registerSearchTool(server: McpServer, db: Db): void {
   server.tool(
     'search',
-    'Search for nodes by semantic similarity to a natural-language query. Returns the nearest named-type ancestor of each match (e.g. the Decision or FunctionDef that contains the matched text). Log event nodes are excluded by default.',
+    'Use this when you need to recall decisions, rationale, context, or knowledge about a topic but do not know the exact wording. ' +
+      'Searches by semantic similarity — describe what you are trying to remember or understand in plain language. ' +
+      'Returns the nearest named-type ancestor of each match (e.g. the Decision, LocalDecision, or FunctionDef that contains the matched meaning). ' +
+      'Good triggers: "why was X chosen?", "what do we know about Y?", "past decisions around Z", "context for this change". ' +
+      'Log event nodes are excluded by default.',
     {
-      query: z.string().describe('Natural language query'),
+      query: z.string().describe('Natural language description of the knowledge you are looking for'),
       limit: z.number().int().min(1).max(100).default(10),
       offset: z.number().int().min(0).default(0).describe('Skip this many results (for pagination)'),
       includeHidden: z.boolean().default(false).describe('Include log event nodes (UserInput, FileOperation, etc.) that are normally hidden'),
