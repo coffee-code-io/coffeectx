@@ -1,4 +1,4 @@
-import type { Db } from '@retrival-mcp/core';
+import type { Db } from '@coffeectx/core';
 
 function escapeDot(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');

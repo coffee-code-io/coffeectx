@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { Db } from '@retrival-mcp/core';
-import { formatDeepNode } from '@retrival-mcp/core';
+import type { Db } from '@coffeectx/core';
+import { formatDeepNode } from '@coffeectx/core';
 
 /** Exact symbol match — find nodes by symbol text. */
 export function registerExactTool(server: McpServer, db: Db): void {

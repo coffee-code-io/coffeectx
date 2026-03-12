@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { Db } from '@retrival-mcp/core';
+import type { Db } from '@coffeectx/core';
 
 /**
  * Parse a flat "formatDeepNode-style" entry object into the InsertEntry shape

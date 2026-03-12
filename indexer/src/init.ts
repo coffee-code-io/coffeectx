@@ -1,7 +1,7 @@
 import { mkdirSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { Db, syncAllTypes } from '@retrival-mcp/core';
-import type { SyncResult } from '@retrival-mcp/core';
+import { Db, syncAllTypes } from '@coffeectx/core';
+import type { SyncResult } from '@coffeectx/core';
 import { DB_DIR, dbPathForName, registerProject, sanitizeName } from './projects.js';
 
 export interface InitResult {

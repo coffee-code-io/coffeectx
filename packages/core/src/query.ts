@@ -1,5 +1,5 @@
 /**
- * Query language for retrival-mcp.
+ * Query language for coffeectx.
  *
  * Grammar:
  *   Query       = Clause (',' Clause)*                          -- AND semantics

@@ -1,11 +1,11 @@
 {
-  "name": "@retrival-mcp/server",
+  "name": "@coffeectx/server",
   "version": "0.1.0",
   "description": "MCP server for efficient retrieval of memories, architecture, and local decisions",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "retrival-mcp": "./dist/index.js"
+    "coffeectx": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -16,7 +16,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@qwen-code/sdk": "file:../qwen-code/packages/sdk-typescript",
-    "@retrival-mcp/core": "*",
+    "@coffeectx/core": "*",
     "yaml": "^2.7.0",
     "zod": "^3.25.0"
   },

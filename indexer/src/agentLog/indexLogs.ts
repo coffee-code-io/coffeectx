@@ -1,11 +1,11 @@
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Db } from '@retrival-mcp/core';
+import type { Db } from '@coffeectx/core';
 import { readLogFile, deduplicateMessages } from './reader.js';
 import { classifyMessages, extractSessions } from './classifier.js';
 import { enrichEvents } from './enricher.js';
 import type { EnrichedEvent } from './enricher.js';
-import type { InsertEntry } from '@retrival-mcp/core';
+import type { InsertEntry } from '@coffeectx/core';
 
 export interface IndexLogsResult {
   files: number;

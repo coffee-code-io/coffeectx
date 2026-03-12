@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 const LOG_DIR = join(homedir(), '.coffeecode');
-const LOG_PATH = join(LOG_DIR, 'retrival-mcp.log');
+const LOG_PATH = join(LOG_DIR, 'coffeectx.log');
 
 export function log(message: string): void {
   try {

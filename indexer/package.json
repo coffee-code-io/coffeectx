@@ -1,7 +1,7 @@
 {
-  "name": "@retrival-mcp/indexer",
+  "name": "@coffeectx/indexer",
   "version": "0.1.0",
-  "description": "CLI indexer — uses qwen-code to read repos/logs/artifacts and populate the retrival-mcp knowledge graph",
+  "description": "CLI indexer — uses qwen-code to read repos/logs/artifacts and populate the coffeectx knowledge graph",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -14,7 +14,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@retrival-mcp/core": "*",
+    "@coffeectx/core": "*",
     "@qwen-code/sdk": "file:../qwen-code/packages/sdk-typescript",
     "vscode-jsonrpc": "^8.2.0",
     "vscode-languageserver-protocol": "^3.17.5",

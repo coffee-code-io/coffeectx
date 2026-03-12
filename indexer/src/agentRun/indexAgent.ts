@@ -2,8 +2,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import type { Db } from '@retrival-mcp/core';
-import { formatDeepNode } from '@retrival-mcp/core';
+import type { Db } from '@coffeectx/core';
+import { formatDeepNode } from '@coffeectx/core';
 import { loadAuth, authToQueryOptions } from './auth.js';
 import { runSkillInteractive, EPHEMERAL_CONTEXT_BEGIN, EPHEMERAL_CONTEXT_END } from './runSkill.js';
 

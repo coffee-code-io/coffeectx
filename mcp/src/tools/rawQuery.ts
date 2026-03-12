@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { Db } from '@retrival-mcp/core';
-import { parseQuery, executeQuery, formatDeepNode } from '@retrival-mcp/core';
+import type { Db } from '@coffeectx/core';
+import { parseQuery, executeQuery, formatDeepNode } from '@coffeectx/core';
 
 const SYNTAX = `
 Query       = Clause (',' Clause)*                          AND semantics

@@ -2,7 +2,7 @@ import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import type { EmbedProvider } from '@retrival-mcp/core';
+import type { EmbedProvider } from '@coffeectx/core';
 
 export interface Config {
   db: {

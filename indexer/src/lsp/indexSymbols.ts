@@ -11,7 +11,7 @@
 
 import { readdirSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';
-import type { Db, InsertEntry } from '@retrival-mcp/core';
+import type { Db, InsertEntry } from '@coffeectx/core';
 import { LspClient, SymbolKind, type DocumentSymbol, type SymbolInformation } from './client.js';
 
 // Extensions the indexer will process

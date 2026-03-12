@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { Db } from '@retrival-mcp/core';
-import { formatDeepNode } from '@retrival-mcp/core';
+import type { Db } from '@coffeectx/core';
+import { formatDeepNode } from '@coffeectx/core';
 
 /** Semantic similarity search over meaning nodes. Returns the nearest named-type parent when available. */
 export function registerSearchTool(server: McpServer, db: Db): void {

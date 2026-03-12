@@ -1,7 +1,7 @@
 {
-  "name": "@retrival-mcp/core",
+  "name": "@coffeectx/core",
   "version": "0.1.0",
-  "description": "Core types, schema, and DB adapter for retrival-mcp",
+  "description": "Core types, schema, and DB adapter for coffeectx",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

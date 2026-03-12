@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { Db, createEmbedFn, log } from '@retrival-mcp/core';
+import { Db, createEmbedFn, log } from '@coffeectx/core';
 import { loadConfig } from './config.js';
 import { registerSearchTool } from './tools/search.js';
 import { registerExactTool } from './tools/exact.js';
@@ -17,7 +17,7 @@ log(`[mcp] start provider=${config.embed.provider} dbPath=${config.db.path} pid=
 const embed = createEmbedFn(config.embed);
 const db = new Db({ path: config.db.path, embed, dimensions: config.embed.dimensions });
 
-const server = new McpServer({ name: 'retrival-mcp', version: '0.1.0' });
+const server = new McpServer({ name: 'coffeectx', version: '0.1.0' });
 
 if (config.tools.search) registerSearchTool(server, db);
 if (config.tools.exact) registerExactTool(server, db);

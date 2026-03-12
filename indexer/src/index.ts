@@ -26,8 +26,8 @@ import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { writeFileSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
-import { Db, syncAllTypes, syncTypesFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadEmbedConfig } from '@retrival-mcp/core';
-import type { InsertEntry } from '@retrival-mcp/core';
+import { Db, syncAllTypes, syncTypesFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadEmbedConfig } from '@coffeectx/core';
+import type { InsertEntry } from '@coffeectx/core';
 import { initProject, promptProjectName } from './init.js';
 import {
   loadProjects,

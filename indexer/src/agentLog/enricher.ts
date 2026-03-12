@@ -1,5 +1,5 @@
-import { parseQuery, executeQuery } from '@retrival-mcp/core';
-import type { QueryDb } from '@retrival-mcp/core';
+import { parseQuery, executeQuery } from '@coffeectx/core';
+import type { QueryDb } from '@coffeectx/core';
 import type { ClassifiedEvent } from './classifier.js';
 
 export interface EnrichedEvent extends ClassifiedEvent {
