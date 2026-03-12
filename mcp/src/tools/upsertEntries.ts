@@ -36,7 +36,7 @@ export function registerUpsertEntriesTool(server: McpServer, db: Db): void {
     'upsert_entries',
     `Insert or patch typed nodes in the knowledge graph.
 
-Each entry is a plain JSON object in the same format that \`load_node\` and \`raw_query\` return:
+Each entry is a plain JSON object in the same format that \`get_node_by_id\` and \`raw_query\` return:
   - \`$type\` (required) — named MapType to validate against
   - \`$id\`   (optional) — UUID of an existing node to patch instead of creating new
   - other keys — field values (string for Symbol/Meaning fields, string[] for List fields)

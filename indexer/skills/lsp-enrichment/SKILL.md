@@ -5,7 +5,7 @@ When file operations in the event batch touch source files, find the correspondi
 ### Process
 
 1. For each `FileOperation` event in the batch, note the file path(s) touched.
-2. Use `exact` or `raw_query` to find Lsp* symbols for those files (match on `location` containing the file path, or `containerName`/`name`).
+2. Use `get_by_symbol_text` or `raw_query` to find Lsp* symbols for those files (match on `location` containing the file path, or `containerName`/`name`). If you already have a node ID (e.g. from a `matchedId` in a search result), use `get_node_by_id` to load it directly without a new search.
 3. For each symbol that has no `comment` field (or an empty one), infer a brief description from the event context.
 4. Use `upsert_entries` with the existing node `$id` to patch in the comment.
 

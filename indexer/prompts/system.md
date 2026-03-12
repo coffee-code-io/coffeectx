@@ -17,11 +17,11 @@ Use the `TodoWrite` tool to plan and track work across a session. Mark tasks in_
 # Available MCP Tools
 
 - `upsert_entries` — insert or update graph nodes by type
-- `exact` — find nodes by exact symbol match (name, containerName, etc.)
+- `get_by_symbol_text` — find nodes by exact symbol text (name, containerName, path, etc.)
 - `regex` — find nodes by regex pattern on symbol fields
 - `raw_query` — query language search across graph nodes
 - `search` — semantic similarity search
-- `load_node` — load a specific node by ID
+- `get_node_by_id` — load a specific node by UUID (use when you already have an ID)
 - `list_skills` — list all indexing skills in the DB
 - `get_skill` — get a specific DB-registered skill by name
 - `skill` — invoke a qwen skill by name (for auxiliary indexing tasks)
@@ -38,7 +38,7 @@ Examples:
 { "$type": "Choice", "chosen": "early return", "option": "nested else", "reason": "Reduces nesting", "symbols": [] }
 ```
 
-Symbol references use `{ "$id": "<uuid>" }`. Find UUIDs via `exact` or `raw_query` before inserting.
+Symbol references use `{ "$id": "<uuid>" }`. Find UUIDs via `get_by_symbol_text` or `raw_query` before inserting. Use `get_node_by_id` when you already have the UUID.
 
 # Batching and Ephemeral Context
 

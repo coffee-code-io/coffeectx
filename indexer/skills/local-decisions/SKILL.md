@@ -8,7 +8,7 @@ Fields:
 - `title`: short imperative phrase (e.g. "Use early return to reduce nesting")
 - `rationale`: why this was the right approach
 - `symbols`: list of `{ "$id": "<uuid>" }` for LSP symbol nodes this concerns
-  — find IDs via `exact` search on function/class name before inserting
+  — find IDs via `get_by_symbol_text` on function/class name, or `get_node_by_id` if you already have the UUID
   — use `[]` if no matching symbols are indexed yet
 
 ### Choice — one option explicitly rejected in favour of another

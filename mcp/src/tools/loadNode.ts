@@ -5,11 +5,12 @@ import { formatDeepNode } from '@retrival-mcp/core';
 
 export function registerLoadNodeTool(server: McpServer, db: Db): void {
   server.tool(
-    'load_node',
-    'Load a knowledge-graph node by ID, expanding the tree to a configurable depth.\n' +
+    'get_node_by_id',
+    'Load a knowledge-graph node by its UUID, expanding the tree to a configurable depth.\n' +
+      'Use this when you already have a node ID — e.g. from a search result, a `$id` reference in another node, or a `matchedId` returned by another tool.\n' +
       'Container nodes beyond the depth limit are returned as `{ $id: id }` so you can load them separately.\n',
     {
-      id: z.string().describe('Node ID to load'),
+      id: z.string().describe('Node UUID to load'),
       depth: z
         .number()
         .int()
