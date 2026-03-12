@@ -250,6 +250,7 @@ export function parseQuery(input: string): Query {
 
 export interface QueryDb {
   querySymbolExact(value: string): string[];
+  /** Matches symbol_value for kind='symbol' nodes AND meaning_text for kind='meaning' nodes. */
   querySymbolRegex(pattern: string): string[];
   queryMeaning(text: string, limit: number): Promise<string[]>;
   queryById(id: string): string[];
