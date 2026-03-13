@@ -12,10 +12,10 @@ import { registerLoadNodeTool } from './tools/loadNode.js';
 import { registerUpsertEntriesTool } from './tools/upsertEntries.js';
 
 const config = loadConfig();
-log(`[mcp] start provider=${config.embed.provider} dbPath=${config.db.path} pid=${process.pid}`);
+log(`[mcp] start provider=${config.embed.provider} dbPath=${config.dbPath} pid=${process.pid}`);
 
 const embed = createEmbedFn(config.embed);
-const db = new Db({ path: config.db.path, embed, dimensions: config.embed.dimensions });
+const db = new Db({ path: config.dbPath, embed, dimensions: config.embed.dimensions });
 
 const server = new McpServer({ name: 'coffeectx', version: '0.1.0' });
 

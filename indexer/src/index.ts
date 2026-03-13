@@ -26,7 +26,7 @@ import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { writeFileSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
-import { Db, syncAllTypes, syncTypesFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadEmbedConfig } from '@coffeectx/core';
+import { Db, syncAllTypes, syncFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadConfig } from '@coffeectx/core';
 import type { InsertEntry } from '@coffeectx/core';
 import { initProject, promptProjectName } from './init.js';
 import {
@@ -65,7 +65,8 @@ function flagInt(name: string, defaultValue: number): number {
   return isNaN(n) ? defaultValue : n;
 }
 
-const embedCfg = loadEmbedConfig();
+const globalCfg = loadConfig();
+const embedCfg = globalCfg.embed;
 const embedFn = createEmbedFn(embedCfg);
 
 // ── init — does not need an existing DB ───────────────────────────────────────
@@ -159,9 +160,12 @@ const db = new Db({ path: project.db, embed: embedFn, dimensions: embedCfg.dimen
 
 switch (command) {
   case 'sync-types': {
-    const userDir = flag('--user-dir');
+    const userDir = flag('--user-dir') ?? globalCfg.types.userDir;
     console.log(`Syncing types for project "${project.name}"...`);
-    const result = userDir ? syncAllTypes(db, userDir) : syncAllTypes(db);
+    const result = syncAllTypes(db, {
+      builtinFilter: { include: globalCfg.types.include, exclude: globalCfg.types.exclude },
+      userDir,
+    });
     console.log(`  Synced ${result.types.synced.length} types, ${result.skills.synced.length} skills`);
     const allErrors = [...result.types.errors, ...result.skills.errors];
     if (allErrors.length > 0) {
@@ -179,7 +183,7 @@ switch (command) {
       db.close();
       process.exit(1);
     }
-    const result = syncTypesFromDir(db, dir, 'user');
+    const result = syncFromDir(db, dir, 'user');
     console.log(`Synced ${result.types.synced.length} types, ${result.skills.synced.length} skills from ${dir}`);
     const allErrors = [...result.types.errors, ...result.skills.errors];
     for (const { name, error } of allErrors) console.error(`  ${name}: ${error}`);
@@ -593,28 +597,86 @@ switch (command) {
     break;
   }
 
+  case 'index': {
+    // Run all enabled indexers in order: lsp → logs → agent
+    const indexersCfg = globalCfg.indexers;
+    const repoPath = flag('--repo') ?? project.repoPath;
+    let failed = false;
+
+    if (indexersCfg.lsp) {
+      if (!repoPath) {
+        console.warn('  [lsp] No repoPath configured for this project — skipping.');
+      } else {
+        const absRepo = resolve(repoPath);
+        const lspCmd = globalCfg.lsp.servers?.['typescript'] ?? globalCfg.lsp.command;
+        const [lspBin, ...lspArgs] = lspCmd.trim().split(/\s+/).filter(Boolean);
+        if (!lspBin) {
+          console.error('  [lsp] Invalid LSP command in config — skipping.');
+        } else {
+          const lspBinPath = lspBin.startsWith('~/') ? `${homedir()}/${lspBin.slice(2)}` : lspBin;
+          console.log(`[lsp] Indexing "${absRepo}"...`);
+          const r = await indexWithLsp(db, absRepo, lspBinPath, lspArgs);
+          console.log(`  Files: ${r.files}, Nodes: ${r.nodes}`);
+          if (r.errors.length > 0) {
+            for (const { file, error } of r.errors) console.error(`  [lsp] ${file}: ${error}`);
+            failed = true;
+          }
+        }
+      }
+    }
+
+    if (indexersCfg.logs) {
+      const logPaths = project.logsPath ? [project.logsPath] : [];
+      if (logPaths.length === 0) {
+        console.warn('  [logs] No logsPath configured for this project — skipping.');
+      } else {
+        console.log(`[logs] Indexing agent logs...`);
+        const r = await indexLogs(db, logPaths);
+        console.log(`  Files: ${r.files}, Sessions: ${r.sessions}, Events: ${r.events}, Inserted: ${r.inserted}`);
+        if (r.errors.length > 0) {
+          for (const { file, error } of r.errors) console.error(`  [logs] ${file}: ${error}`);
+          failed = true;
+        }
+      }
+    }
+
+    if (indexersCfg.agent) {
+      console.log(`[agent] Running agent indexer...`);
+      const r = await indexAgent({ db, dbPath: project.db });
+      console.log(`  Batches: ${r.batches}`);
+      if (r.errors.length > 0) {
+        for (const { error } of r.errors) console.error(`  [agent] ${error}`);
+        failed = true;
+      }
+    }
+
+    if (failed) { db.close(); process.exit(1); }
+    break;
+  }
+
   default: {
     const active = projects.active ? `"${projects.active}"` : 'none';
-    console.log(`retrival-index — knowledge graph indexer
+    console.log(`coffeectx-index — knowledge graph indexer
 
 Commands:
   init [--name <name>] [--repo <path>] [--logs-path <path>]  Create a new project DB
   use <name>                                                   Switch the active project
   list-projects                                                List all registered projects
 
-  sync-types [--user-dir <path>]         Sync built-in YAML types into active DB
+  sync-types [--user-dir <path>]         Sync built-in YAML types (respects types.include/exclude from config)
   load-types <dir>                       Load user-defined YAML types from a directory
   list-types                             List all named types in active DB
   types-dot [--out <path>]               Generate Graphviz DOT for named type graph
-  query <expression>                     Parse and execute a retrival query expression
+  query <expression>                     Parse and execute a query expression
   search <text>                          Semantic similarity search
   exact <value>                          Exact symbol match
   regex <pattern>                        Regex symbol match (case-insensitive)
   insert-entries <file.json>             Insert typed entries from a JSON file
   load-node <id> [--depth <n>]           Load a node by ID, expanding to depth (default 10)
-  index-lsp [<path>] [--lsp-command <cmd>]                        Index repo with LSP (default: typescript-language-server --stdio)
-  index-logs [<path>...]                                           Index Claude Code JSONL logs (uses stored logsPath if none given)
-  index-agent [--skill <name>] [--batch-step <n>] [--suffix-len <n>] [--qwen-path <path>]  Run agent to extract entities from indexed log events
+  index                                  Run all enabled indexers (lsp → logs → agent) per config
+  index-lsp [<path>] [--lsp-command <cmd>]    Index repo with LSP
+  index-logs [<path>...]                       Index Claude Code JSONL logs
+  index-agent [--batch-step <n>] [--qwen-path <path>]  Run agent entity extraction
 
 Options:
   --project <name>       Target a specific project
@@ -622,13 +684,14 @@ Options:
   --offset <n>           Skip this many results (for pagination)
   --depth <n>            Node expansion depth (default: 10 for query/load-node, 3 for search/exact/regex)
   -v / --verbose         Return raw node data instead of formatted output
-  --repo <path>          Override/set the repo path for index-lsp
-  --logs-path <path>     Set default logs path for index-logs (stored in projects.yaml)
-  --lsp-command <cmd>    Override LSP command (otherwise uses ${LSP_CONFIG_PATH} or ${DEFAULT_LSP_COMMAND})
+  --repo <path>          Override repo path for index / index-lsp
+  --logs-path <path>     Set default logs path for index-logs (saved in config)
+  --lsp-command <cmd>    Override LSP command
 
 Active project: ${active}
+Enabled indexers: ${Object.entries(globalCfg.indexers).filter(([,v])=>v).map(([k])=>k).join(', ') || 'none'}
 DB directory:   ${DB_DIR}
-Projects file:  ${PROJECTS_PATH}
+Config file:    ${PROJECTS_PATH}
 `);
   }
 }

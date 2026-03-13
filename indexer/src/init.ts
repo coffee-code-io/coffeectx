@@ -1,6 +1,6 @@
 import { mkdirSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { Db, syncAllTypes } from '@coffeectx/core';
+import { Db, syncAllTypes, loadConfig } from '@coffeectx/core';
 import type { SyncResult } from '@coffeectx/core';
 import { DB_DIR, dbPathForName, registerProject, sanitizeName } from './projects.js';
 
@@ -31,8 +31,12 @@ export function initProject(name: string, repoPath?: string, logsPath?: string):
   const alreadyExisted = existsSync(dbPath);
 
   // Db constructor creates tables on first open
+  const cfg = loadConfig();
   const db = new Db({ path: dbPath, embed: async () => new Float32Array(128) });
-  const sync = syncAllTypes(db);
+  const sync = syncAllTypes(db, {
+    builtinFilter: { include: cfg.types.include, exclude: cfg.types.exclude },
+    userDir: cfg.types.userDir,
+  });
   db.close();
 
   registerProject(safe, dbPath, repoPath, logsPath);

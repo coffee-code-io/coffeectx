@@ -93,13 +93,30 @@ export interface YamlLoadResult {
   skills: Map<string, YamlSkillEntry>;
 }
 
-/** Load all *.yaml files from a directory. */
-export function loadYamlFromDir(dir: string): YamlLoadResult {
+export interface YamlDirFilter {
+  /** If non-empty, only files whose stem is in this list are loaded. */
+  include?: string[];
+  /** Stems to skip regardless of include. */
+  exclude?: string[];
+}
+
+/** Load all *.yaml files from a directory, optionally filtered by filename stem. */
+export function loadYamlFromDir(dir: string, filter?: YamlDirFilter): YamlLoadResult {
   const types = new Map<string, YamlNamedTypeEntry>();
   const skills = new Map<string, YamlSkillEntry>();
   if (!existsSync(dir)) return { types, skills };
 
-  const files = readdirSync(dir).filter(f => extname(f) === '.yaml' || extname(f) === '.yml');
+  const include = filter?.include && filter.include.length > 0 ? new Set(filter.include) : null;
+  const exclude = filter?.exclude && filter.exclude.length > 0 ? new Set(filter.exclude) : null;
+
+  const files = readdirSync(dir)
+    .filter(f => extname(f) === '.yaml' || extname(f) === '.yml')
+    .filter(f => {
+      const stem = f.replace(/\.(yaml|yml)$/, '');
+      if (include && !include.has(stem)) return false;
+      if (exclude && exclude.has(stem)) return false;
+      return true;
+    });
   for (const file of files) {
     const content = readFileSync(join(dir, file), 'utf-8');
     const parsed = parseYaml(content) as YamlTypeFile | null;
@@ -209,8 +226,9 @@ export function syncFromDir(
   db: Db,
   dir: string,
   source: 'builtin' | 'user' = 'user',
+  filter?: YamlDirFilter,
 ): SyncResult {
-  const { types: typeRegistry, skills: skillRegistry } = loadYamlFromDir(dir);
+  const { types: typeRegistry, skills: skillRegistry } = loadYamlFromDir(dir, filter);
 
   // Build a flat spec map for the resolver
   const specRegistry = new Map<string, YamlTypeSpec>();
@@ -253,12 +271,24 @@ export function syncFromDir(
   };
 }
 
-/** Sync built-in types + skills, then optionally user-defined ones. */
-export function syncAllTypes(db: Db, userDir?: string): SyncResult {
-  const builtin = syncFromDir(db, builtinTypesDir(), 'builtin');
-  if (!userDir) return builtin;
+export interface SyncAllTypesOptions {
+  /** Filter applied to built-in type files (by filename stem, e.g. "api", "contract"). */
+  builtinFilter?: YamlDirFilter;
+  /** Directory of user-defined YAML type files. */
+  userDir?: string;
+}
 
-  const user = syncFromDir(db, userDir, 'user');
+/** Sync built-in types + skills, then optionally user-defined ones. */
+export function syncAllTypes(db: Db, userDirOrOptions?: string | SyncAllTypesOptions): SyncResult {
+  const opts: SyncAllTypesOptions =
+    typeof userDirOrOptions === 'string'
+      ? { userDir: userDirOrOptions }
+      : (userDirOrOptions ?? {});
+
+  const builtin = syncFromDir(db, builtinTypesDir(), 'builtin', opts.builtinFilter);
+  if (!opts.userDir) return builtin;
+
+  const user = syncFromDir(db, opts.userDir, 'user');
   return {
     types: {
       synced: [...builtin.types.synced, ...user.types.synced],

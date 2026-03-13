@@ -9,7 +9,7 @@
  *   LspSymbol.agentEvents         ← set at insert time (file + name matches)
  */
 
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';
 import type { Db, InsertEntry } from '@coffeectx/core';
 import { LspClient, SymbolKind, type DocumentSymbol, type SymbolInformation } from './client.js';
@@ -56,14 +56,27 @@ function kindToTypeName(kind: SymbolKind): string | null {
 
 // ── File collection ───────────────────────────────────────────────────────────
 
+/** Read .coffeeignore from the repo root and return a set of directory names to skip. */
+function loadCoffeeignore(rootPath: string): Set<string> {
+  const ignorePath = join(rootPath, '.coffeeignore');
+  if (!existsSync(ignorePath)) return new Set();
+  return new Set(
+    readFileSync(ignorePath, 'utf-8')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 0 && !l.startsWith('#')),
+  );
+}
+
 function collectFiles(rootPath: string): string[] {
+  const extraSkip = loadCoffeeignore(rootPath);
   const files: string[] = [];
   function walk(dir: string): void {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.name.startsWith('.')) continue;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) walk(full);
+        if (!SKIP_DIRS.has(entry.name) && !extraSkip.has(entry.name)) walk(full);
       } else if (entry.isFile()) {
         const ext = entry.name.split('.').pop() ?? '';
         if (SOURCE_EXTENSIONS.has(ext)) files.push(full);
