@@ -58,8 +58,9 @@ async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult
   // 5. Build InsertEntry batches
   const entries: InsertEntry[] = [];
 
-  // Session entries
+  // Session entries — skip if an AgentSession with this sessionId already exists
   for (const [sessionId, meta] of sessions) {
+    if (agentSessionExists(db, sessionId)) continue;
     entries.push({
       type: 'AgentSession',
       data: {
@@ -161,6 +162,17 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
     default:
       return null;
   }
+}
+
+/**
+ * Returns true if an AgentSession node with the given sessionId already exists in the DB.
+ * Prevents duplicate session nodes when indexLogs is re-run on the same files.
+ */
+function agentSessionExists(db: Db, sessionId: string): boolean {
+  const symbolIds = db.querySymbolExact(sessionId);
+  if (symbolIds.length === 0) return false;
+  const mapIds = db.queryMapsByField('sessionId', symbolIds);
+  return mapIds.some(id => db.getNodeTypeName(id) === 'AgentSession');
 }
 
 /** Collect .jsonl file paths from a mix of file and directory paths. */

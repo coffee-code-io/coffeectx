@@ -10,8 +10,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Absolute path to the MCP server entry point (mcp/dist/index.js). */
 const MCP_SERVER_PATH = resolve(__dirname, '../../../mcp/dist/index.js');
 
-/** Retrival-mcp project root — used as cwd so the qwen skill manager finds .qwen/skills/. */
-const PROJECT_ROOT = resolve(__dirname, '../../..');
+/**
+ * Retrival-mcp project root — used as cwd so the qwen skill manager finds .qwen/skills/.
+ * Exported so callers can derive the Qwen session file path for session resumption.
+ */
+export const PROJECT_ROOT = resolve(__dirname, '../../..');
 
 /** Absolute path to the indexer system prompt loaded via QWEN_SYSTEM_MD. */
 const SYSTEM_PROMPT_PATH = join(__dirname, '../../prompts/system.md');
@@ -57,6 +60,23 @@ export interface RunSkillInteractiveOptions {
   queryOptions: Partial<QueryOptions>;
   /** Override for the qwen CLI path. */
   pathToQwenExecutable?: string;
+  /**
+   * Resume an existing Qwen CLI session by ID (passes --resume to CLI).
+   * Use this when continuing a prior indexing run for the same log session.
+   * Takes precedence over newSessionId.
+   */
+  resumeSessionId?: string;
+  /**
+   * Start a new Qwen CLI session with a specific ID (passes --session-id to CLI).
+   * Use a deterministic ID so the session can be resumed later via resumeSessionId.
+   * Ignored when resumeSessionId is set.
+   */
+  newSessionId?: string;
+}
+
+export interface RunSkillResult {
+  /** The Qwen CLI session ID used for this run. Pass as resumeSessionId on future runs. */
+  sessionId: string;
 }
 
 function buildIntroPrompt(skillPrompt: string, firstBatch: string): string {
@@ -82,17 +102,22 @@ ${eventsText}
  * open across batches so the model retains continuity (e.g. can cross-reference
  * decisions from earlier batches).
  *
+ * Pass `resumeSessionId` to continue a prior Qwen session; pass `newSessionId`
+ * to start a new session with a deterministic ID that can be resumed later.
+ *
+ * Returns the Qwen CLI session ID so callers can resume it on subsequent runs.
+ *
  * **Curated history**: After each batch result, ephemeral thought context
  * (wrapped in EPHEMERAL_CONTEXT_BEGIN/END markers) is pruned from the
  * conversation history so agent thoughts don't accumulate across batches.
  * Regular events remain in history for continuity.
  */
-export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Promise<void> {
-  const { skillName, skillPrompt, eventBatches, dbPath, queryOptions, pathToQwenExecutable } = opts;
+export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Promise<RunSkillResult> {
+  const { skillName, skillPrompt, eventBatches, dbPath, queryOptions, pathToQwenExecutable, resumeSessionId, newSessionId } = opts;
 
-  if (eventBatches.length === 0) return;
+  if (eventBatches.length === 0) return { sessionId: resumeSessionId ?? newSessionId ?? '' };
 
-  console.log(`[runSkill] Starting interactive session for skill "${skillName}" (${eventBatches.length} batches)`);
+  console.log(`[runSkill] Starting interactive session for skill "${skillName}" (${eventBatches.length} batches)${resumeSessionId ? ' [resuming]' : ''}`);
 
   const mcpEnv: Record<string, string> = {
     RETRIVAL_DB_PATH: dbPath,
@@ -104,12 +129,21 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
   const qwenPath = pathToQwenExecutable ?? queryOptions.pathToQwenExecutable ?? DEFAULT_QWEN_CLI;
   console.log(`[runSkill] Using qwen CLI: ${qwenPath ?? '(SDK auto-discovery)'}`);
 
+  // Build session options: resume (--resume) takes precedence over new (--session-id).
+  // The effective session ID is what the SDK uses for both CLI flag and message routing.
+  const sessionOpts: Partial<QueryOptions> = resumeSessionId
+    ? { resume: resumeSessionId }
+    : newSessionId
+      ? { sessionId: newSessionId }
+      : {};
+
   // Turn completion signalling: generator waits for the drain loop to confirm
   // each turn is done before yielding the next batch.
   let turnComplete: (() => void) | undefined;
 
   async function* generateMessages(): AsyncGenerator<SDKUserMessage> {
-    const sessionId = crypto.randomUUID();
+    // Use the effective session ID from options so messages align with the CLI session.
+    const msgSessionId = resumeSessionId ?? newSessionId ?? crypto.randomUUID();
     let waitPromise: Promise<void> | undefined;
 
     for (let i = 0; i < eventBatches.length; i++) {
@@ -129,7 +163,7 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
 
       yield {
         type: 'user',
-        session_id: sessionId,
+        session_id: msgSessionId,
         message: { role: 'user', content },
         parent_tool_use_id: null,
       } satisfies SDKUserMessage;
@@ -141,6 +175,7 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
       prompt: generateMessages(),
       options: {
         ...queryOptions,
+        ...sessionOpts,
         cwd: PROJECT_ROOT,
         env: mcpEnv,
         permissionMode: 'yolo',
@@ -159,6 +194,7 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
       },
     });
 
+    const usedSessionId = q.getSessionId();
     let messageCount = 0;
     let batchCount = 0;
 
@@ -192,6 +228,7 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
     }
 
     console.log(`[runSkill] Completed skill "${skillName}" — ${batchCount} batches, ${messageCount} total messages`);
+    return { sessionId: usedSessionId };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;

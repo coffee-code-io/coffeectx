@@ -19,6 +19,7 @@ types:
       timestamp: Symbol
       text: Meaning        # semantic content of the user's message
       comment: Meaning?    # optional analyst annotation
+      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedFiles:        # file paths mentioned or implied by the user (empty = none)
         kind: List
         item: Symbol
@@ -38,6 +39,7 @@ types:
       path: Symbol         # absolute file path
       preview: Meaning     # first lines of new content, or the changed fragment
       comment: Meaning?    # optional analyst annotation
+      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       touchedSymbols:      # LSP symbol nodes in this file — populated during LSP indexing
         kind: List
         item: AnyLspSymbol
@@ -53,6 +55,7 @@ types:
       command: Symbol
       description: Meaning # agent-supplied description of what the command does
       comment: Meaning?    # optional analyst annotation
+      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
 
   AgentQuestion:
     description: A clarifying question asked by the coding agent to the user before proceeding.
@@ -64,6 +67,7 @@ types:
       timestamp: Symbol
       question: Meaning    # the question text
       comment: Meaning?    # optional analyst annotation
+      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedSymbols:      # LSP symbol nodes mentioned in the question — populated during LSP indexing
         kind: List
         item: AnyLspSymbol
@@ -78,3 +82,4 @@ types:
       timestamp: Symbol
       text: Meaning        # full thinking block content
       linkedTo: Symbol?    # UUID of the next event (FileOperation/ShellExecution/AgentQuestion) this thought immediately preceded
+      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
