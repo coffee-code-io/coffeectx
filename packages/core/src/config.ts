@@ -54,10 +54,13 @@ export interface CoffeectxConfig {
     dimensions?: number;
   };
 
-  /** Authentication credentials (merged into embed if embed doesn't specify them). */
+  /** Authentication credentials for the indexer agent (Qwen CLI). */
   auth?: {
+    authType?: 'openai' | 'anthropic' | 'qwen-oauth' | 'gemini' | 'vertex-ai';
     apiKey?: string;
     baseUrl?: string;
+    model?: string;
+    qwenPath?: string;
   };
 
   /** MCP tool toggles. */

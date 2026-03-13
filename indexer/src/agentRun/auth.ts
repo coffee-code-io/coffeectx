@@ -1,8 +1,5 @@
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { parse } from 'yaml';
 import type { QueryOptions } from '@qwen-code/sdk';
+import { loadConfig } from '@coffeectx/core';
 
 export interface AuthConfig {
   /** Maps to QueryOptions.authType */
@@ -17,20 +14,14 @@ export interface AuthConfig {
   qwenPath?: string;
 }
 
-const AUTH_PATH = join(homedir(), '.coffeecode', 'auth.yaml');
-
 /**
- * Load auth configuration from ~/.coffeecode/auth.yaml.
+ * Load auth configuration from ~/.coffeecode/config.yaml (auth section).
  * Returns an empty config if the file does not exist or cannot be parsed.
  */
 export function loadAuth(): AuthConfig {
-  if (!existsSync(AUTH_PATH)) return {};
   try {
-    const raw = readFileSync(AUTH_PATH, 'utf-8');
-    const parsed = (parse(raw) as Record<string, unknown>) ?? {};
-    // Support both flat { authType, apiKey, ... } and nested { auth: { authType, ... } }
-    const config = (parsed['auth'] as AuthConfig | undefined) ?? (parsed as AuthConfig);
-    return config ?? {};
+    const cfg = loadConfig();
+    return cfg.auth ?? {};
   } catch {
     return {};
   }

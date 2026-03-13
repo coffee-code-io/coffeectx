@@ -144,6 +144,7 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
         cwd: PROJECT_ROOT,
         env: mcpEnv,
         permissionMode: 'yolo',
+        // debug: true,
         excludeTools: ['Write', 'Edit', 'Bash', 'NotebookEdit', 'Agent'],
         ...(qwenPath ? { pathToQwenExecutable: qwenPath } : {}),
         stderr: (msg: string) => process.stderr.write(`[runSkill:qwen-stderr] ${msg}`),
@@ -165,7 +166,14 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
       messageCount++;
       if (isSDKResultMessage(msg)) {
         batchCount++;
-        console.log(`[runSkill] Batch ${batchCount}/${eventBatches.length} done (${messageCount} total messages)`);
+        const isErr = (msg as Record<string, unknown>).is_error === true;
+        const subtype = (msg as Record<string, unknown>).subtype;
+        const errMsg = (msg as Record<string, unknown>).error;
+        if (isErr) {
+          console.error(`[runSkill] Batch ${batchCount}/${eventBatches.length} ERROR (subtype=${subtype}): ${JSON.stringify(errMsg)}`);
+        } else {
+          console.log(`[runSkill] Batch ${batchCount}/${eventBatches.length} done (${messageCount} total messages)`);
+        }
 
         // Prune ephemeral thought context from history before the next batch.
         // This implements curated history: thoughts enrich the current batch
