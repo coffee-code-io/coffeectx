@@ -189,9 +189,9 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
         env: mcpEnv,
         permissionMode: 'yolo',
         // debug: true,
-        // Exclude all built-in Qwen tools — keep only mcp__coffeectx__* tools.
-        // NOTE: Qwen CLI tool names differ from Claude Code tool names.
-        excludeTools: ['task', 'skill', 'list_directory', 'read_file', 'grep_search', 'glob', 'write_file', 'run_shell_command', 'save_memory', 'todo_write', 'web_fetch', 'edit', 'mcp__coffeectx__list_skills', 'mcp__coffeectx__get_skill'],
+        // Exclude all built-in Qwen tools — keep only mcp__retrival__* tools.
+        // NOTE: Tool prefix comes from the mcpServers key ('retrival'), not the McpServer name.
+        excludeTools: ['task', 'skill', 'list_directory', 'read_file', 'grep_search', 'glob', 'write_file', 'run_shell_command', 'save_memory', 'todo_write', 'web_fetch', 'edit', 'mcp__retrival__list_skills', 'mcp__retrival__get_skill'],
         ...(qwenPath ? { pathToQwenExecutable: qwenPath } : {}),
         stderr: (msg: string) => process.stderr.write(`[runSkill:qwen-stderr] ${msg}`),
         mcpServers: {
