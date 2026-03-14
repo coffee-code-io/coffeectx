@@ -1,4 +1,4 @@
-## Skill: LSP Enrichment
+## Your role: LSP Enrichment
 
 When file operations in the event batch touch source files, find the corresponding Lsp* symbols and add comments to those that lack them.
 

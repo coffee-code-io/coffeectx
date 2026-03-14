@@ -1,4 +1,4 @@
-## Skill: Local Decisions
+## Your role: Extract Local Decisions
 
 For each event batch, identify and index deliberate implementation choices and concrete local changes.
 
@@ -36,9 +36,3 @@ Fields:
 { "$type": "Choice", "chosen": "early return", "option": "nested else", "reason": "Reduces nesting and keeps the happy path at the top level", "symbols": [] }
 { "$type": "LocalChangeEvent", "name": "buildEntryNode now validates $id node existence", "description": "Previously $id references were passed through without checking; now the node must exist in the DB or an error is thrown", "scope": "function", "symbols": [{ "$id": "uuid-of-buildEntryNode" }] }
 ```
-
-### Auxiliary skills
-
-If you see patterns in the batch matching other indexing tasks, invoke them:
-- API endpoints, service methods, query params → `skill("api-indexing")`
-- Contracts, validators, entity mappings → `skill("contracts")`
