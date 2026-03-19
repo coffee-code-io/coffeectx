@@ -530,6 +530,7 @@ switch (command) {
   case 'index-agent': {
     const batchStepArg = flag('--batch-step');
     const qwenPathArg = flag('--qwen-path');
+    const smokeTest = args.includes('--smoke-test');
 
     const batchStep = batchStepArg !== undefined ? parseInt(batchStepArg, 10) : undefined;
 
@@ -537,6 +538,29 @@ switch (command) {
       console.error('--batch-step must be an integer');
       db.close();
       process.exit(1);
+    }
+
+    if (smokeTest) {
+      console.log('Running smoke test — asking model to call upsert_entries directly...');
+      const { runSkillInteractive } = await import('./agentRun/runSkill.js');
+      const { loadAuth, authToQueryOptions } = await import('./agentRun/auth.js');
+      const auth = loadAuth();
+      const qOpts = authToQueryOptions(auth);
+      await runSkillInteractive({
+        skillName: 'smoke-test',
+        skillPrompt: '',
+        eventBatches: [
+          'Please call the mcp__coffeectx__upsert_entries tool right now with this single entry:\n' +
+          '{ "$type": "LocalDecision", "title": "smoke-test entry", "rationale": "testing tool call works" }\n\n' +
+          'Do not output any text. Just call the tool.',
+        ],
+        dbPath: project.db,
+        queryOptions: qOpts,
+        pathToQwenExecutable: qwenPathArg ? resolve(qwenPathArg) : undefined,
+      });
+      console.log('Smoke test done. Check ~/.coffeecode/skill-debug.log and coffeectx.log');
+      db.close();
+      break;
     }
 
     console.log(`Running agent indexer for project "${project.name}"...`);

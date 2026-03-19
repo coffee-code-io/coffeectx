@@ -1,9 +1,15 @@
-import { query, isSDKResultMessage } from '@qwen-code/sdk';
+import { query, isSDKResultMessage, isSDKAssistantMessage } from '@qwen-code/sdk';
 import type { QueryOptions, SDKUserMessage } from '@qwen-code/sdk';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
+
+const DEBUG_LOG = join(homedir(), '.coffeecode', 'skill-debug.log');
+function dlog(msg: string): void {
+  try { appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`); } catch { /* ignore */ }
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -163,10 +169,12 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
         waitPromise = new Promise<void>(r => { turnComplete = r; });
       }
 
+      const msgText = messages[i]!;
+      dlog(`[send msg ${i + 1}/${messages.length}] ${msgText.slice(0, 500)}${msgText.length > 500 ? '…' : ''}`);
       yield {
         type: 'user',
         session_id: msgSessionId,
-        message: { role: 'user', content: messages[i]! },
+        message: { role: 'user', content: msgText },
         parent_tool_use_id: null,
       } satisfies SDKUserMessage;
     }
@@ -205,7 +213,14 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
 
     for await (const msg of q) {
       messageCount++;
-      if (isSDKResultMessage(msg)) {
+      if (isSDKAssistantMessage(msg)) {
+        const usage = (msg as any).message?.usage;
+        if (usage) dlog(`[model:usage] input=${usage.input_tokens} output=${usage.output_tokens} cache_read=${usage.cache_read_input_tokens ?? 0} cache_write=${usage.cache_creation_input_tokens ?? 0}`);
+        for (const block of (msg as any).message?.content ?? []) {
+          if (block.type === 'text') dlog(`[model:text] ${block.text}`);
+          if (block.type === 'tool_use') dlog(`[model:tool_use] ${block.name}(${JSON.stringify(block.input).slice(0, 300)})`);
+        }
+      } else if (isSDKResultMessage(msg)) {
         if (!instructionsDone) {
           instructionsDone = true;
           console.log(`[runSkill] Instructions turn done`);

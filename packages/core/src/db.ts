@@ -390,7 +390,7 @@ export class Db implements QueryDb {
       const { text, vec } = node.atom.value;
       // Use the provided vec if already the right size; otherwise embed
       const key = text;
-      if (!out.has(key)) {
+      if (!out.has(key) && text !== '') {
         out.set(key, vec.length === this.dims ? vec : await this.embed(text));
       }
     } else if (node.kind === 'list') {
@@ -614,7 +614,7 @@ export class Db implements QueryDb {
 
     log(`insertEntries: embedding ${meaningTexts.size} texts`);
     const embedMap = new Map<string, Float32Array>();
-    for (const text of meaningTexts) embedMap.set(text, await this.embed(text));
+    for (const text of meaningTexts) if (text !== '') embedMap.set(text, await this.embed(text));
 
     // ── Phase 4: write in a single transaction ──────────────────────────────
     const txn = this.raw.transaction(() => {
@@ -683,7 +683,7 @@ export class Db implements QueryDb {
       return;
     }
     if (type.kind === 'MeaningType' && typeof value === 'string') {
-      out.add(value);
+      if (value !== '') out.add(value);
       return;
     }
     if (type.kind === 'MapType' && typeof value === 'object' && !Array.isArray(value)) {

@@ -7,9 +7,8 @@ For each event batch, identify and index deliberate implementation choices and c
 Fields:
 - `title`: short imperative phrase (e.g. "Use early return to reduce nesting")
 - `rationale`: why this was the right approach
-- `symbols`: list of `{ "$id": "<uuid>" }` for LSP symbol nodes this concerns
-  — find IDs via `get_by_symbol_text` on function/class name, or `get_node_by_id` if you already have the UUID
-  — use `[]` if no matching symbols are indexed yet
+- `symbols`: list of `{ "$id": "<uuid>" }` for LSP symbol nodes this concerns (optional — default to `[]`)
+  — only populate if you already have the UUID; do NOT skip an extraction just because symbol UUIDs are unknown
 
 ### Choice — one option explicitly rejected in favour of another
 
@@ -17,7 +16,7 @@ Fields:
 - `chosen`: what was selected (e.g. "better-sqlite3")
 - `option`: what was rejected (e.g. "sql.js")
 - `reason`: why the option was not chosen
-- `symbols`: list of `{ "$id": "<uuid>" }` for related LSP nodes
+- `symbols`: list of `{ "$id": "<uuid>" }` for related LSP nodes (optional — default to `[]`)
 
 ### LocalChangeEvent — a concrete local shift in understanding, assumption, interface contract, or implementation
 
