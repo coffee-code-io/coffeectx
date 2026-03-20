@@ -84,6 +84,11 @@ export interface RunSkillInteractiveOptions {
    * Ignored when resumeSessionId is set.
    */
   newSessionId?: string;
+  /**
+   * Called after each batch completes (0-indexed). Use to mark batch events as
+   * indexed incrementally so a Ctrl+C / resume doesn't re-process done batches.
+   */
+  onBatchComplete?: (batchIndex: number) => Promise<void>;
 }
 
 export interface RunSkillResult {
@@ -123,7 +128,7 @@ ${eventsText}
  * Regular events remain in history for continuity.
  */
 export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Promise<RunSkillResult> {
-  const { skillName, skillPrompt, eventBatches, dbPath, queryOptions, pathToQwenExecutable, resumeSessionId, newSessionId } = opts;
+  const { skillName, skillPrompt, eventBatches, dbPath, queryOptions, pathToQwenExecutable, resumeSessionId, newSessionId, onBatchComplete } = opts;
 
   if (eventBatches.length === 0) return { sessionId: resumeSessionId ?? newSessionId ?? '' };
 
@@ -243,6 +248,14 @@ export async function runSkillInteractive(opts: RunSkillInteractiveOptions): Pro
           await q.pruneEphemeralContext();
         } catch (pruneErr) {
           console.warn(`[runSkill] pruneEphemeralContext failed: ${(pruneErr as Error).message}`);
+        }
+
+        if (!isErr && onBatchComplete) {
+          try {
+            await onBatchComplete(batchCount - 1);
+          } catch (cbErr) {
+            console.warn(`[runSkill] onBatchComplete failed: ${(cbErr as Error).message}`);
+          }
         }
 
         turnComplete?.();

@@ -116,8 +116,13 @@ function loadSkillDefs(): SkillDef[] {
 }
 
 /** Split a sorted event list into batches of batchStep non-thought events. */
-function buildBatches(events: EventSnapshot[], batchStep: number): string[] {
-  const batches: string[] = [];
+interface Batch {
+  text: string;
+  eventIds: string[];
+}
+
+function buildBatches(events: EventSnapshot[], batchStep: number): Batch[] {
+  const batches: Batch[] = [];
   let currentBatch: EventSnapshot[] = [];
   let nonThoughtCount = 0;
 
@@ -126,14 +131,14 @@ function buildBatches(events: EventSnapshot[], batchStep: number): string[] {
     if (!event.isThought) {
       nonThoughtCount++;
       if (nonThoughtCount >= batchStep) {
-        batches.push(flushBatch(currentBatch));
+        batches.push({ text: flushBatch(currentBatch), eventIds: currentBatch.map(e => e.id) });
         currentBatch = [];
         nonThoughtCount = 0;
       }
     }
   }
   if (currentBatch.length > 0) {
-    batches.push(flushBatch(currentBatch));
+    batches.push({ text: flushBatch(currentBatch), eventIds: currentBatch.map(e => e.id) });
   }
   return batches;
 }
@@ -229,10 +234,34 @@ export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentRes
 
   // ── Process each session ─────────────────────────────────────────────────────
   for (const [sessionId, sessionEvents] of eventsBySession) {
-    const eventBatches = buildBatches(sessionEvents, batchStep);
-    console.log(`[indexAgent] Session ${sessionId}: ${sessionEvents.length} new events → ${eventBatches.length} batches, ${skills.length} skills`);
+    const batches = buildBatches(sessionEvents, batchStep);
+    console.log(`[indexAgent] Session ${sessionId}: ${sessionEvents.length} new events → ${batches.length} batches, ${skills.length} skills`);
 
-    let allOk = true;
+    // Track per-batch skill completion: a batch is marked indexed once all
+    // skills have processed it (count reaches skills.length).
+    const batchCompletions = new Array<number>(batches.length).fill(0);
+
+    const markBatchIndexed = async (batchIndex: number) => {
+      batchCompletions[batchIndex]++;
+      if (batchCompletions[batchIndex] < skills.length) return;
+
+      const now = new Date().toISOString();
+      const eventTypeMap = new Map(sessionEvents.map(e => [e.id, e.typeName]));
+      const patches = batches[batchIndex]!.eventIds.map(id => ({
+        id,
+        type: eventTypeMap.get(id) ?? 'unknown',
+        data: { agentIndexed: now },
+      }));
+      try {
+        const patchResult = await db.insertEntries(patches);
+        if (patchResult.errors.length > 0) {
+          console.warn(`[indexAgent] ${patchResult.errors.length} events in batch ${batchIndex + 1} could not be marked: ${patchResult.errors[0]?.message}`);
+        }
+      } catch (err) {
+        console.warn(`[indexAgent] Failed to mark batch ${batchIndex + 1} for session ${sessionId}: ${(err as Error).message}`);
+      }
+    };
+
     for (const skill of skills) {
       // Derive a stable session ID so we can resume the same Qwen conversation.
       const qwenId = deriveQwenSessionId(sessionId, skill.name);
@@ -244,40 +273,18 @@ export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentRes
         await runSkillInteractive({
           skillName: skill.name,
           skillPrompt: skill.prompt,
-          eventBatches,
+          eventBatches: batches.map(b => b.text),
           dbPath,
           queryOptions: qOpts,
           pathToQwenExecutable,
+          onBatchComplete: markBatchIndexed,
           ...(sessionFileExists
             ? { resumeSessionId: qwenId }
             : { newSessionId: qwenId }),
         });
-        result.batches += eventBatches.length;
+        result.batches += batches.length;
       } catch (err) {
-        allOk = false;
         result.errors.push({ error: `[${skill.name}/${sessionId}] ${(err as Error).message}` });
-      }
-    }
-
-    // Mark all processed events as indexed
-    if (allOk) {
-      const now = new Date().toISOString();
-      const patches = sessionEvents.map(e => ({
-        id: e.id,
-        type: e.typeName,
-        data: { agentIndexed: now },
-      }));
-
-      try {
-        const patchResult = await db.insertEntries(patches);
-        const failed = patchResult.errors.length;
-        if (failed > 0) {
-          console.warn(`[indexAgent] ${failed} events could not be marked (sync-types may be needed): ${patchResult.errors[0]?.message}`);
-        } else {
-          console.log(`[indexAgent] Marked ${patches.length} events as indexed`);
-        }
-      } catch (err) {
-        console.warn(`[indexAgent] Failed to mark events for session ${sessionId}: ${(err as Error).message}`);
       }
     }
   }
