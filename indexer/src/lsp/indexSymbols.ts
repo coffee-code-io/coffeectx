@@ -13,6 +13,12 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';
 import type { Db, InsertEntry } from '@coffeectx/core';
 import { LspClient, SymbolKind, type DocumentSymbol, type SymbolInformation } from './client.js';
+import {
+  type FileHashStore,
+  hasRepoChanged,
+  markRepoIndexed,
+  saveFileHashes,
+} from '../fileHashes.js';
 
 // Extensions the indexer will process
 const SOURCE_EXTENSIONS = new Set([
@@ -28,7 +34,13 @@ const SKIP_DIRS = new Set([
 export interface IndexResult {
   files: number;
   nodes: number;
+  skipped: boolean;
   errors: Array<{ file: string; error: string }>;
+}
+
+export interface IndexWithLspOptions {
+  /** If provided, skip indexing if repo source files haven't changed; updated after indexing. */
+  hashes?: FileHashStore;
 }
 
 // ── LSP kind mapping ──────────────────────────────────────────────────────────
@@ -290,8 +302,18 @@ export async function indexWithLsp(
   repoPath: string,
   lspCommand: string,
   lspArgs: string[],
+  options: IndexWithLspOptions = {},
 ): Promise<IndexResult> {
-  const result: IndexResult = { files: 0, nodes: 0, errors: [] };
+  const { hashes } = options;
+  const result: IndexResult = { files: 0, nodes: 0, skipped: false, errors: [] };
+
+  const files = collectFiles(repoPath);
+
+  if (hashes && !hasRepoChanged(repoPath, hashes, files)) {
+    result.skipped = true;
+    result.files = files.length;
+    return result;
+  }
 
   // Build event indexes upfront so both agentEvents and reverse links can be populated.
   const fileEventIndex = buildFileEventIndex(db);
@@ -300,11 +322,10 @@ export async function indexWithLsp(
   // Pre-load existing symbol keys so re-runs don't create duplicate nodes.
   const existingSymbolKeys = buildExistingSymbolKeys(db);
 
+  result.files = files.length;
+
   const client = await LspClient.start(lspCommand, lspArgs, repoPath);
   await new Promise(r => setTimeout(r, 500));
-
-  const files = collectFiles(repoPath);
-  result.files = files.length;
 
   // Accumulate reverse links: log event node ID → LSP symbol node IDs to append
   const reverseLinks = new Map<string, { info: LogEventInfo; symbolIds: string[] }>();
@@ -385,6 +406,11 @@ export async function indexWithLsp(
       const listId = db.getMapFieldId(info.id, info.fieldName);
       if (listId) db.appendListItems(listId, [...new Set(symbolIds)]);
     } catch { /* best-effort */ }
+  }
+
+  if (hashes) {
+    markRepoIndexed(repoPath, hashes, files);
+    saveFileHashes(hashes);
   }
 
   return result;

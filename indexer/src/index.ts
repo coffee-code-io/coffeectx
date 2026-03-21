@@ -33,15 +33,18 @@ import {
   loadProjects,
   setActiveProject,
   setProjectLogs,
+  setProjectLogsNewerThan,
   getActiveProject,
   PROJECTS_PATH,
   DB_DIR,
 } from './projects.js';
 import { indexWithLsp } from './lsp/indexSymbols.js';
-import { resolveLspCommand, LSP_CONFIG_PATH, DEFAULT_LSP_COMMAND } from './lsp/config.js';
+import { resolveLspCommand, LSP_CONFIG_PATH } from './lsp/config.js';
 import { generateTypesDot } from './typesDot.js';
 import { indexLogs } from './agentLog/indexLogs.js';
 import { indexAgent } from './agentRun/indexAgent.js';
+import { loadFileHashes } from './fileHashes.js';
+import { runDaemon } from './daemon.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -157,6 +160,34 @@ try {
 }
 
 const db = new Db({ path: project.db, embed: embedFn, dimensions: embedCfg.dimensions });
+
+/**
+ * Resolve the effective newerThan date for a command.
+ * If --newer-than is passed, save it to project config and use it.
+ * If --newer-than "" is passed, clear the stored value.
+ * Otherwise fall back to project.logsNewerThan from config.
+ */
+function resolveNewerThan(): Date | undefined {
+  const raw = flag('--newer-than');
+  if (raw !== undefined) {
+    // Save to project config (empty string clears it)
+    setProjectLogsNewerThan(project.name, raw || undefined);
+    project.logsNewerThan = raw || undefined;
+    if (!raw) return undefined;
+    const d = new Date(raw);
+    if (isNaN(d.getTime())) {
+      console.error(`--newer-than: invalid date "${raw}"`);
+      db.close();
+      process.exit(1);
+    }
+    return d;
+  }
+  // Fall back to stored project value
+  if (project.logsNewerThan) {
+    return new Date(project.logsNewerThan);
+  }
+  return undefined;
+}
 
 switch (command) {
   case 'sync-types': {
@@ -513,16 +544,20 @@ switch (command) {
     console.log(`LSP: ${lspCommandFlag}`);
 
     const lspBinPath = lspBin.startsWith('~/') ? `${homedir()}/${lspBin.slice(2)}` : lspBin;
+    const lspHashes = args.includes('--no-cache') ? undefined : loadFileHashes();
 
-    // Re-open db with a real embed stub for now (embed provider wired separately)
-    const result = await indexWithLsp(db, repoPath, lspBinPath, lspArgs);
+    const result = await indexWithLsp(db, repoPath, lspBinPath, lspArgs, { hashes: lspHashes });
 
-    console.log(`\nDone.`);
-    console.log(`  Files:  ${result.files}`);
-    console.log(`  Nodes:  ${result.nodes}`);
-    if (result.errors.length > 0) {
-      console.error(`  Errors: ${result.errors.length}`);
-      for (const { file, error } of result.errors) console.error(`    ${file}: ${error}`);
+    if (result.skipped) {
+      console.log(`\nSkipped (no source files changed). Pass --no-cache to force.`);
+    } else {
+      console.log(`\nDone.`);
+      console.log(`  Files:  ${result.files}`);
+      console.log(`  Nodes:  ${result.nodes}`);
+      if (result.errors.length > 0) {
+        console.error(`  Errors: ${result.errors.length}`);
+        for (const { file, error } of result.errors) console.error(`    ${file}: ${error}`);
+      }
     }
     break;
   }
@@ -574,14 +609,17 @@ switch (command) {
       : project.logsPath ? [project.logsPath]
       : [];
     if (logPaths.length === 0) {
-      console.error('Usage: retrival-index index-logs [<path>...] [--logs-path <path>] [--project <name>]');
+      console.error('Usage: retrival-index index-logs [<path>...] [--logs-path <path>] [--newer-than <ISO-date>] [--no-cache] [--project <name>]');
       console.error('  Paths may be .jsonl files or directories. --logs-path saves the path for future runs.');
       db.close();
       process.exit(1);
     }
+    const newerThan = resolveNewerThan();
+    const logHashes = args.includes('--no-cache') ? undefined : loadFileHashes();
     console.log(`Indexing agent logs for project "${project.name}"...`);
-    const result = await indexLogs(db, logPaths);
-    console.log(`  Files:    ${result.files}`);
+    if (newerThan) console.log(`  Filter: sessions newer than ${newerThan.toISOString()}`);
+    const result = await indexLogs(db, logPaths, { newerThan, hashes: logHashes });
+    console.log(`  Files:    ${result.files} (${result.skipped} unchanged skipped)`);
     console.log(`  Sessions: ${result.sessions}`);
     console.log(`  Events:   ${result.events}`);
     console.log(`  Inserted: ${result.inserted} nodes`);
@@ -601,6 +639,9 @@ switch (command) {
     // Run all enabled indexers in order: lsp → logs → agent
     const indexersCfg = globalCfg.indexers;
     const repoPath = flag('--repo') ?? project.repoPath;
+    const noCache = args.includes('--no-cache');
+    const newerThan = resolveNewerThan();
+    const hashes = noCache ? undefined : loadFileHashes();
     let failed = false;
 
     if (indexersCfg.lsp) {
@@ -615,11 +656,15 @@ switch (command) {
         } else {
           const lspBinPath = lspBin.startsWith('~/') ? `${homedir()}/${lspBin.slice(2)}` : lspBin;
           console.log(`[lsp] Indexing "${absRepo}"...`);
-          const r = await indexWithLsp(db, absRepo, lspBinPath, lspArgs);
-          console.log(`  Files: ${r.files}, Nodes: ${r.nodes}`);
-          if (r.errors.length > 0) {
-            for (const { file, error } of r.errors) console.error(`  [lsp] ${file}: ${error}`);
-            failed = true;
+          const r = await indexWithLsp(db, absRepo, lspBinPath, lspArgs, { hashes });
+          if (r.skipped) {
+            console.log(`  [lsp] Skipped (no source files changed)`);
+          } else {
+            console.log(`  Files: ${r.files}, Nodes: ${r.nodes}`);
+            if (r.errors.length > 0) {
+              for (const { file, error } of r.errors) console.error(`  [lsp] ${file}: ${error}`);
+              failed = true;
+            }
           }
         }
       }
@@ -631,8 +676,8 @@ switch (command) {
         console.warn('  [logs] No logsPath configured for this project — skipping.');
       } else {
         console.log(`[logs] Indexing agent logs...`);
-        const r = await indexLogs(db, logPaths);
-        console.log(`  Files: ${r.files}, Sessions: ${r.sessions}, Events: ${r.events}, Inserted: ${r.inserted}`);
+        const r = await indexLogs(db, logPaths, { newerThan, hashes });
+        console.log(`  Files: ${r.files} (${r.skipped} skipped), Sessions: ${r.sessions}, Events: ${r.events}, Inserted: ${r.inserted}`);
         if (r.errors.length > 0) {
           for (const { file, error } of r.errors) console.error(`  [logs] ${file}: ${error}`);
           failed = true;
@@ -651,6 +696,32 @@ switch (command) {
     }
 
     if (failed) { db.close(); process.exit(1); }
+    break;
+  }
+
+  case 'daemon': {
+    const logsPath = flag('--logs-path') ?? project.logsPath;
+    if (!logsPath) {
+      console.error('No logs path configured. Pass --logs-path <path> or set one during init.');
+      db.close();
+      process.exit(1);
+    }
+    const rateLimitMin = flagInt('--rate-limit', 10);
+    const newerThan = resolveNewerThan();
+    const indexersCfg = globalCfg.indexers;
+    const hashes = loadFileHashes();
+    console.log(`[daemon] Starting for project "${project.name}" (rate limit: ${rateLimitMin}min)`);
+    await runDaemon({
+      db,
+      dbPath: project.db,
+      logsPath: resolve(logsPath),
+      rateLimitMs: rateLimitMin * 60 * 1000,
+      indexLogs: indexersCfg.logs,
+      indexAgent: indexersCfg.agent,
+      logOptions: { newerThan },
+      hashes,
+    });
+    // runDaemon() runs indefinitely; db.close() below is never reached but kept for symmetry.
     break;
   }
 
@@ -673,10 +744,11 @@ Commands:
   regex <pattern>                        Regex symbol match (case-insensitive)
   insert-entries <file.json>             Insert typed entries from a JSON file
   load-node <id> [--depth <n>]           Load a node by ID, expanding to depth (default 10)
-  index                                  Run all enabled indexers (lsp → logs → agent) per config
-  index-lsp [<path>] [--lsp-command <cmd>]    Index repo with LSP
-  index-logs [<path>...]                       Index Claude Code JSONL logs
-  index-agent [--batch-step <n>] [--qwen-path <path>]  Run agent entity extraction
+  index [--newer-than <ISO>] [--no-cache]        Run all enabled indexers (lsp → logs → agent)
+  index-lsp [<path>] [--lsp-command <cmd>] [--no-cache]   Index repo with LSP
+  index-logs [<path>...] [--newer-than <ISO>] [--no-cache] Index Claude Code JSONL logs
+  index-agent [--batch-step <n>] [--qwen-path <path>]      Run agent entity extraction
+  daemon [--rate-limit <min>] [--newer-than <ISO>]          Watch logs dir and auto-reindex
 
 Options:
   --project <name>       Target a specific project
@@ -685,8 +757,11 @@ Options:
   --depth <n>            Node expansion depth (default: 10 for query/load-node, 3 for search/exact/regex)
   -v / --verbose         Return raw node data instead of formatted output
   --repo <path>          Override repo path for index / index-lsp
-  --logs-path <path>     Set default logs path for index-logs (saved in config)
+  --logs-path <path>     Set default logs path for index-logs / daemon (saved in config)
   --lsp-command <cmd>    Override LSP command
+  --newer-than <ISO>     Only index sessions newer than this date (e.g. 2026-01-01)
+  --no-cache             Ignore stored file hashes and force full reindex
+  --rate-limit <min>     Daemon: minimum minutes between index runs (default: 10)
 
 Active project: ${active}
 Enabled indexers: ${Object.entries(globalCfg.indexers).filter(([,v])=>v).map(([k])=>k).join(', ') || 'none'}

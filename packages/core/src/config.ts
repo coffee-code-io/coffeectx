@@ -34,6 +34,8 @@ export interface ProjectEntry {
   repoPath?: string;
   /** Path to .claude/projects/<id>/ directory or a specific .jsonl file. */
   logsPath?: string;
+  /** Only index log sessions whose startTime is at or after this ISO date. */
+  logsNewerThan?: string;
   created: string;
 }
 

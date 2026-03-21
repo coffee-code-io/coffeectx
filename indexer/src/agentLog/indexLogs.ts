@@ -6,9 +6,23 @@ import { classifyMessages, extractSessions } from './classifier.js';
 import { enrichEvents } from './enricher.js';
 import type { EnrichedEvent } from './enricher.js';
 import type { InsertEntry } from '@coffeectx/core';
+import {
+  type FileHashStore,
+  hasLogFileChanged,
+  markLogFileIndexed,
+  saveFileHashes,
+} from '../fileHashes.js';
+
+export interface IndexLogsOptions {
+  /** Only index sessions whose startTime is at or after this date. */
+  newerThan?: Date;
+  /** If provided, skip files whose mtime/size hasn't changed; updated after indexing. */
+  hashes?: FileHashStore;
+}
 
 export interface IndexLogsResult {
   files: number;
+  skipped: number;
   sessions: number;
   events: number;
   inserted: number;
@@ -20,8 +34,9 @@ export interface IndexLogsResult {
  * @param db     Open Db instance (must have AgentLog types synced).
  * @param paths  Array of absolute file or directory paths.
  */
-export async function indexLogs(db: Db, paths: string[]): Promise<IndexLogsResult> {
-  const result: IndexLogsResult = { files: 0, sessions: 0, events: 0, inserted: 0, errors: [] };
+export async function indexLogs(db: Db, paths: string[], options: IndexLogsOptions = {}): Promise<IndexLogsResult> {
+  const { newerThan, hashes } = options;
+  const result: IndexLogsResult = { files: 0, skipped: 0, sessions: 0, events: 0, inserted: 0, errors: [] };
 
   const logFiles = resolveLogFiles(paths);
   result.files = logFiles.length;
@@ -31,8 +46,16 @@ export async function indexLogs(db: Db, paths: string[]): Promise<IndexLogsResul
   const existingSessionIds = loadExistingSessionIds(db);
 
   for (const filePath of logFiles) {
+    if (hashes && !hasLogFileChanged(filePath, hashes)) {
+      result.skipped++;
+      continue;
+    }
     try {
-      await indexSingleFile(db, filePath, result, existingUuids, existingSessionIds);
+      await indexSingleFile(db, filePath, result, existingUuids, existingSessionIds, newerThan);
+      if (hashes) {
+        markLogFileIndexed(filePath, hashes);
+        saveFileHashes(hashes);
+      }
     } catch (err) {
       result.errors.push({ file: filePath, error: (err as Error).message, stack: (err as Error).stack });
     }
@@ -41,17 +64,23 @@ export async function indexLogs(db: Db, paths: string[]): Promise<IndexLogsResul
   return result;
 }
 
-async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult, existingUuids: Set<string>, existingSessionIds: Set<string>): Promise<void> {
+async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult, existingUuids: Set<string>, existingSessionIds: Set<string>, newerThan?: Date): Promise<void> {
   // 1. Read + deduplicate
   const raw = await readLogFile(filePath);
   const messages = deduplicateMessages(raw);
 
-  // 2. Extract session metadata
-  const sessions = extractSessions(messages);
+  // 2. Extract session metadata, filtering by newerThan if set
+  const allSessions = extractSessions(messages);
+  const sessions = newerThan
+    ? new Map([...allSessions].filter(([, meta]) => new Date(meta.startTime) >= newerThan))
+    : allSessions;
   result.sessions += sessions.size;
 
-  // 3. Classify → only important events
-  const events = classifyMessages(messages);
+  // 3. Classify → only important events (restrict to sessions that passed the filter)
+  const allowedSessionIds = newerThan ? new Set(sessions.keys()) : null;
+  const events = classifyMessages(messages).filter(
+    e => !allowedSessionIds || allowedSessionIds.has(e.sessionId),
+  );
 
   // 4. Enrich with DB links (best-effort)
   const enriched = await enrichEvents(events, db);

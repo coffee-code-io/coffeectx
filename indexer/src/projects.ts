@@ -48,6 +48,14 @@ export function setProjectLogs(name: string, logsPath: string): void {
   saveConfig(cfg);
 }
 
+export function setProjectLogsNewerThan(name: string, newerThan: string | undefined): void {
+  const cfg = loadConfig();
+  const entry = cfg.projects[name];
+  if (!entry) throw new Error(`Project "${name}" not found`);
+  entry.logsNewerThan = newerThan;
+  saveConfig(cfg);
+}
+
 export function setProjectRepo(name: string, repoPath: string): void {
   const cfg = loadConfig();
   const entry = cfg.projects[name];
