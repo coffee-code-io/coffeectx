@@ -233,6 +233,52 @@ function symbolEntry(rec: SymbolRecord, relPath: string, agentEventIds: string[]
   };
 }
 
+// ── Existing-symbol deduplication ────────────────────────────────────────────
+
+const LSP_TYPES = [
+  'LspModule', 'LspNamespace', 'LspClass', 'LspMethod', 'LspProperty',
+  'LspField', 'LspConstructor', 'LspEnum', 'LspInterface', 'LspFunction',
+  'LspVariable', 'LspConstant', 'LspEnumMember', 'LspStruct', 'LspTypeParameter',
+];
+
+/**
+ * Build a set of keys for all LSP symbol nodes already in the DB.
+ * Key format: "<typeName>:<relPath>:<name>:<line>"
+ * Used to skip symbols that are already indexed so re-runs are idempotent.
+ */
+function symValue(db: Db, nodeId: string): string | null {
+  const n = db.loadNode(nodeId);
+  return n.kind === 'atom' && n.atom.kind === 'symbol' ? n.atom.value : null;
+}
+
+function buildExistingSymbolKeys(db: Db): Set<string> {
+  const keys = new Set<string>();
+  const ids = db.queryByNamedType(LSP_TYPES);
+  for (const id of ids) {
+    try {
+      const typeName = db.getNodeTypeName(id);
+      if (!typeName) continue;
+      const nameFieldId = db.getMapFieldId(id, 'name');
+      const locationId = db.getMapFieldId(id, 'location');
+      if (!nameFieldId || !locationId) continue;
+      const name = symValue(db, nameFieldId);
+      if (!name) continue;
+      const fileId = db.getMapFieldId(locationId, 'file');
+      const lineId = db.getMapFieldId(locationId, 'line');
+      if (!fileId || !lineId) continue;
+      const pathId = db.getMapFieldId(fileId, 'path');
+      if (!pathId) continue;
+      const path = symValue(db, pathId);
+      const line = symValue(db, lineId);
+      if (!path || !line) continue;
+      keys.add(`${typeName}:${path}:${name}:${line}`);
+    } catch {
+      // skip unloadable nodes
+    }
+  }
+  return keys;
+}
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 /**
@@ -250,6 +296,9 @@ export async function indexWithLsp(
   // Build event indexes upfront so both agentEvents and reverse links can be populated.
   const fileEventIndex = buildFileEventIndex(db);
   const nameEventIndex = buildNameEventIndex(db);
+
+  // Pre-load existing symbol keys so re-runs don't create duplicate nodes.
+  const existingSymbolKeys = buildExistingSymbolKeys(db);
 
   const client = await LspClient.start(lspCommand, lspArgs, repoPath);
   await new Promise(r => setTimeout(r, 500));
@@ -282,13 +331,20 @@ export async function indexWithLsp(
       ]).values()];
       const fileEventIds = fileEvents.map(e => e.id);
 
-      // Build per-record agentEvents (file events + name-matched events)
-      const entries = records.map(rec => {
-        const nameEvents = nameEventIndex.get(rec.name) ?? [];
-        const allEventIds = [...new Set([...fileEventIds, ...nameEvents.map(e => e.id)])];
-        return symbolEntry(rec, relPath, allEventIds);
-      });
+      // Build per-record agentEvents (file events + name-matched events),
+      // skipping symbols already present in the DB (idempotent re-runs).
+      const entries = records
+        .filter(rec => {
+          const lineStr = String(rec.line + 1);
+          return !existingSymbolKeys.has(`${rec.typeName}:${relPath}:${rec.name}:${lineStr}`);
+        })
+        .map(rec => {
+          const nameEvents = nameEventIndex.get(rec.name) ?? [];
+          const allEventIds = [...new Set([...fileEventIds, ...nameEvents.map(e => e.id)])];
+          return symbolEntry(rec, relPath, allEventIds);
+        });
 
+      if (entries.length === 0) continue;
       const insertResult = await db.insertEntries(entries);
       result.nodes += insertResult.ids.filter(id => id !== null).length;
 

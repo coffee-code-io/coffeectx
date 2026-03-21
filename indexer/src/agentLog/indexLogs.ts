@@ -26,9 +26,13 @@ export async function indexLogs(db: Db, paths: string[]): Promise<IndexLogsResul
   const logFiles = resolveLogFiles(paths);
   result.files = logFiles.length;
 
+  // Preload all existing UUIDs and sessionIds once to avoid per-event DB queries.
+  const existingUuids = loadExistingUuids(db);
+  const existingSessionIds = loadExistingSessionIds(db);
+
   for (const filePath of logFiles) {
     try {
-      await indexSingleFile(db, filePath, result);
+      await indexSingleFile(db, filePath, result, existingUuids, existingSessionIds);
     } catch (err) {
       result.errors.push({ file: filePath, error: (err as Error).message, stack: (err as Error).stack });
     }
@@ -37,7 +41,7 @@ export async function indexLogs(db: Db, paths: string[]): Promise<IndexLogsResul
   return result;
 }
 
-async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult): Promise<void> {
+async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult, existingUuids: Set<string>, existingSessionIds: Set<string>): Promise<void> {
   // 1. Read + deduplicate
   const raw = await readLogFile(filePath);
   const messages = deduplicateMessages(raw);
@@ -60,7 +64,7 @@ async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult
 
   // Session entries — skip if an AgentSession with this sessionId already exists
   for (const [sessionId, meta] of sessions) {
-    if (agentSessionExists(db, sessionId)) continue;
+    if (existingSessionIds.has(sessionId)) continue;
     entries.push({
       type: 'AgentSession',
       data: {
@@ -72,8 +76,9 @@ async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult
     });
   }
 
-  // Event entries
+  // Event entries — skip if a node with the same uuid already exists
   for (const event of enriched) {
+    if (existingUuids.has(event.uuid)) continue;
     const entry = eventToInsertEntry(event);
     if (entry) entries.push(entry);
   }
@@ -164,15 +169,30 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
   }
 }
 
-/**
- * Returns true if an AgentSession node with the given sessionId already exists in the DB.
- * Prevents duplicate session nodes when indexLogs is re-run on the same files.
- */
-function agentSessionExists(db: Db, sessionId: string): boolean {
-  const symbolIds = db.querySymbolExact(sessionId);
-  if (symbolIds.length === 0) return false;
-  const mapIds = db.queryMapsByField('sessionId', symbolIds);
-  return mapIds.some(id => db.getNodeTypeName(id) === 'AgentSession');
+const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentThought'];
+
+/** Load all existing event UUIDs from the DB in one pass. */
+function loadExistingUuids(db: Db): Set<string> {
+  const uuids = new Set<string>();
+  for (const id of db.queryByNamedType(EVENT_TYPES)) {
+    const fieldId = db.getMapFieldId(id, 'uuid');
+    if (!fieldId) continue;
+    const node = db.loadNode(fieldId);
+    if (node.kind === 'atom' && node.atom.kind === 'symbol') uuids.add(node.atom.value);
+  }
+  return uuids;
+}
+
+/** Load all existing AgentSession sessionIds from the DB in one pass. */
+function loadExistingSessionIds(db: Db): Set<string> {
+  const ids = new Set<string>();
+  for (const mapId of db.queryByNamedType(['AgentSession'])) {
+    const fieldId = db.getMapFieldId(mapId, 'sessionId');
+    if (!fieldId) continue;
+    const node = db.loadNode(fieldId);
+    if (node.kind === 'atom' && node.atom.kind === 'symbol') ids.add(node.atom.value);
+  }
+  return ids;
 }
 
 /** Collect .jsonl file paths from a mix of file and directory paths. */
