@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * retrival-index CLI
+ * coffeectx-index CLI
  *
  * Commands:
  *   init [--name <name>] [--repo <path>]   Create a new project DB
@@ -113,7 +113,7 @@ if (command === 'init') {
 if (command === 'use') {
   const name = args[1];
   if (!name) {
-    console.error('Usage: retrival-index use <name>');
+    console.error('Usage: coffeectx-index use <name>');
     process.exit(1);
   }
   try {
@@ -132,7 +132,7 @@ if (command === 'list-projects') {
   const data = loadProjects();
   const names = Object.keys(data.projects);
   if (names.length === 0) {
-    console.log('No projects yet. Run: retrival-index init');
+    console.log('No projects yet. Run: coffeectx-index init');
   } else {
     for (const n of names) {
       const entry = data.projects[n]!;
@@ -210,7 +210,7 @@ switch (command) {
   case 'load-types': {
     const dir = args[1];
     if (!dir) {
-      console.error('Usage: retrival-index load-types <dir> [--project <name>]');
+      console.error('Usage: coffeectx-index load-types <dir> [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -224,7 +224,7 @@ switch (command) {
   case 'list-types': {
     const types = db.listNamedTypes();
     if (types.length === 0) {
-      console.log(`No named types in "${project.name}". Run: retrival-index sync-types`);
+      console.log(`No named types in "${project.name}". Run: coffeectx-index sync-types`);
     } else {
       console.log(`Types in "${project.name}" (${types.length}):`);
       for (const { name, source } of types) console.log(`  [${source}] ${name}`);
@@ -250,7 +250,7 @@ switch (command) {
   case 'insert-entries': {
     const filePath = positional(1);
     if (!filePath) {
-      console.error('Usage: retrival-index insert-entries <file.json> [--project <name>]');
+      console.error('Usage: coffeectx-index insert-entries <file.json> [--project <name>]');
       console.error('  file.json must be an array of flat entry objects with "$type" required.');
       console.error('  Example: [{ "$type": "Decision", "title": "Use SQLite", "rationale": "..." }]');
       db.close();
@@ -294,7 +294,7 @@ switch (command) {
   case 'load-node': {
     const nodeId = positional(1);
     if (!nodeId) {
-      console.error('Usage: retrival-index load-node <id> [--depth <n>] [--project <name>]');
+      console.error('Usage: coffeectx-index load-node <id> [--depth <n>] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -339,7 +339,7 @@ switch (command) {
       .trim();
 
     if (!queryInput) {
-      console.error('Usage: retrival-index query <expression> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
+      console.error('Usage: coffeectx-index query <expression> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -396,7 +396,7 @@ switch (command) {
       .trim();
 
     if (!text) {
-      console.error('Usage: retrival-index search <text> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
+      console.error('Usage: coffeectx-index search <text> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -438,7 +438,7 @@ switch (command) {
     const value = positional(1);
 
     if (!value) {
-      console.error('Usage: retrival-index exact <value> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
+      console.error('Usage: coffeectx-index exact <value> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -476,7 +476,7 @@ switch (command) {
     const pattern = positional(1);
 
     if (!pattern) {
-      console.error('Usage: retrival-index regex <pattern> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
+      console.error('Usage: coffeectx-index regex <pattern> [--limit <n>] [--offset <n>] [--depth <n>] [-v] [--include-hidden] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -610,7 +610,7 @@ switch (command) {
       : project.logsPath ? [project.logsPath]
       : [];
     if (logPaths.length === 0) {
-      console.error('Usage: retrival-index index-logs [<path>...] [--logs-path <path>] [--newer-than <ISO-date>] [--no-cache] [--project <name>]');
+      console.error('Usage: coffeectx-index index-logs [<path>...] [--logs-path <path>] [--newer-than <ISO-date>] [--no-cache] [--project <name>]');
       console.error('  Paths may be .jsonl files or directories. --logs-path saves the path for future runs.');
       db.close();
       process.exit(1);

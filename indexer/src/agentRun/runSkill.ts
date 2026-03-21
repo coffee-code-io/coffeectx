@@ -13,8 +13,9 @@ function dlog(msg: string): void {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/** Absolute path to the MCP server entry point (mcp/dist/index.js). */
-const MCP_SERVER_PATH = resolve(__dirname, '../../../mcp/dist/index.js');
+/** Absolute path to the MCP server entry point — resolved via package.json exports. */
+const _req = createRequire(import.meta.url);
+const MCP_SERVER_PATH = _req.resolve('@coffeectx/server');
 
 /**
  * Retrival-mcp project root — used as cwd so the qwen skill manager finds .qwen/skills/.
@@ -37,10 +38,18 @@ export const EPHEMERAL_CONTEXT_BEGIN = '[EPHEMERAL_CONTEXT_BEGIN]';
 export const EPHEMERAL_CONTEXT_END = '[EPHEMERAL_CONTEXT_END]';
 
 /**
- * Resolve the packaged qwen CLI from the @qwen-code/sdk package.
- * Returns undefined if not found — the SDK will then auto-discover it.
+ * Resolve the qwen CLI to use.
+ * Priority:
+ *   1. Vendored CLI bundled with this package (dist/vendor/qwen-cli.js).
+ *   2. Monorepo sibling path (dev/workspace installs).
+ * Returns undefined if neither found — the SDK will then auto-discover it.
  */
 function resolveQwenCliPath(): string | undefined {
+  // 1. Vendored CLI (published package)
+  const vendored = join(__dirname, '../vendor/qwen-cli.js');
+  if (existsSync(vendored)) return vendored;
+
+  // 2. Monorepo sibling (workspace / local dev)
   try {
     const req = createRequire(import.meta.url);
     const pkgJson = req.resolve('@qwen-code/sdk/package.json');
