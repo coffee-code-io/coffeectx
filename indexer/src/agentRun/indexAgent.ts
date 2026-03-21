@@ -50,6 +50,11 @@ export interface IndexAgentOptions {
    * Default: 10.
    */
   batchStep?: number;
+  /**
+   * Per-skill enable/disable map (keyed by skill directory name).
+   * Skills absent from the map are enabled by default.
+   */
+  skillFilter?: Record<string, boolean>;
 }
 
 export interface IndexAgentResult {
@@ -115,8 +120,8 @@ function qwenSessionFileExists(sessionId: string): boolean {
   return existsSync(join(chatsDir, `${sessionId}.jsonl`));
 }
 
-/** Load all skill definitions from indexer/skills/. */
-function loadSkillDefs(): SkillDef[] {
+/** Load all skill definitions from indexer/skills/, filtered by an optional enable map. */
+function loadSkillDefs(filter?: Record<string, boolean>): SkillDef[] {
   const skillsDir = join(__dirname, '../../skills');
   let names: string[];
   try {
@@ -128,6 +133,10 @@ function loadSkillDefs(): SkillDef[] {
 
   const defs: SkillDef[] = [];
   for (const name of names) {
+    if (filter && filter[name] === false) {
+      console.log(`[indexAgent] Skill "${name}" disabled in config — skipping`);
+      continue;
+    }
     const dir = join(skillsDir, name);
     try {
       const meta = parseYaml(readFileSync(join(dir, 'skill.yaml'), 'utf-8')) as { name: string; description: string };
@@ -197,12 +206,12 @@ function flushBatch(batch: EventSnapshot[]): string {
  * each session's events in chronological order.
  */
 export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentResult> {
-  const { db, dbPath, batchStep = 10, pathToQwenExecutable } = opts;
+  const { db, dbPath, batchStep = 10, pathToQwenExecutable, skillFilter } = opts;
   const result: IndexAgentResult = { batches: 0, errors: [] };
 
   const auth = loadAuth();
   const qOpts = authToQueryOptions(auth);
-  const skills = loadSkillDefs();
+  const skills = loadSkillDefs(skillFilter);
 
   if (skills.length === 0) {
     console.warn('[indexAgent] No skills found — nothing to index');

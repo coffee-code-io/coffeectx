@@ -581,6 +581,7 @@ switch (command) {
       dbPath: project.db,
       batchStep,
       pathToQwenExecutable: qwenPathArg ? resolve(qwenPathArg) : undefined,
+      skillFilter: globalCfg.agent?.skills,
     });
 
     console.log(`  Batches: ${result.batches}`);
@@ -687,7 +688,7 @@ switch (command) {
 
     if (indexersCfg.agent) {
       console.log(`[agent] Running agent indexer...`);
-      const r = await indexAgent({ db, dbPath: project.db });
+      const r = await indexAgent({ db, dbPath: project.db, skillFilter: globalCfg.agent?.skills });
       console.log(`  Batches: ${r.batches}`);
       if (r.errors.length > 0) {
         for (const { error } of r.errors) console.error(`  [agent] ${error}`);

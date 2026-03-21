@@ -96,6 +96,15 @@ export interface CoffeectxConfig {
     agent: boolean;
   };
 
+  /** Agent indexer configuration. */
+  agent?: {
+    /**
+     * Per-skill enable/disable map. Key is the skill directory name.
+     * Skills absent from the map are enabled by default.
+     */
+    skills?: Record<string, boolean>;
+  };
+
   /** LSP server configuration. */
   lsp: {
     /** Default LSP command (full command string). */
@@ -141,6 +150,7 @@ type RawConfig = Partial<{
   types: Record<string, unknown>;
   indexers: Record<string, unknown>;
   lsp: Record<string, unknown>;
+  agent: Record<string, unknown>;
   // legacy flat db section (config.yaml v1)
   db: Record<string, unknown>;
 }>;
@@ -267,7 +277,9 @@ export function loadConfig(): CoffeectxConfig {
   const envInsert = process.env['COFFEECTX_INSERT'];
   if (envInsert === '1' || envInsert === 'true') tools.insert = true;
 
-  const cfg: CoffeectxConfig = { active, projects, embed, auth, tools, types, indexers, lsp };
+  const agent = raw.agent ? (raw.agent as CoffeectxConfig['agent']) : undefined;
+
+  const cfg: CoffeectxConfig = { active, projects, embed, auth, tools, types, indexers, lsp, agent };
 
   return cfg;
 }

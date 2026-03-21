@@ -69,18 +69,15 @@ async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult
   const raw = await readLogFile(filePath);
   const messages = deduplicateMessages(raw);
 
-  // 2. Extract session metadata, filtering by newerThan if set
-  const allSessions = extractSessions(messages);
-  const sessions = newerThan
-    ? new Map([...allSessions].filter(([, meta]) => new Date(meta.startTime) >= newerThan))
-    : allSessions;
+  // 2. Extract session metadata (all sessions — metadata is cheap to store)
+  const sessions = extractSessions(messages);
   result.sessions += sessions.size;
 
-  // 3. Classify → only important events (restrict to sessions that passed the filter)
-  const allowedSessionIds = newerThan ? new Set(sessions.keys()) : null;
-  const events = classifyMessages(messages).filter(
-    e => !allowedSessionIds || allowedSessionIds.has(e.sessionId),
-  );
+  // 3. Classify → only important events, filtered by individual message timestamp
+  const allEvents = classifyMessages(messages);
+  const events = newerThan
+    ? allEvents.filter(e => new Date(e.timestamp) >= newerThan)
+    : allEvents;
 
   // 4. Enrich with DB links (best-effort)
   const enriched = await enrichEvents(events, db);
