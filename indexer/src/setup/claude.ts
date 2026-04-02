@@ -104,35 +104,10 @@ architecture decisions so you can query them with semantic and structural search
 | \`search\` | Semantic similarity search over indexed meanings |
 | \`exact\` | Exact symbol value match |
 | \`regex\` | Case-insensitive regex match against symbol values |
-| \`raw_query\` | Structured query language (Symbol, Meaning, IsType, Field, HasItem, …) |
 
-### Re-indexing
-
-Run the indexer manually to pick up new changes:
-
-\`\`\`sh
-coffeectx-index index --project ${projectName}
-\`\`\`
-
-### Auto-indexing daemon
-
-To start a background daemon that watches your logs and re-indexes automatically:
-
-\`\`\`sh
-coffeectx-index daemon --project ${projectName}
-\`\`\`
-
-### MCP server
-
-The MCP server binary is at: \`${mcpServerBin}\`
-
-To use it in another AI assistant, configure it as:
-\`\`\`json
-{
-  "command": "node",
-  "args": ["${mcpServerBin}"]
-}
-\`\`\`
+Use it if:
+1. You are unsure if some implementation is temporary, or is a sane decision
+2. Why some implementation or decision was selected over another
 `;
 
   const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';

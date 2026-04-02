@@ -6,7 +6,7 @@
  * Set COFFEECTX_SKIP_SETUP=1 to suppress.
  */
 
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -82,7 +82,27 @@ const API_KEY_HINTS: Record<Provider, string> = {
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
-// ── Claude projects scanning ──────────────────────────────────────────────────
+const CUSTOM_OPTION = 'Custom (type model ID)';
+
+/**
+ * Present a model list with an extra "Custom" option at the end.
+ * If the user picks Custom, prompt for a free-text model ID.
+ */
+async function chooseModel(question: string, options: string[]): Promise<string> {
+  const allOptions = [...options, CUSTOM_OPTION];
+  const picked = await choose(question, allOptions);
+  if (picked === CUSTOM_OPTION) {
+    let custom = '';
+    while (!custom) {
+      custom = await ask('  Model ID');
+      if (!custom) console.log('  Model ID cannot be empty.');
+    }
+    return custom;
+  }
+  return picked;
+}
+
+// ── Project gathering ─────────────────────────────────────────────────────────
 
 interface ProjectSetup {
   name: string;
@@ -92,100 +112,58 @@ interface ProjectSetup {
 }
 
 /**
- * Convert a Claude project directory name to a best-guess repo path.
- * The dir name looks like "-Users-dima-Documents-myrepo", which maps to
- * /Users/dima/Documents/myrepo.
+ * Derive the Claude project logs directory from a repo absolute path.
+ * Claude stores per-project data under ~/.claude/projects/<encoded-path>/
+ * where <encoded-path> is the absolute path with '/' replaced by '-'.
+ * e.g. /Users/dima/Documents/myrepo → -Users-dima-Documents-myrepo
  */
-function dirNameToRepoPath(dirName: string): string {
-  // Replace each segment separator: leading '-' → '/', then '-' between segments.
-  // Strategy: the dir name uses '-' in place of '/', and the path starts with '/'.
-  // e.g. "-Users-dima-Documents-my-project" → "/Users/dima/Documents/my-project"
-  // We can't distinguish '-' in the path from '-' as separator, so we just
-  // replace the leading '-' with '/' and leave the rest for the user to correct.
-  if (dirName.startsWith('-')) {
-    return '/' + dirName.slice(1).replace(/-/g, '/');
-  }
-  return dirName;
+function repoPathToClaudeDir(repoPath: string): string {
+  const encoded = repoPath.replace(/\//g, '-');
+  return join(CLAUDE_PROJECTS_DIR, encoded);
 }
 
 async function gatherProjects(): Promise<ProjectSetup[]> {
   const projects: ProjectSetup[] = [];
 
-  if (existsSync(CLAUDE_PROJECTS_DIR)) {
-    let dirs: string[] = [];
-    try {
-      dirs = readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true })
-        .filter(d => d.isDirectory())
-        .map(d => d.name);
-    } catch {
-      // ignore read errors
+  console.log(`\n  Enter the absolute paths of repos you want to index.`);
+  console.log(`  ${DIM}The Claude logs directory will be derived automatically.${RESET}`);
+  console.log(`  ${DIM}Leave empty to finish adding projects.${RESET}\n`);
+
+  while (true) {
+    const repoPath = await ask(`  Repo path (empty to finish)`);
+    if (!repoPath) break;
+
+    const logsPath = repoPathToClaudeDir(repoPath);
+    const logsExist = existsSync(logsPath);
+
+    if (logsExist) {
+      console.log(`  ${GREEN}Found Claude logs:${RESET} ${logsPath}`);
+    } else {
+      console.log(`  ${YELLOW}No Claude logs at:${RESET} ${logsPath}`);
+      console.log(`  ${DIM}(will be used once Claude creates logs for this project)${RESET}`);
     }
 
-    if (dirs.length > 0) {
-      console.log(`\n${BOLD}Found ${dirs.length} Claude project director${dirs.length === 1 ? 'y' : 'ies'}:${RESET}`);
+    const defaultName = basename(repoPath);
+    const name = await ask(`  Project name?`, defaultName);
 
-      for (const dirName of dirs) {
-        const logsPath = join(CLAUDE_PROJECTS_DIR, dirName);
-        const guessedRepo = dirNameToRepoPath(dirName);
-
-        console.log(`\n${DIM}  Claude dir: ${logsPath}${RESET}`);
-
-        const repoPath = await ask(
-          `  Repo path for "${dirName}"?`,
-          guessedRepo,
-        );
-
-        if (!repoPath) {
-          console.log(`  ${DIM}Skipping (no repo path).${RESET}`);
-          continue;
-        }
-
-        const defaultName = basename(repoPath);
-        const name = await ask(`  Project name?`, defaultName);
-
-        if (!name) {
-          console.log(`  ${DIM}Skipping (no project name).${RESET}`);
-          continue;
-        }
-
-        const newerThan = await ask(
-          `  Only index sessions newer than (ISO date, optional)`,
-          '',
-        );
-
-        projects.push({
-          name: sanitizeName(name),
-          repoPath,
-          logsPath,
-          logsNewerThan: newerThan || undefined,
-        });
-      }
+    if (!name) {
+      console.log(`  ${DIM}Skipping (no project name).${RESET}`);
+      continue;
     }
-  }
 
-  if (projects.length === 0) {
-    console.log(`\n${YELLOW}No Claude project directories found (or none configured).${RESET}`);
-    console.log('You can enter the paths manually.\n');
+    const newerThan = await ask(
+      `  Only index sessions newer than (ISO date, optional)`,
+      '',
+    );
 
-    const logsPath = await ask('Path to Claude logs directory (or leave empty to skip)', '');
-    const repoPath = await ask('Path to your project repo (or leave empty to skip)', '');
+    projects.push({
+      name: sanitizeName(name),
+      repoPath,
+      logsPath,
+      logsNewerThan: newerThan || undefined,
+    });
 
-    if (logsPath || repoPath) {
-      const defaultName = repoPath ? basename(repoPath) : 'default';
-      const name = await ask('Project name', defaultName);
-      const newerThan = await ask(
-        'Only index sessions newer than (ISO date, optional)',
-        '',
-      );
-      if (name) {
-        projects.push({
-          name: sanitizeName(name),
-          repoPath: repoPath || '',
-          logsPath: logsPath || '',
-          logsNewerThan: newerThan || undefined,
-        });
-      }
-    }
+    console.log(`  ${GREEN}Added project "${name}".${RESET}\n`);
   }
 
   return projects;
@@ -319,8 +297,8 @@ async function main(): Promise<void> {
     if (!apiKey) console.log('  API key cannot be empty.');
   }
 
-  const model = await choose(`Choose a ${providerName} model:`, models);
-  const embedModel = await choose(`Choose an embedding model:`, EMBED_MODELS[providerName]);
+  const model = await chooseModel(`Choose a ${providerName} model:`, models);
+  const embedModel = await chooseModel(`Choose an embedding model:`, EMBED_MODELS[providerName]);
 
   const authType: 'openai' | 'anthropic' =
     providerName === 'Anthropic' ? 'anthropic' : 'openai';
