@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -10,57 +10,6 @@ import { loadAuth, authToQueryOptions } from './auth.js';
 import { runSkillInteractive, PROJECT_ROOT, EPHEMERAL_CONTEXT_BEGIN, EPHEMERAL_CONTEXT_END } from './runSkill.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// ── Skill batch progress store ────────────────────────────────────────────────
-
-/** Set of event node IDs this skill has already processed (survives Ctrl+C). */
-interface SkillProgress {
-  processedEventIds: string[];
-}
-
-const PROGRESS_PATH = join(homedir(), '.coffeecode', 'skill-progress.json');
-
-function loadProgress(): Record<string, SkillProgress> {
-  try {
-    return JSON.parse(readFileSync(PROGRESS_PATH, 'utf-8')) as Record<string, SkillProgress>;
-  } catch {
-    return {};
-  }
-}
-
-function saveProgress(progress: Record<string, SkillProgress>): void {
-  try {
-    writeFileSync(PROGRESS_PATH, JSON.stringify(progress, null, 2));
-  } catch (err) {
-    console.warn(`[indexAgent] Failed to save progress: ${(err as Error).message}`);
-  }
-}
-
-export interface IndexAgentOptions {
-  db: Db;
-  /** Absolute path to the project SQLite database (forwarded to MCP subprocess). */
-  dbPath: string;
-  /**
-   * Explicit path to the qwen CLI executable.
-   * Overrides auth.yaml qwenPath and the auto-resolved packaged default.
-   */
-  pathToQwenExecutable?: string;
-  /**
-   * Number of non-thought events per batch (AgentThought entries don't count).
-   * Default: 10.
-   */
-  batchStep?: number;
-  /**
-   * Per-skill enable/disable map (keyed by skill directory name).
-   * Skills absent from the map are enabled by default.
-   */
-  skillFilter?: Record<string, boolean>;
-}
-
-export interface IndexAgentResult {
-  batches: number;
-  errors: Array<{ error: string }>;
-}
 
 /** Named types that represent indexable log events. */
 const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentThought'];
@@ -120,33 +69,31 @@ function qwenSessionFileExists(sessionId: string): boolean {
   return existsSync(join(chatsDir, `${sessionId}.jsonl`));
 }
 
-/** Load all skill definitions from indexer/skills/, filtered by an optional enable map. */
-function loadSkillDefs(filter?: Record<string, boolean>): SkillDef[] {
-  const skillsDir = join(__dirname, '../../skills');
-  let names: string[];
+/** Resolve the absolute path of the bundled skills directory. */
+export function skillsDir(): string {
+  return join(__dirname, '../../skills');
+}
+
+/** Load a single skill definition by directory name; returns null if missing. */
+export function loadSkillDef(dirName: string): SkillDef | null {
+  const dir = join(skillsDir(), dirName);
   try {
-    names = readdirSync(skillsDir);
+    const meta = parseYaml(readFileSync(join(dir, 'skill.yaml'), 'utf-8')) as { name: string; description: string };
+    const prompt = readFileSync(join(dir, 'SKILL.md'), 'utf-8');
+    return { name: meta.name, description: meta.description, prompt };
+  } catch (err) {
+    console.warn(`[indexAgent] Failed to load skill from ${dir}:`, (err as Error).message);
+    return null;
+  }
+}
+
+/** Return the directory names of all available skills. */
+export function listAvailableSkills(): string[] {
+  try {
+    return readdirSync(skillsDir());
   } catch {
-    console.warn('[indexAgent] No skills directory found at', skillsDir);
     return [];
   }
-
-  const defs: SkillDef[] = [];
-  for (const name of names) {
-    if (filter && filter[name] === false) {
-      console.log(`[indexAgent] Skill "${name}" disabled in config — skipping`);
-      continue;
-    }
-    const dir = join(skillsDir, name);
-    try {
-      const meta = parseYaml(readFileSync(join(dir, 'skill.yaml'), 'utf-8')) as { name: string; description: string };
-      const prompt = readFileSync(join(dir, 'SKILL.md'), 'utf-8');
-      defs.push({ name: meta.name, description: meta.description, prompt });
-    } catch (err) {
-      console.warn(`[indexAgent] Failed to load skill from ${dir}:`, (err as Error).message);
-    }
-  }
-  return defs;
 }
 
 /** Split a sorted event list into batches of batchStep non-thought events. */
@@ -187,51 +134,46 @@ function flushBatch(batch: EventSnapshot[]): string {
   return text;
 }
 
+// ── Single-skill executor (used by the per-skill scheduler jobs) ─────────────
+
+export interface RunOneSkillOptions {
+  db: Db;
+  dbPath: string;
+  /** Directory name of the skill under indexer/skills/. */
+  skillDirName: string;
+  /** Event IDs already processed in prior runs of this skill. */
+  processedEventIds: ReadonlySet<string>;
+  /**
+   * Called after each batch completes, with the IDs newly marked as processed.
+   * Use this to persist progress (e.g. to `jobs.state_json`).
+   */
+  onBatchProcessed?: (newlyProcessedIds: string[]) => Promise<void> | void;
+  batchStep?: number;
+  pathToQwenExecutable?: string;
+}
+
+export interface RunOneSkillResult {
+  batches: number;
+  sessions: number;
+  events: number;
+  errors: Array<{ error: string }>;
+}
+
 /**
- * Run interactive agent sessions over unindexed log events, grouped by session.
- *
- * Each event type carries an optional `agentIndexed` field. Events without it
- * are "new" and will be processed; events that already have it are skipped.
- * This lets sessions grow over time: re-running only processes new events.
- *
- * Each (logSession, skill) pair gets a **deterministic** Qwen session ID so the
- * prior conversation can be continued without storing anything in the DB:
- * - If the Qwen session file already exists on disk → `--resume <id>` (continue)
- * - Otherwise → `--session-id <id>` (start new session with that stable ID)
- *
- * After all skills complete for a session's new events, every processed event
- * is patched with `agentIndexed = <ISO timestamp>` so future runs skip it.
- *
- * Events are grouped by sessionId and sorted by timestamp so the model sees
- * each session's events in chronological order.
+ * Load all new (unprocessed) log events grouped by sessionId, sorted by timestamp.
+ * Returns the snapshots plus a type-name lookup for convenience.
  */
-export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentResult> {
-  const { db, dbPath, batchStep = 10, pathToQwenExecutable, skillFilter } = opts;
-  const result: IndexAgentResult = { batches: 0, errors: [] };
-
-  const auth = loadAuth();
-  const qOpts = authToQueryOptions(auth);
-  const skills = loadSkillDefs(skillFilter);
-
-  if (skills.length === 0) {
-    console.warn('[indexAgent] No skills found — nothing to index');
-    return result;
-  }
-
-  // ── Load all events, split into indexed / new ────────────────────────────────
+function loadNewEventsGroupedBySession(
+  db: Db,
+  processed: ReadonlySet<string>,
+): { sessions: Map<string, EventSnapshot[]>; total: number; skipped: number } {
   const allEventIds = db.queryByNamedType(EVENT_TYPES);
-  if (allEventIds.length === 0) return result;
-
-  const newEvents: EventSnapshot[] = [];
-  let skippedCount = 0;
+  const sessions = new Map<string, EventSnapshot[]>();
+  let skipped = 0;
 
   for (const id of allEventIds) {
+    if (processed.has(id)) { skipped++; continue; }
     try {
-      if (db.getMapFieldId(id, 'agentIndexed') !== null) {
-        skippedCount++;
-        continue;
-      }
-
       const typeName = db.getNodeTypeName(id) ?? 'unknown';
       const node = db.loadNodeDeep(id, 1);
       if (node.kind !== 'map') continue;
@@ -241,110 +183,78 @@ export async function indexAgent(opts: IndexAgentOptions): Promise<IndexAgentRes
 
       const timestamp = getSymbolValue(node.entries['timestamp']) ?? '';
       const isThought = typeName === THOUGHT_ONLY_TYPE;
-      newEvents.push({ id, isThought, timestamp, sessionId, typeName, summary: formatDeepNode(node) });
+      const snap: EventSnapshot = { id, isThought, timestamp, sessionId, typeName, summary: formatDeepNode(node) };
+      if (!sessions.has(sessionId)) sessions.set(sessionId, []);
+      sessions.get(sessionId)!.push(snap);
     } catch {
       // skip unloadable nodes
     }
   }
 
-  console.log(`[indexAgent] ${allEventIds.length} events total: ${newEvents.length} new, ${skippedCount} already indexed`);
-
-  if (newEvents.length === 0) {
-    console.log('[indexAgent] Nothing new to index');
-    return result;
-  }
-
-  // ── Group by sessionId, sort by timestamp ───────────────────────────────────
-  const eventsBySession = new Map<string, EventSnapshot[]>();
-  for (const event of newEvents) {
-    if (!eventsBySession.has(event.sessionId)) eventsBySession.set(event.sessionId, []);
-    eventsBySession.get(event.sessionId)!.push(event);
-  }
-  for (const events of eventsBySession.values()) {
+  for (const events of sessions.values()) {
     events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   }
 
-  console.log(`[indexAgent] ${eventsBySession.size} sessions with new events`);
+  return { sessions, total: allEventIds.length, skipped };
+}
 
-  const eventTypeMap = new Map(newEvents.map(e => [e.id, e.typeName]));
+/**
+ * Execute one skill across all sessions with unprocessed events. The scheduler
+ * passes the skill's own processed-event set (from `jobs.state_json`) and a
+ * callback that persists newly-processed IDs after each batch.
+ */
+export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkillResult> {
+  const { db, dbPath, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, pathToQwenExecutable } = opts;
+  const result: RunOneSkillResult = { batches: 0, sessions: 0, events: 0, errors: [] };
 
-  // ── Process each session ─────────────────────────────────────────────────────
-  for (const [sessionId, sessionEvents] of eventsBySession) {
-    console.log(`[indexAgent] Session ${sessionId}: ${sessionEvents.length} new events, ${skills.length} skills`);
+  const skill = loadSkillDef(skillDirName);
+  if (!skill) {
+    result.errors.push({ error: `Skill "${skillDirName}" not found in indexer/skills/` });
+    return result;
+  }
 
-    // Track which skills have processed each event so we can mark agentIndexed
-    // once all skills are done with it.
-    const processedBySkill = new Map<string, Set<string>>();
+  const auth = loadAuth();
+  const qOpts = authToQueryOptions(auth);
 
-    for (const skill of skills) {
-      const qwenId = deriveQwenSessionId(sessionId, skill.name);
-      const sessionFileExists = qwenSessionFileExists(qwenId);
+  const { sessions, total, skipped } = loadNewEventsGroupedBySession(db, processedEventIds);
+  if (sessions.size === 0) {
+    console.log(`[indexAgent:${skillDirName}] ${total} events total, ${skipped} already processed — nothing to do`);
+    return result;
+  }
 
-      // Load the set of event IDs this skill already processed in prior runs.
-      const progress = loadProgress();
-      const processedSet = new Set<string>(progress[qwenId]?.processedEventIds ?? []);
-      processedBySkill.set(skill.name, processedSet);
+  console.log(`[indexAgent:${skillDirName}] ${sessions.size} sessions with new events (${total} total, ${skipped} processed)`);
 
-      // Only send events this skill hasn't seen yet.
-      const unprocessed = sessionEvents.filter(e => !processedSet.has(e.id));
+  for (const [sessionId, sessionEvents] of sessions) {
+    const qwenId = deriveQwenSessionId(sessionId, skill.name);
+    const sessionFileExists = qwenSessionFileExists(qwenId);
+    const batches = buildBatches(sessionEvents, batchStep);
+    const resumeLabel = sessionFileExists ? ' [resuming]' : ' [new]';
+    console.log(`  Session ${sessionId} (qwen ${qwenId}${resumeLabel}): ${sessionEvents.length} events → ${batches.length} batches`);
 
-      if (unprocessed.length === 0) {
-        console.log(`  Skill "${skill.name}": all events already processed — skipping`);
-        continue;
-      }
-
-      const batches = buildBatches(unprocessed, batchStep);
-      const resumeLabel = sessionFileExists ? ' [resuming]' : ' [new]';
-      console.log(`  Running skill "${skill.name}" (qwen session ${qwenId}${resumeLabel}): ${unprocessed.length} events → ${batches.length} batches`);
-
-      try {
-        await runSkillInteractive({
-          skillName: skill.name,
-          skillPrompt: skill.prompt,
-          eventBatches: batches.map(b => b.text),
-          dbPath,
-          queryOptions: qOpts,
-          pathToQwenExecutable,
-          onBatchComplete: async (batchIndex: number) => {
-            const batchEventIds = batches[batchIndex]!.eventIds;
-            for (const id of batchEventIds) processedSet.add(id);
-            // Persist immediately so Ctrl+C doesn't lose progress.
-            const prog = loadProgress();
-            prog[qwenId] = { processedEventIds: Array.from(processedSet) };
-            saveProgress(prog);
-          },
-          ...(sessionFileExists
-            ? { resumeSessionId: qwenId }
-            : { newSessionId: qwenId }),
-        });
-        result.batches += batches.length;
-      } catch (err) {
-        result.errors.push({ error: `[${skill.name}/${sessionId}] ${(err as Error).message}` });
-      }
-    }
-
-    // Mark events as agentIndexed once all skills have processed them.
-    const now = new Date().toISOString();
-    const fullyIndexed = sessionEvents.filter(e =>
-      skills.every(s => processedBySkill.get(s.name)?.has(e.id)),
-    );
-    if (fullyIndexed.length > 0) {
-      const patches = fullyIndexed.map(e => ({
-        id: e.id,
-        type: eventTypeMap.get(e.id) ?? 'unknown',
-        data: { agentIndexed: now },
-      }));
-      const BATCH = 200;
-      for (let i = 0; i < patches.length; i += BATCH) {
-        try {
-          await db.insertEntries(patches.slice(i, i + BATCH));
-        } catch (err) {
-          console.warn(`[indexAgent] Failed to mark events as indexed: ${(err as Error).message}`);
-        }
-      }
-      console.log(`[indexAgent] Marked ${fullyIndexed.length} events as agentIndexed for session ${sessionId}`);
+    try {
+      await runSkillInteractive({
+        skillName: skill.name,
+        skillPrompt: skill.prompt,
+        eventBatches: batches.map(b => b.text),
+        dbPath,
+        queryOptions: qOpts,
+        pathToQwenExecutable,
+        onBatchComplete: async (batchIndex: number) => {
+          const batchEventIds = batches[batchIndex]!.eventIds;
+          if (onBatchProcessed) await onBatchProcessed(batchEventIds);
+        },
+        ...(sessionFileExists
+          ? { resumeSessionId: qwenId }
+          : { newSessionId: qwenId }),
+      });
+      result.batches += batches.length;
+      result.events += sessionEvents.length;
+      result.sessions += 1;
+    } catch (err) {
+      result.errors.push({ error: `[${skillDirName}/${sessionId}] ${(err as Error).message}` });
     }
   }
 
   return result;
 }
+

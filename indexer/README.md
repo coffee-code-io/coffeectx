@@ -26,22 +26,39 @@ This will walk you through:
 - LLM provider and model selection — any model available through OpenRouter, OpenAI, or Anthropic can be used for indexing (including custom model IDs)
 - Embedding model configuration
 - Project setup (point to your repo paths)
-- Optional daemon for auto-indexing
+- Optional scheduler service (launchd / systemd)
 - MCP server registration for Claude Desktop
 - CLAUDE.md instructions
 
 ## Usage
 
-### Index your agent logs
+### Start the scheduler
 
 ```bash
-npx coffeectx-index index
+npx coffeectx-index daemonize
 ```
 
-### Start the auto-indexing daemon
+The scheduler runs every enabled job by its trigger:
+- timer-based jobs (e.g. `logs`, `lsp`) on a configurable interval
+- DB-triggered jobs (e.g. `skill:local-decisions`) when a relevant node is inserted
+
+### Trigger one job manually
 
 ```bash
-npx coffeectx-index daemon
+npx coffeectx-index job trigger logs --now      # run inline
+npx coffeectx-index job trigger logs            # queue for the running daemon
+```
+
+### Toggle jobs
+
+Each job has a config entry under `jobs:` in `~/.coffeecode/config.yaml`. The CLI flips both the config and the live DB state — a running scheduler picks up the change within ~5s.
+
+```bash
+npx coffeectx-index job list
+npx coffeectx-index job on lsp
+npx coffeectx-index job off skill:lsp-enrichment
+npx coffeectx-index job status              # all jobs
+npx coffeectx-index job status logs         # one job + recent runs
 ```
 
 ### Add as MCP server

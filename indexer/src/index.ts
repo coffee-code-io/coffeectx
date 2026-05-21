@@ -2,28 +2,35 @@
 /**
  * coffeectx-index CLI
  *
- * Commands:
+ * Project commands:
  *   init [--name <name>] [--repo <path>]   Create a new project DB
  *   use <name>                              Switch the active project
  *   list-projects                           List all registered projects
- *   sync-types [--user-dir <path>]          Sync built-in YAML types into active DB
- *   load-types <dir>                        Load user-defined YAML types from a directory
- *   list-types                              List all named types in active DB
- *   types-dot [--out <path>]                Generate Graphviz DOT for named type graph
- *   query <expression>                      Parse and execute a retrival query expression
+ *
+ * Type/query commands (active project):
+ *   sync-types [--user-dir <path>]          Sync built-in YAML types
+ *   load-types <dir>                        Load user-defined YAML types
+ *   list-types                              List all named types
+ *   types-dot [--out <path>]                Generate Graphviz DOT
+ *   query <expression>                      Parse and execute a query expression
  *   search <text>                           Semantic similarity search
  *   exact <value>                           Exact symbol match
- *   regex <pattern>                         Regex symbol match (case-insensitive)
+ *   regex <pattern>                         Regex symbol match
  *   insert-entries <file.json>              Insert typed entries from a JSON file
- *   load-node <id> [--depth <n>]            Load a node by ID with recursive expansion
- *   index-lsp [<path>] [--lsp-command <cmd>]  Index repo with LSP (uses stored repoPath if omitted)
- *   index-logs [<path>...]                    Index Claude Code JSONL logs (uses stored logsPath if omitted)
+ *   load-node <id> [--depth <n>]            Load a node by ID
  *
- * All DB commands accept --project <name> to target a specific project.
+ * Scheduler:
+ *   daemonize                                Start the scheduler (runs jobs by trigger)
+ *   job list                                 List all registered jobs
+ *   job on <name>                            Enable a job in config + DB
+ *   job off <name>                           Disable a job in config + DB
+ *   job trigger <name> [--now]               Queue a manual run, or run inline with --now
+ *   job status [<name>]                      Show last-run summary and recent runs
+ *
+ * All commands accept --project <name> to target a non-active project.
  */
 
 import { resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { writeFileSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { Db, syncAllTypes, syncFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadConfig } from '@coffeectx/core';
@@ -32,19 +39,15 @@ import { initProject, promptProjectName } from './init.js';
 import {
   loadProjects,
   setActiveProject,
-  setProjectLogs,
   setProjectLogsNewerThan,
   getActiveProject,
   PROJECTS_PATH,
   DB_DIR,
 } from './projects.js';
-import { indexWithLsp } from './lsp/indexSymbols.js';
-import { resolveLspCommand, LSP_CONFIG_PATH } from './lsp/config.js';
 import { generateTypesDot } from './typesDot.js';
-import { indexLogs } from './agentLog/indexLogs.js';
-import { indexAgent } from './agentRun/indexAgent.js';
-import { loadFileHashes } from './fileHashes.js';
-import { runDaemon } from './daemon.js';
+import { Scheduler } from './jobs/scheduler.js';
+import { buildJobs } from './jobs/registry.js';
+import { jobList, jobOn, jobOff, jobTrigger, jobStatus } from './jobs/cli.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -511,231 +514,65 @@ switch (command) {
     break;
   }
 
-  case 'index-lsp': {
-    // Resolve repo path: explicit arg > --repo flag > stored project repoPath
-    const pathArg = positional(1);
-    const repoFlag = flag('--repo');
-    const rawRepo = pathArg ?? repoFlag ?? project.repoPath;
-
-    if (!rawRepo) {
-      console.error(
-        'No repo path specified. Pass a path, use --repo <path>, or set one during init.',
-      );
-      db.close();
-      process.exit(1);
-    }
-
-    const repoPath = resolve(rawRepo);
-
-    // LSP command resolution order:
-    // 1) --lsp-command
-    // 2) ~/.coffeecode/lsp.yaml (servers.typescript, then default)
-    // 3) built-in default
-    const lspCommandFlag = resolveLspCommand(flag('--lsp-command'), 'typescript');
-    const [lspBin, ...lspArgs] = lspCommandFlag.trim().split(/\s+/).filter(Boolean);
-
-    if (!lspBin) {
-      console.error(`Invalid LSP command resolved from --lsp-command or ${LSP_CONFIG_PATH}`);
-      db.close();
-      process.exit(1);
-    }
-
-    console.log(`Indexing "${repoPath}" → project "${project.name}"`);
-    console.log(`LSP: ${lspCommandFlag}`);
-
-    const lspBinPath = lspBin.startsWith('~/') ? `${homedir()}/${lspBin.slice(2)}` : lspBin;
-    const lspHashes = args.includes('--no-cache') ? undefined : loadFileHashes();
-
-    const result = await indexWithLsp(db, repoPath, lspBinPath, lspArgs, { hashes: lspHashes });
-
-    if (result.skipped) {
-      console.log(`\nSkipped (no source files changed). Pass --no-cache to force.`);
-    } else {
-      console.log(`\nDone.`);
-      console.log(`  Files:  ${result.files}`);
-      console.log(`  Nodes:  ${result.nodes}`);
-      if (result.errors.length > 0) {
-        console.error(`  Errors: ${result.errors.length}`);
-        for (const { file, error } of result.errors) console.error(`    ${file}: ${error}`);
-      }
-    }
+  case 'daemonize': {
+    const jobs = buildJobs(db, globalCfg);
+    const scheduler = new Scheduler({ db, dbPath: project.db, project, jobs });
+    console.log(`[scheduler] project="${project.name}" jobs=${jobs.length}`);
+    await scheduler.start();
     break;
   }
 
-  case 'index-agent': {
-    const batchStepArg = flag('--batch-step');
-    const qwenPathArg = flag('--qwen-path');
+  case 'job': {
+    const sub = args[1];
+    const target = positional(2);
+    const cliCtx = { db, dbPath: project.db, project, config: globalCfg };
 
-    const batchStep = batchStepArg !== undefined ? parseInt(batchStepArg, 10) : undefined;
-
-    if (batchStep !== undefined && isNaN(batchStep)) {
-      console.error('--batch-step must be an integer');
-      db.close();
-      process.exit(1);
-    }
-
-    console.log(`Running agent indexer for project "${project.name}"...`);
-
-    const result = await indexAgent({
-      db,
-      dbPath: project.db,
-      batchStep,
-      pathToQwenExecutable: qwenPathArg ? resolve(qwenPathArg) : undefined,
-      skillFilter: globalCfg.agent?.skills,
-    });
-
-    console.log(`  Batches: ${result.batches}`);
-    if (result.errors.length > 0) {
-      console.error(`  Errors: ${result.errors.length}`);
-      for (const { error } of result.errors) {
-        console.error(`    ${error}`);
+    switch (sub) {
+      case 'list':
+        jobList(cliCtx);
+        break;
+      case 'on':
+        if (!target) { console.error('Usage: coffeectx-index job on <name>'); db.close(); process.exit(1); }
+        jobOn(cliCtx, target);
+        break;
+      case 'off':
+        if (!target) { console.error('Usage: coffeectx-index job off <name>'); db.close(); process.exit(1); }
+        jobOff(cliCtx, target);
+        break;
+      case 'trigger': {
+        if (!target) { console.error('Usage: coffeectx-index job trigger <name> [--now]'); db.close(); process.exit(1); }
+        const now = args.includes('--now');
+        const code = await jobTrigger(cliCtx, target, now);
+        if (code !== 0) { db.close(); process.exit(code); }
+        break;
       }
-      db.close();
-      process.exit(1);
+      case 'status':
+        jobStatus(cliCtx, target);
+        break;
+      default:
+        console.error('Usage: coffeectx-index job {list|on|off|trigger|status} [<name>] [--now]');
+        db.close();
+        process.exit(1);
     }
-    break;
-  }
-
-  case 'index-logs': {
-    // --logs-path <path> saves the path and uses it; otherwise fall back to stored value
-    const logsPathFlag = flag('--logs-path');
-    if (logsPathFlag) {
-      const resolved = resolve(logsPathFlag);
-      setProjectLogs(project.name, resolved);
-      project.logsPath = resolved;
-    }
-    // Resolve log paths: explicit positional args > stored project logsPath
-    const explicitPaths = args.slice(1).filter(a => !a.startsWith('--')).map(p => resolve(p));
-    const logPaths = explicitPaths.length > 0 ? explicitPaths
-      : project.logsPath ? [project.logsPath]
-      : [];
-    if (logPaths.length === 0) {
-      console.error('Usage: coffeectx-index index-logs [<path>...] [--logs-path <path>] [--newer-than <ISO-date>] [--no-cache] [--project <name>]');
-      console.error('  Paths may be .jsonl files or directories. --logs-path saves the path for future runs.');
-      db.close();
-      process.exit(1);
-    }
-    const newerThan = resolveNewerThan();
-    const logHashes = args.includes('--no-cache') ? undefined : loadFileHashes();
-    console.log(`Indexing agent logs for project "${project.name}"...`);
-    if (newerThan) console.log(`  Filter: sessions newer than ${newerThan.toISOString()}`);
-    const result = await indexLogs(db, logPaths, { newerThan, hashes: logHashes });
-    console.log(`  Files:    ${result.files} (${result.skipped} unchanged skipped)`);
-    console.log(`  Sessions: ${result.sessions}`);
-    console.log(`  Events:   ${result.events}`);
-    console.log(`  Inserted: ${result.inserted} nodes`);
-    if (result.errors.length > 0) {
-      console.error(`  Errors: ${result.errors.length}`);
-      for (const { file, error, stack } of result.errors) {
-        console.error(`    ${file}: ${error}`);
-        if (stack) console.error(stack.split('\n').slice(1).map(l => `      ${l}`).join('\n'));
-      }
-      db.close();
-      process.exit(1);
-    }
-    break;
-  }
-
-  case 'index': {
-    // Run all enabled indexers in order: lsp → logs → agent
-    const indexersCfg = globalCfg.indexers;
-    const repoPath = flag('--repo') ?? project.repoPath;
-    const noCache = args.includes('--no-cache');
-    const newerThan = resolveNewerThan();
-    const hashes = noCache ? undefined : loadFileHashes();
-    let failed = false;
-
-    if (indexersCfg.lsp) {
-      if (!repoPath) {
-        console.warn('  [lsp] No repoPath configured for this project — skipping.');
-      } else {
-        const absRepo = resolve(repoPath);
-        const lspCmd = globalCfg.lsp.servers?.['typescript'] ?? globalCfg.lsp.command;
-        const [lspBin, ...lspArgs] = lspCmd.trim().split(/\s+/).filter(Boolean);
-        if (!lspBin) {
-          console.error('  [lsp] Invalid LSP command in config — skipping.');
-        } else {
-          const lspBinPath = lspBin.startsWith('~/') ? `${homedir()}/${lspBin.slice(2)}` : lspBin;
-          console.log(`[lsp] Indexing "${absRepo}"...`);
-          const r = await indexWithLsp(db, absRepo, lspBinPath, lspArgs, { hashes });
-          if (r.skipped) {
-            console.log(`  [lsp] Skipped (no source files changed)`);
-          } else {
-            console.log(`  Files: ${r.files}, Nodes: ${r.nodes}`);
-            if (r.errors.length > 0) {
-              for (const { file, error } of r.errors) console.error(`  [lsp] ${file}: ${error}`);
-              failed = true;
-            }
-          }
-        }
-      }
-    }
-
-    if (indexersCfg.logs) {
-      const logPaths = project.logsPath ? [project.logsPath] : [];
-      if (logPaths.length === 0) {
-        console.warn('  [logs] No logsPath configured for this project — skipping.');
-      } else {
-        console.log(`[logs] Indexing agent logs...`);
-        const r = await indexLogs(db, logPaths, { newerThan, hashes });
-        console.log(`  Files: ${r.files} (${r.skipped} skipped), Sessions: ${r.sessions}, Events: ${r.events}, Inserted: ${r.inserted}`);
-        if (r.errors.length > 0) {
-          for (const { file, error } of r.errors) console.error(`  [logs] ${file}: ${error}`);
-          failed = true;
-        }
-      }
-    }
-
-    if (indexersCfg.agent) {
-      console.log(`[agent] Running agent indexer...`);
-      const r = await indexAgent({ db, dbPath: project.db, skillFilter: globalCfg.agent?.skills });
-      console.log(`  Batches: ${r.batches}`);
-      if (r.errors.length > 0) {
-        for (const { error } of r.errors) console.error(`  [agent] ${error}`);
-        failed = true;
-      }
-    }
-
-    if (failed) { db.close(); process.exit(1); }
-    break;
-  }
-
-  case 'daemon': {
-    const logsPath = flag('--logs-path') ?? project.logsPath;
-    if (!logsPath) {
-      console.error('No logs path configured. Pass --logs-path <path> or set one during init.');
-      db.close();
-      process.exit(1);
-    }
-    const rateLimitMin = flagInt('--rate-limit', 10);
-    const newerThan = resolveNewerThan();
-    const indexersCfg = globalCfg.indexers;
-    const hashes = loadFileHashes();
-    console.log(`[daemon] Starting for project "${project.name}" (rate limit: ${rateLimitMin}min)`);
-    await runDaemon({
-      db,
-      dbPath: project.db,
-      logsPath: resolve(logsPath),
-      rateLimitMs: rateLimitMin * 60 * 1000,
-      indexLogs: indexersCfg.logs,
-      indexAgent: indexersCfg.agent,
-      logOptions: { newerThan },
-      hashes,
-    });
-    // runDaemon() runs indefinitely; db.close() below is never reached but kept for symmetry.
     break;
   }
 
   default: {
     const active = projects.active ? `"${projects.active}"` : 'none';
+    const enabledJobs = (() => {
+      try {
+        return db.listJobs().filter(r => r.enabled).map(r => r.name).join(', ') || 'none';
+      } catch { return 'unknown'; }
+    })();
     console.log(`coffeectx-index — knowledge graph indexer
 
-Commands:
+Project commands:
   init [--name <name>] [--repo <path>] [--logs-path <path>]  Create a new project DB
   use <name>                                                   Switch the active project
   list-projects                                                List all registered projects
 
-  sync-types [--user-dir <path>]         Sync built-in YAML types (respects types.include/exclude from config)
+Type / query commands:
+  sync-types [--user-dir <path>]         Sync built-in YAML types
   load-types <dir>                       Load user-defined YAML types from a directory
   list-types                             List all named types in active DB
   types-dot [--out <path>]               Generate Graphviz DOT for named type graph
@@ -745,11 +582,14 @@ Commands:
   regex <pattern>                        Regex symbol match (case-insensitive)
   insert-entries <file.json>             Insert typed entries from a JSON file
   load-node <id> [--depth <n>]           Load a node by ID, expanding to depth (default 10)
-  index [--newer-than <ISO>] [--no-cache]        Run all enabled indexers (lsp → logs → agent)
-  index-lsp [<path>] [--lsp-command <cmd>] [--no-cache]   Index repo with LSP
-  index-logs [<path>...] [--newer-than <ISO>] [--no-cache] Index Claude Code JSONL logs
-  index-agent [--batch-step <n>] [--qwen-path <path>]      Run agent entity extraction
-  daemon [--rate-limit <min>] [--newer-than <ISO>]          Watch logs dir and auto-reindex
+
+Scheduler:
+  daemonize                              Start the scheduler (runs jobs by trigger)
+  job list                               List all registered jobs
+  job on <name>                          Enable a job (config + DB)
+  job off <name>                         Disable a job (config + DB)
+  job trigger <name> [--now]             Queue a manual run, or run inline with --now
+  job status [<name>]                    Show last-run summary and recent runs
 
 Options:
   --project <name>       Target a specific project
@@ -757,17 +597,12 @@ Options:
   --offset <n>           Skip this many results (for pagination)
   --depth <n>            Node expansion depth (default: 10 for query/load-node, 3 for search/exact/regex)
   -v / --verbose         Return raw node data instead of formatted output
-  --repo <path>          Override repo path for index / index-lsp
-  --logs-path <path>     Set default logs path for index-logs / daemon (saved in config)
-  --lsp-command <cmd>    Override LSP command
-  --newer-than <ISO>     Only index sessions newer than this date (e.g. 2026-01-01)
-  --no-cache             Ignore stored file hashes and force full reindex
-  --rate-limit <min>     Daemon: minimum minutes between index runs (default: 10)
+  --newer-than <ISO>     Only index sessions newer than this date (saved to project config)
 
-Active project: ${active}
-Enabled indexers: ${Object.entries(globalCfg.indexers).filter(([,v])=>v).map(([k])=>k).join(', ') || 'none'}
-DB directory:   ${DB_DIR}
-Config file:    ${PROJECTS_PATH}
+Active project:  ${active}
+Enabled jobs:    ${enabledJobs}
+DB directory:    ${DB_DIR}
+Config file:     ${PROJECTS_PATH}
 `);
   }
 }

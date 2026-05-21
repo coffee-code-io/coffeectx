@@ -91,12 +91,47 @@ CREATE TABLE IF NOT EXISTS skill_types (
 
 CREATE INDEX IF NOT EXISTS idx_skill_types_skill ON skill_types(skill_name);
 
+-- Jobs registry: one row per scheduler-managed job.
+-- enabled mirrors the config setting on boot (config wins on reconcile).
+-- current_run_id is non-null while the job is executing.
+-- state_json stores arbitrary per-job state: catch-up cursors, file hashes,
+-- per-skill progress, etc. The scheduler owns its shape per-job.
+CREATE TABLE IF NOT EXISTS jobs (
+  name              TEXT PRIMARY KEY,
+  description       TEXT,
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  status            TEXT NOT NULL DEFAULT 'idle',
+  current_run_id    INTEGER,
+  last_started_at   TEXT,
+  last_ended_at     TEXT,
+  last_result       TEXT,
+  last_error        TEXT,
+  last_message      TEXT,
+  last_metrics_json TEXT,
+  trigger_pending   INTEGER NOT NULL DEFAULT 0,
+  state_json        TEXT
+);
+
+-- Job execution history.
+CREATE TABLE IF NOT EXISTS job_runs (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_name     TEXT NOT NULL,
+  trigger_kind TEXT NOT NULL,
+  started_at   TEXT NOT NULL,
+  ended_at     TEXT,
+  result       TEXT,
+  message      TEXT,
+  error        TEXT,
+  metrics_json TEXT
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_nodes_kind         ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_list_items_list    ON list_items(list_id);
 CREATE INDEX IF NOT EXISTS idx_map_entries_map    ON map_entries(map_id);
 CREATE INDEX IF NOT EXISTS idx_type_children_type ON type_children(type_id);
 CREATE INDEX IF NOT EXISTS idx_type_map_type      ON type_map_entries(type_id);
+CREATE INDEX IF NOT EXISTS idx_job_runs_job       ON job_runs(job_name, started_at);
 `;
 
 /** Generate the DDL for the sqlite-vec virtual table with the given embedding dimension. */

@@ -43,7 +43,7 @@ export function ask(question: string, defaultVal?: string): Promise<string> {
       }
     };
     // Enable keypress events if stdin supports raw mode
-    if (process.stdin.isTTY && process.stdin.setRawMode) {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
       process.stdin.on('keypress', onKeypress);
     }
 
@@ -70,7 +70,7 @@ export function confirm(question: string, defaultVal = false): Promise<boolean> 
         reject(new CancelError());
       }
     };
-    if (process.stdin.isTTY && process.stdin.setRawMode) {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
       process.stdin.on('keypress', onKeypress);
     }
 

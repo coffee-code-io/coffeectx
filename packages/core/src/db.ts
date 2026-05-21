@@ -14,10 +14,53 @@ export interface DbOptions {
   dimensions?: number;
 }
 
+/** Fired after `insertNode`/`insertEntries` commits, for each inserted root node. */
+export interface InsertEvent {
+  /** Root node IDs that were newly inserted (patches are not reported). */
+  ids: string[];
+  /** Deduped named-type names of those root nodes, when known. */
+  typeNames: string[];
+}
+
+export type InsertListener = (event: InsertEvent) => void;
+
+export type JobStatus = 'idle' | 'running' | 'disabled';
+export type JobResult = 'ok' | 'error' | 'cancelled';
+export type JobTriggerKind = 'timer' | 'onTypeInsert' | 'manual' | 'startup';
+
+export interface JobRow {
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  status: JobStatus;
+  currentRunId: number | null;
+  lastStartedAt: string | null;
+  lastEndedAt: string | null;
+  lastResult: JobResult | null;
+  lastError: string | null;
+  lastMessage: string | null;
+  lastMetrics: Record<string, number> | null;
+  triggerPending: boolean;
+  state: unknown | null;
+}
+
+export interface JobRunRow {
+  id: number;
+  jobName: string;
+  triggerKind: JobTriggerKind;
+  startedAt: string;
+  endedAt: string | null;
+  result: JobResult | null;
+  message: string | null;
+  error: string | null;
+  metrics: Record<string, number> | null;
+}
+
 export class Db implements QueryDb {
   private readonly raw: Database.Database;
   private readonly embed: EmbedFn;
   readonly dims: number;
+  private readonly insertListeners = new Set<InsertListener>();
 
   constructor(options: DbOptions) {
     this.raw = new Database(options.path);
@@ -382,6 +425,11 @@ export class Db implements QueryDb {
       rootId = this.writeNode(node, embeds);
     });
     txn();
+
+    // 3. Emit insert event with the root's named type if any.
+    const typeName = this.getNodeTypeName(rootId);
+    this.emitInsert({ ids: [rootId], typeNames: typeName ? [typeName] : [] });
+
     return rootId;
   }
 
@@ -659,6 +707,20 @@ export class Db implements QueryDb {
       }
     });
     txn();
+
+    // Emit one event covering all newly-inserted (non-patch) entries.
+    const insertedIds: string[] = [];
+    const typeNameSet = new Set<string>();
+    for (let i = 0; i < entries.length; i++) {
+      const id = allocatedIds[i];
+      const entry = entries[i]!;
+      if (!id || entry.id) continue; // skip failed and patches
+      insertedIds.push(id);
+      typeNameSet.add(entry.type);
+    }
+    if (insertedIds.length > 0) {
+      this.emitInsert({ ids: insertedIds, typeNames: Array.from(typeNameSet) });
+    }
 
     log(`insertEntries: done, ${errors.length} errors`);
     return { ids: allocatedIds, errors, skippedKeys };
@@ -1179,7 +1241,278 @@ export class Db implements QueryDb {
     });
   }
 
+  // ── Insert event bus ───────────────────────────────────────────────────────
+
+  /**
+   * Subscribe to insert events. Returns an unsubscribe function.
+   * Fired synchronously after the insertion transaction commits. Listeners that
+   * throw are logged and never surface back to the inserter.
+   */
+  onInsert(listener: InsertListener): () => void {
+    this.insertListeners.add(listener);
+    return () => { this.insertListeners.delete(listener); };
+  }
+
+  private emitInsert(event: InsertEvent): void {
+    for (const fn of this.insertListeners) {
+      try { fn(event); } catch (err) {
+        log(`insert listener error: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  // ── Catch-up polling helper ────────────────────────────────────────────────
+
+  /**
+   * Return node IDs (and their rowid) for nodes belonging to one of `typeNames`
+   * whose rowid is strictly greater than `sinceRowid`. Used by the scheduler at
+   * startup to fire `onTypeInsert` jobs for nodes that arrived while no
+   * listener was attached.
+   */
+  findNodesOfTypeSince(typeNames: string[], sinceRowid: number): { id: string; rowid: number }[] {
+    if (typeNames.length === 0) return [];
+    const placeholders = typeNames.map(() => '?').join(',');
+    const rows = this.raw
+      .prepare(
+        `SELECT n.rowid AS rowid, n.id AS id
+           FROM nodes n
+           JOIN named_types nt ON nt.type_id = n.type_id
+          WHERE nt.name IN (${placeholders})
+            AND n.rowid > ?
+          ORDER BY n.rowid ASC`,
+      )
+      .all(...typeNames, sinceRowid) as { id: string; rowid: number }[];
+    return rows;
+  }
+
+  /** Current maximum rowid in the `nodes` table — used as a fresh catch-up cursor. */
+  maxNodeRowid(): number {
+    const row = this.raw.prepare(`SELECT COALESCE(MAX(rowid), 0) AS max FROM nodes`).get() as { max: number };
+    return row.max;
+  }
+
+  // ── Jobs ──────────────────────────────────────────────────────────────────
+
+  /** Insert a new job row if absent. Returns true when a row was created. */
+  upsertJob(name: string, opts: { description?: string; defaultEnabled?: boolean } = {}): boolean {
+    const info = this.raw
+      .prepare(
+        `INSERT INTO jobs(name, description, enabled, status)
+         VALUES(?, ?, ?, 'idle')
+         ON CONFLICT(name) DO UPDATE SET description=excluded.description`,
+      )
+      .run(name, opts.description ?? null, opts.defaultEnabled === false ? 0 : 1);
+    return info.changes > 0;
+  }
+
+  setJobEnabled(name: string, enabled: boolean): void {
+    this.raw
+      .prepare(
+        `UPDATE jobs SET enabled=?, status = CASE
+            WHEN status='running' THEN 'running'
+            WHEN ?=0 THEN 'disabled'
+            ELSE 'idle'
+          END
+          WHERE name=?`,
+      )
+      .run(enabled ? 1 : 0, enabled ? 1 : 0, name);
+  }
+
+  setJobTriggerPending(name: string): void {
+    this.raw.prepare(`UPDATE jobs SET trigger_pending=1 WHERE name=?`).run(name);
+  }
+
+  clearJobTriggerPending(name: string): void {
+    this.raw.prepare(`UPDATE jobs SET trigger_pending=0 WHERE name=?`).run(name);
+  }
+
+  getJobState<T = unknown>(name: string): T | null {
+    const row = this.raw
+      .prepare(`SELECT state_json FROM jobs WHERE name=?`)
+      .get(name) as { state_json: string | null } | undefined;
+    if (!row?.state_json) return null;
+    try { return JSON.parse(row.state_json) as T; } catch { return null; }
+  }
+
+  setJobState(name: string, value: unknown): void {
+    this.raw
+      .prepare(`UPDATE jobs SET state_json=? WHERE name=?`)
+      .run(value == null ? null : JSON.stringify(value), name);
+  }
+
+  getJob(name: string): JobRow | null {
+    const row = this.raw.prepare(`SELECT * FROM jobs WHERE name=?`).get(name) as
+      | RawJobRow
+      | undefined;
+    return row ? toJobRow(row) : null;
+  }
+
+  listJobs(): JobRow[] {
+    const rows = this.raw.prepare(`SELECT * FROM jobs ORDER BY name`).all() as RawJobRow[];
+    return rows.map(toJobRow);
+  }
+
+  /** Begin a job run. Marks the job 'running' and returns the new run id. */
+  startJobRun(name: string, triggerKind: JobTriggerKind): number {
+    const now = new Date().toISOString();
+    const result = this.raw
+      .prepare(
+        `INSERT INTO job_runs(job_name, trigger_kind, started_at) VALUES(?, ?, ?)`,
+      )
+      .run(name, triggerKind, now);
+    const runId = Number(result.lastInsertRowid);
+    this.raw
+      .prepare(
+        `UPDATE jobs SET status='running', current_run_id=?, last_started_at=?
+            WHERE name=?`,
+      )
+      .run(runId, now, name);
+    return runId;
+  }
+
+  /** End a job run. Updates last_* fields on the job. */
+  endJobRun(
+    runId: number,
+    result: JobResult,
+    opts: { message?: string; error?: string; metrics?: Record<string, number> } = {},
+  ): void {
+    const now = new Date().toISOString();
+    const metricsJson = opts.metrics ? JSON.stringify(opts.metrics) : null;
+    this.raw
+      .prepare(
+        `UPDATE job_runs SET ended_at=?, result=?, message=?, error=?, metrics_json=?
+            WHERE id=?`,
+      )
+      .run(now, result, opts.message ?? null, opts.error ?? null, metricsJson, runId);
+
+    const jobRow = this.raw
+      .prepare(`SELECT job_name FROM job_runs WHERE id=?`)
+      .get(runId) as { job_name: string } | undefined;
+    if (!jobRow) return;
+    this.raw
+      .prepare(
+        `UPDATE jobs SET
+            status = CASE WHEN enabled=1 THEN 'idle' ELSE 'disabled' END,
+            current_run_id = NULL,
+            last_ended_at = ?,
+            last_result = ?,
+            last_error = ?,
+            last_message = ?,
+            last_metrics_json = ?
+          WHERE name = ?`,
+      )
+      .run(now, result, opts.error ?? null, opts.message ?? null, metricsJson, jobRow.job_name);
+  }
+
+  /** Return the N most-recent runs for a job (newest first). */
+  listJobRuns(name: string, limit = 10): JobRunRow[] {
+    const rows = this.raw
+      .prepare(
+        `SELECT * FROM job_runs WHERE job_name=? ORDER BY id DESC LIMIT ?`,
+      )
+      .all(name, limit) as RawJobRunRow[];
+    return rows.map(toJobRunRow);
+  }
+
+  /**
+   * Clear any 'running' status left over from an unclean shutdown. Should be
+   * called once at scheduler startup before reconciliation.
+   */
+  clearStaleRunning(): number {
+    const now = new Date().toISOString();
+    const orphans = this.raw
+      .prepare(`SELECT id FROM job_runs WHERE ended_at IS NULL`)
+      .all() as { id: number }[];
+    for (const { id } of orphans) {
+      this.raw
+        .prepare(`UPDATE job_runs SET ended_at=?, result='cancelled', error='process exited' WHERE id=?`)
+        .run(now, id);
+    }
+    const info = this.raw
+      .prepare(
+        `UPDATE jobs SET status = CASE WHEN enabled=1 THEN 'idle' ELSE 'disabled' END,
+                          current_run_id = NULL
+          WHERE status='running'`,
+      )
+      .run();
+    return info.changes;
+  }
+
   close(): void {
     this.raw.close();
   }
+}
+
+// ── Job row helpers ──────────────────────────────────────────────────────────
+
+interface RawJobRow {
+  name: string;
+  description: string | null;
+  enabled: number;
+  status: string;
+  current_run_id: number | null;
+  last_started_at: string | null;
+  last_ended_at: string | null;
+  last_result: string | null;
+  last_error: string | null;
+  last_message: string | null;
+  last_metrics_json: string | null;
+  trigger_pending: number;
+  state_json: string | null;
+}
+
+function toJobRow(r: RawJobRow): JobRow {
+  let metrics: Record<string, number> | null = null;
+  if (r.last_metrics_json) {
+    try { metrics = JSON.parse(r.last_metrics_json) as Record<string, number>; } catch { /* leave null */ }
+  }
+  let state: unknown | null = null;
+  if (r.state_json) {
+    try { state = JSON.parse(r.state_json); } catch { /* leave null */ }
+  }
+  return {
+    name: r.name,
+    description: r.description,
+    enabled: r.enabled === 1,
+    status: r.status as JobStatus,
+    currentRunId: r.current_run_id,
+    lastStartedAt: r.last_started_at,
+    lastEndedAt: r.last_ended_at,
+    lastResult: r.last_result as JobResult | null,
+    lastError: r.last_error,
+    lastMessage: r.last_message,
+    lastMetrics: metrics,
+    triggerPending: r.trigger_pending === 1,
+    state,
+  };
+}
+
+interface RawJobRunRow {
+  id: number;
+  job_name: string;
+  trigger_kind: string;
+  started_at: string;
+  ended_at: string | null;
+  result: string | null;
+  message: string | null;
+  error: string | null;
+  metrics_json: string | null;
+}
+
+function toJobRunRow(r: RawJobRunRow): JobRunRow {
+  let metrics: Record<string, number> | null = null;
+  if (r.metrics_json) {
+    try { metrics = JSON.parse(r.metrics_json) as Record<string, number>; } catch { /* leave null */ }
+  }
+  return {
+    id: r.id,
+    jobName: r.job_name,
+    triggerKind: r.trigger_kind as JobTriggerKind,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    result: r.result as JobResult | null,
+    message: r.message,
+    error: r.error,
+    metrics,
+  };
 }

@@ -14,10 +14,13 @@ export function isDaemonSupported(): boolean {
 
 /**
  * Install and activate a background service that runs:
- *   `coffeectx-index daemon --project <projectName>`
+ *   `coffeectx-index daemonize --project <projectName>`
  *
  * macOS  → launchd plist at ~/Library/LaunchAgents/com.coffeectx.plist
  * Linux  → systemd user unit at ~/.config/systemd/user/coffeectx.service
+ *
+ * The service does NOT auto-respawn on exit (no KeepAlive / Restart=on-failure).
+ * It launches at login (RunAtLoad / WantedBy=default.target).
  */
 export async function installDaemon(
   indexerBin: string,
@@ -52,15 +55,12 @@ async function installLaunchd(indexerBin: string, projectName: string): Promise<
   <array>
     <string>node</string>
     <string>${indexerBin}</string>
-    <string>daemon</string>
+    <string>daemonize</string>
     <string>--project</string>
     <string>${projectName}</string>
   </array>
 
   <key>RunAtLoad</key>
-  <true/>
-
-  <key>KeepAlive</key>
   <true/>
 
   <key>StandardOutPath</key>
@@ -93,13 +93,11 @@ async function installSystemd(indexerBin: string, projectName: string): Promise<
   mkdirSync(unitDir, { recursive: true });
 
   const unit = `[Unit]
-Description=CoffeeCtx knowledge graph daemon
+Description=CoffeeCtx knowledge graph scheduler
 After=network.target
 
 [Service]
-ExecStart=node ${indexerBin} daemon --project ${projectName}
-Restart=on-failure
-RestartSec=10
+ExecStart=node ${indexerBin} daemonize --project ${projectName}
 
 [Install]
 WantedBy=default.target

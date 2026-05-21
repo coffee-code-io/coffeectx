@@ -89,21 +89,29 @@ export interface CoffeectxConfig {
     userDir?: string;
   };
 
-  /** Which indexers to run when the `index` command is invoked. */
+  /**
+   * Legacy: indexer toggles. Newly-written configs use `jobs:` instead.
+   * Still loaded for backwards compatibility and projected into the `jobs`
+   * registry on scheduler boot if `jobs:` is empty/missing.
+   */
   indexers: {
     logs: boolean;
     lsp: boolean;
     agent: boolean;
   };
 
-  /** Agent indexer configuration. */
+  /** Legacy agent configuration. Replaced by `jobs['skill:<name>'].enabled`. */
   agent?: {
-    /**
-     * Per-skill enable/disable map. Key is the skill directory name.
-     * Skills absent from the map are enabled by default.
-     */
     skills?: Record<string, boolean>;
   };
+
+  /**
+   * Per-job configuration. Keys are job names registered by the scheduler
+   * (e.g. 'lsp', 'logs', 'skill:local-decisions'). `enabled` defaults to the
+   * job's built-in default; `intervalMs` overrides the timer interval for jobs
+   * that support it.
+   */
+  jobs?: Record<string, { enabled?: boolean; intervalMs?: number }>;
 
   /** LSP server configuration. */
   lsp: {
@@ -151,6 +159,7 @@ type RawConfig = Partial<{
   indexers: Record<string, unknown>;
   lsp: Record<string, unknown>;
   agent: Record<string, unknown>;
+  jobs: Record<string, unknown>;
   // legacy flat db section (config.yaml v1)
   db: Record<string, unknown>;
 }>;
@@ -279,7 +288,29 @@ export function loadConfig(): CoffeectxConfig {
 
   const agent = raw.agent ? (raw.agent as CoffeectxConfig['agent']) : undefined;
 
-  const cfg: CoffeectxConfig = { active, projects, embed, auth, tools, types, indexers, lsp, agent };
+  // ── Jobs — project legacy keys forward when `jobs:` is absent ───────────────
+  const rawJobs = (raw as unknown as { jobs?: Record<string, unknown> }).jobs;
+  let jobs: CoffeectxConfig['jobs'] = rawJobs
+    ? Object.fromEntries(
+        Object.entries(rawJobs).map(([k, v]) => [k, v as { enabled?: boolean; intervalMs?: number }]),
+      )
+    : undefined;
+  if (!jobs || Object.keys(jobs).length === 0) {
+    const projected: Record<string, { enabled?: boolean; intervalMs?: number }> = {};
+    if (raw.indexers) {
+      const ix = raw.indexers as Partial<{ lsp: boolean; logs: boolean; agent: boolean }>;
+      if (ix.lsp !== undefined) projected['lsp'] = { enabled: ix.lsp };
+      if (ix.logs !== undefined) projected['logs'] = { enabled: ix.logs };
+    }
+    if (agent?.skills) {
+      for (const [skillName, enabled] of Object.entries(agent.skills)) {
+        projected[`skill:${skillName}`] = { enabled: !!enabled };
+      }
+    }
+    if (Object.keys(projected).length > 0) jobs = projected;
+  }
+
+  const cfg: CoffeectxConfig = { active, projects, embed, auth, tools, types, indexers, lsp, agent, jobs };
 
   return cfg;
 }

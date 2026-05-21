@@ -226,16 +226,11 @@ function buildConfig(
       exclude: [],
       userDir: null,
     },
-    indexers: {
-      lsp: false,
-      logs: true,
-      agent: true,
-    },
-    agent: {
-      skills: {
-        'local-decisions': true,
-        'lsp-enrichment': false,
-      },
+    jobs: {
+      lsp: { enabled: false },
+      logs: { enabled: true },
+      'skill:local-decisions': { enabled: true },
+      'skill:lsp-enrichment': { enabled: false },
     },
     auth: {
       authType: auth.authType,
@@ -358,7 +353,7 @@ async function main(): Promise<void> {
 
   if (isDaemonSupported() && firstProject) {
     console.log(`\n${BOLD}Step 4: Daemon Setup${RESET}`);
-    const wantDaemon = await confirm('Set up auto-indexing daemon?', false);
+    const wantDaemon = await confirm('Set up scheduler service?', false);
     if (wantDaemon) {
       try {
         await installDaemon(indexerBin, firstProject.name);
@@ -414,11 +409,14 @@ async function main(): Promise<void> {
   console.log('');
   console.log('  Next steps:');
   console.log('');
-  console.log(`  ${CYAN}Index your project:${RESET}`);
-  console.log('    coffeectx-index index');
+  console.log(`  ${CYAN}List the registered jobs:${RESET}`);
+  console.log('    coffeectx-index job list');
   console.log('');
-  console.log(`  ${CYAN}Start the auto-indexing daemon:${RESET}`);
-  console.log('    coffeectx-index daemon');
+  console.log(`  ${CYAN}Trigger an indexing job once:${RESET}`);
+  console.log('    coffeectx-index job trigger logs --now');
+  console.log('');
+  console.log(`  ${CYAN}Start the scheduler:${RESET}`);
+  console.log('    coffeectx-index daemonize');
   console.log('');
   console.log(`  ${CYAN}Add the MCP server to your AI assistant:${RESET}`);
   console.log(`    command: node`);
