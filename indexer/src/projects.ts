@@ -1,12 +1,11 @@
 /**
  * Project registry — backed by ~/.coffeecode/config.yaml (unified config).
- *
- * All project CRUD reads/writes the single config file via @coffeectx/core.
  */
 
 import {
   loadConfig,
   saveConfig,
+  updateConfig,
   dbPathForName,
   COFFEECODE_DIR,
   CONFIG_PATH,
@@ -27,41 +26,56 @@ export function loadProjects(): ProjectsFile {
   return { active: cfg.active, projects: cfg.projects };
 }
 
-export function registerProject(name: string, dbPath: string, repoPath?: string, logsPath?: string): void {
+export function registerProject(name: string, dbPath: string, repoPath?: string): void {
   const cfg = loadConfig();
   const existing = cfg.projects[name];
   cfg.projects[name] = {
     db: dbPath,
+    enabled: existing?.enabled ?? true,
     repoPath: repoPath ?? existing?.repoPath,
-    logsPath: logsPath ?? existing?.logsPath,
     created: existing?.created ?? new Date().toISOString(),
+    core: existing?.core,
+    mcp: existing?.mcp,
+    jobs: existing?.jobs,
   };
   if (!cfg.active) cfg.active = name;
   saveConfig(cfg);
 }
 
-export function setProjectLogs(name: string, logsPath: string): void {
-  const cfg = loadConfig();
-  const entry = cfg.projects[name];
-  if (!entry) throw new Error(`Project "${name}" not found`);
-  entry.logsPath = logsPath;
-  saveConfig(cfg);
-}
-
-export function setProjectLogsNewerThan(name: string, newerThan: string | undefined): void {
-  const cfg = loadConfig();
-  const entry = cfg.projects[name];
-  if (!entry) throw new Error(`Project "${name}" not found`);
-  entry.logsNewerThan = newerThan;
-  saveConfig(cfg);
-}
-
 export function setProjectRepo(name: string, repoPath: string): void {
-  const cfg = loadConfig();
-  const entry = cfg.projects[name];
-  if (!entry) throw new Error(`Project "${name}" not found`);
-  entry.repoPath = repoPath;
-  saveConfig(cfg);
+  updateConfig(cfg => {
+    const entry = cfg.projects[name];
+    if (!entry) throw new Error(`Project "${name}" not found`);
+    entry.repoPath = repoPath;
+  });
+}
+
+/** Set or clear `parameters.logsPath` on this project's `logs` job. */
+export function setProjectLogsPath(name: string, logsPath: string | undefined): void {
+  updateConfig(cfg => {
+    const entry = cfg.projects[name];
+    if (!entry) throw new Error(`Project "${name}" not found`);
+    if (!entry.jobs) entry.jobs = {};
+    if (!entry.jobs['logs']) entry.jobs['logs'] = {};
+    const job = entry.jobs['logs'];
+    if (!job.parameters) job.parameters = {};
+    if (logsPath === undefined) delete job.parameters['logsPath'];
+    else job.parameters['logsPath'] = logsPath;
+  });
+}
+
+/** Set or clear `parameters.logsNewerThan` on this project's `logs` job. */
+export function setProjectLogsNewerThan(name: string, newerThan: string | undefined): void {
+  updateConfig(cfg => {
+    const entry = cfg.projects[name];
+    if (!entry) throw new Error(`Project "${name}" not found`);
+    if (!entry.jobs) entry.jobs = {};
+    if (!entry.jobs['logs']) entry.jobs['logs'] = {};
+    const job = entry.jobs['logs'];
+    if (!job.parameters) job.parameters = {};
+    if (newerThan === undefined) delete job.parameters['logsNewerThan'];
+    else job.parameters['logsNewerThan'] = newerThan;
+  });
 }
 
 export function setActiveProject(name: string): void {

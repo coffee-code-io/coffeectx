@@ -5,11 +5,24 @@ export {
   updateConfig,
   resolveDbPath,
   dbPathForName,
+  resolveProjectEmbed,
+  resolveProjectTools,
+  resolveJobAuth,
+  resolveJobParameters,
+  resolveProjectByCwd,
+  listEnabledProjects,
   COFFEECODE_DIR,
   CONFIG_PATH,
   DB_DIR,
 } from './config.js';
-export type { CoffeectxConfig, ProjectEntry } from './config.js';
+export type {
+  CoffeectxConfig,
+  ProjectEntry,
+  EmbedSettings,
+  AuthSettings,
+  ToolsSettings,
+  JobConfig,
+} from './config.js';
 export type {
   DbOptions,
   InsertEvent,

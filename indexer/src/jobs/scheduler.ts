@@ -11,7 +11,7 @@
  *   - a single global mutex: at most one job runs at a time
  */
 
-import { loadConfig, type Db, type CoffeectxConfig, type ProjectEntry } from '@coffeectx/core';
+import { loadConfig, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry } from '@coffeectx/core';
 import type { Job, JobContext, JobTrigger } from './types.js';
 
 const DEBOUNCE_MS = 1_500;
@@ -84,10 +84,11 @@ export class Scheduler {
     const stale = this.db.clearStaleRunning();
     if (stale > 0) this.log(`reclaimed ${stale} stale running job(s)`);
 
-    // 2. Register every job in the DB; reconcile enabled from config.
+    // 2. Register every job in the DB; reconcile enabled from project config.
+    const projectJobs = this.config.projects[this.project.name]?.jobs ?? {};
     for (const job of this.jobs.values()) {
       const created = this.db.upsertJob(job.name, { description: job.description, defaultEnabled: job.defaultEnabled });
-      const cfgEntry = this.config.jobs?.[job.name];
+      const cfgEntry = projectJobs[job.name];
       if (cfgEntry?.enabled !== undefined) {
         this.db.setJobEnabled(job.name, cfgEntry.enabled);
       } else if (created) {
@@ -206,8 +207,9 @@ export class Scheduler {
     try {
       const cfg = loadConfig();
       this.config = cfg;
+      const projectJobs = cfg.projects[this.project.name]?.jobs ?? {};
       for (const job of this.jobs.values()) {
-        const desired = cfg.jobs?.[job.name]?.enabled;
+        const desired = projectJobs[job.name]?.enabled;
         if (desired === undefined) continue;
         const row = this.db.getJob(job.name);
         if (!row || row.enabled === desired) continue;
@@ -262,6 +264,7 @@ export class Scheduler {
       dbPath: this.dbPath,
       project: this.project,
       config: this.config,
+      parameters: resolveJobParameters(this.config, this.project.name, job.name),
       signal: this.abortController.signal,
       log: (msg) => this.log(`[${job.name}] ${msg}`),
     };

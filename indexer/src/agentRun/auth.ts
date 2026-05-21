@@ -1,37 +1,14 @@
 import type { QueryOptions } from '@qwen-code/sdk';
-import { loadConfig } from '@coffeectx/core';
+import type { AuthSettings } from '@coffeectx/core';
 
-export interface AuthConfig {
-  /** Maps to QueryOptions.authType */
-  authType?: 'openai' | 'anthropic' | 'qwen-oauth' | 'gemini' | 'vertex-ai';
-  /** API key — forwarded as OPENAI_API_KEY env var */
-  apiKey?: string;
-  /** Model name — forwarded as QueryOptions.model */
-  model?: string;
-  /** Base URL — forwarded as OPENAI_BASE_URL env var */
-  baseUrl?: string;
-  /** Absolute path to a qwen CLI executable — overrides the auto-resolved packaged default */
-  qwenPath?: string;
-}
+/** Re-export for callers that previously imported the local AuthConfig. */
+export type AuthConfig = AuthSettings;
 
 /**
- * Load auth configuration from ~/.coffeecode/config.yaml (auth section).
- * Returns an empty config if the file does not exist or cannot be parsed.
- */
-export function loadAuth(): AuthConfig {
-  try {
-    const cfg = loadConfig();
-    return cfg.auth ?? {};
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Convert an AuthConfig to a partial QueryOptions object suitable for
+ * Convert an AuthSettings to a partial QueryOptions object suitable for
  * merging into the options passed to query().
  */
-export function authToQueryOptions(auth: AuthConfig): Partial<QueryOptions> {
+export function authToQueryOptions(auth: AuthSettings): Partial<QueryOptions> {
   const env: Record<string, string> = {};
   if (auth.apiKey) env['OPENAI_API_KEY'] = auth.apiKey;
   if (auth.baseUrl) env['OPENAI_BASE_URL'] = auth.baseUrl;

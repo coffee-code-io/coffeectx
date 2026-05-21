@@ -1,18 +1,33 @@
 /**
  * Unified configuration for coffeectx — read/write ~/.coffeecode/config.yaml.
  *
- * This single file replaces the previous split across:
- *   config.yaml   (embed + tools)
- *   projects.yaml (project registry + active pointer)
- *   auth.yaml     (apiKey / baseUrl)
- *   lsp.yaml      (LSP command + servers)
+ * Schema:
+ *   active: <name>                          # default --project for CLI
+ *   projects:
+ *     <name>:
+ *       enabled: bool                       # scheduler/MCP serve this project (default: true)
+ *       db: <path>
+ *       repoPath: <path>                    # for MCP cwd routing + default for LSP jobs
+ *       created: <iso-date>
+ *       core: { embed: { provider, model, apiKey, baseUrl, dimensions } }
+ *       mcp:  { tools: { search, exact, regex, raw_query, skills, load_node, insert } }
+ *       jobs:
+ *         logs:
+ *           enabled: bool
+ *           parameters: { logsPath, logsNewerThan?, intervalMs? }
+ *         lsp[:<suffix>]:                   # one or more LSP jobs per project
+ *           enabled: bool
+ *           parameters: { repoPath?, lspCommand?, intervalMs? }
+ *         skill:<dirName>:
+ *           enabled: bool
+ *           parameters: { auth, batchStep?, intervalMs? }
  *
- * Old separate files are still read as fallbacks during migration.
+ *   types: { include, exclude, userDir }    # global type-loading
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as pathResolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type { EmbedProvider } from './embed/index.js';
 
@@ -22,195 +37,90 @@ export const COFFEECODE_DIR = join(homedir(), '.coffeecode');
 export const CONFIG_PATH = join(COFFEECODE_DIR, 'config.yaml');
 export const DB_DIR = join(COFFEECODE_DIR, 'db');
 
-/** Legacy file paths — read as fallback during migration. */
-const LEGACY_PROJECTS_PATH = join(COFFEECODE_DIR, 'projects.yaml');
-const LEGACY_AUTH_PATH = join(COFFEECODE_DIR, 'auth.yaml');
-const LEGACY_LSP_PATH = join(COFFEECODE_DIR, 'lsp.yaml');
-
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+export interface EmbedSettings {
+  provider: EmbedProvider;
+  model?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  /** Target embedding dimension. Defaults to 128. Must match the live DB. */
+  dimensions?: number;
+}
+
+export interface AuthSettings {
+  authType?: 'openai' | 'anthropic' | 'qwen-oauth' | 'gemini' | 'vertex-ai';
+  apiKey?: string;
+  baseUrl?: string;
+  model?: string;
+  /** Absolute path to a qwen CLI executable; overrides the auto-resolved packaged default. */
+  qwenPath?: string;
+}
+
+export interface ToolsSettings {
+  search: boolean;
+  exact: boolean;
+  regex: boolean;
+  raw_query: boolean;
+  skills: boolean;
+  load_node: boolean;
+  /** Write access — disabled by default. */
+  insert: boolean;
+}
+
+export interface JobConfig {
+  enabled?: boolean;
+  /** Free-form parameters. Conventions: `auth` for jobs needing LLM auth, `intervalMs` for timer override. */
+  parameters?: Record<string, unknown>;
+}
 
 export interface ProjectEntry {
   db: string;
+  /** Whether the scheduler/MCP serves this project. Defaults to true on init. */
+  enabled?: boolean;
+  /**
+   * Root of the project on disk. Used by MCP to route by cwd (longest-prefix
+   * match) and as the default `repoPath` for any LSP job that doesn't set
+   * its own. Doesn't itself trigger LSP indexing.
+   */
   repoPath?: string;
-  /** Path to .claude/projects/<id>/ directory or a specific .jsonl file. */
-  logsPath?: string;
-  /** Only index log sessions whose startTime is at or after this ISO date. */
-  logsNewerThan?: string;
   created: string;
+  core?: { embed?: EmbedSettings };
+  mcp?: { tools?: Partial<ToolsSettings> };
+  jobs?: Record<string, JobConfig>;
 }
 
 export interface CoffeectxConfig {
-  /** Name of the active project. */
+  /** Default project name for CLI when --project is omitted. */
   active?: string;
-
-  /** Per-project entries. */
   projects: Record<string, ProjectEntry>;
-
-  /** Embedding provider configuration. */
-  embed: {
-    provider: EmbedProvider;
-    model?: string;
-    baseUrl?: string;
-    apiKey?: string;
-    /** Target embedding dimension. Defaults to 128. */
-    dimensions?: number;
-  };
-
-  /** Authentication credentials for the indexer agent (Qwen CLI). */
-  auth?: {
-    authType?: 'openai' | 'anthropic' | 'qwen-oauth' | 'gemini' | 'vertex-ai';
-    apiKey?: string;
-    baseUrl?: string;
-    model?: string;
-    qwenPath?: string;
-  };
-
-  /** MCP tool toggles. */
-  tools: {
-    search: boolean;
-    exact: boolean;
-    regex: boolean;
-    raw_query: boolean;
-    skills: boolean;
-    load_node: boolean;
-    /** Write access — disabled by default. */
-    insert: boolean;
-  };
-
-  /**
-   * Builtin type file filtering (by YAML filename stem, e.g. "api", "contract").
-   * If `include` is non-empty, only those stems are loaded.
-   * `exclude` removes stems from the final set.
-   */
+  /** Builtin/user type loading config (global). */
   types: {
     include?: string[];
     exclude?: string[];
-    /** Directory of user-defined YAML type files. */
     userDir?: string;
-  };
-
-  /**
-   * Legacy: indexer toggles. Newly-written configs use `jobs:` instead.
-   * Still loaded for backwards compatibility and projected into the `jobs`
-   * registry on scheduler boot if `jobs:` is empty/missing.
-   */
-  indexers: {
-    logs: boolean;
-    lsp: boolean;
-    agent: boolean;
-  };
-
-  /** Legacy agent configuration. Replaced by `jobs['skill:<name>'].enabled`. */
-  agent?: {
-    skills?: Record<string, boolean>;
-  };
-
-  /**
-   * Per-job configuration. Keys are job names registered by the scheduler
-   * (e.g. 'lsp', 'logs', 'skill:local-decisions'). `enabled` defaults to the
-   * job's built-in default; `intervalMs` overrides the timer interval for jobs
-   * that support it.
-   */
-  jobs?: Record<string, { enabled?: boolean; intervalMs?: number }>;
-
-  /** LSP server configuration. */
-  lsp: {
-    /** Default LSP command (full command string). */
-    command: string;
-    /** Per-language overrides, e.g. { typescript: "...", python: "..." }. */
-    servers?: Record<string, string>;
   };
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
-const DEFAULTS: CoffeectxConfig = {
-  projects: {},
-  embed: { provider: 'stub', dimensions: 128 },
-  tools: {
-    search: true,
-    exact: true,
-    regex: true,
-    raw_query: true,
-    skills: true,
-    load_node: true,
-    insert: false,
-  },
-  types: {},
-  indexers: {
-    logs: true,
-    lsp: true,
-    agent: true,
-  },
-  lsp: {
-    command: 'typescript-language-server --stdio',
-  },
+const DEFAULT_EMBED: EmbedSettings = { provider: 'stub', dimensions: 128 };
+
+const DEFAULT_TOOLS: ToolsSettings = {
+  search: true, exact: true, regex: true, raw_query: true,
+  skills: true, load_node: true, insert: false,
 };
 
-// ── Raw YAML shape (everything is partial / unknown) ──────────────────────────
+// ── Raw YAML shape ────────────────────────────────────────────────────────────
 
 type RawConfig = Partial<{
   active: string;
-  projects: Record<string, unknown>;
-  embed: Record<string, unknown>;
-  auth: Record<string, unknown>;
-  tools: Record<string, unknown>;
-  types: Record<string, unknown>;
-  indexers: Record<string, unknown>;
-  lsp: Record<string, unknown>;
-  agent: Record<string, unknown>;
-  jobs: Record<string, unknown>;
-  // legacy flat db section (config.yaml v1)
-  db: Record<string, unknown>;
+  projects: Record<string, ProjectEntry>;
+  types: CoffeectxConfig['types'];
 }>;
-
-// ── Loaders for legacy files ──────────────────────────────────────────────────
-
-function loadLegacyProjects(): { active?: string; projects: Record<string, ProjectEntry> } {
-  if (!existsSync(LEGACY_PROJECTS_PATH)) return { projects: {} };
-  try {
-    const raw = parseYaml(readFileSync(LEGACY_PROJECTS_PATH, 'utf-8')) as {
-      active?: string;
-      projects?: Record<string, ProjectEntry>;
-    } | null;
-    return { active: raw?.active, projects: raw?.projects ?? {} };
-  } catch {
-    return { projects: {} };
-  }
-}
-
-function loadLegacyAuth(): { apiKey?: string; baseUrl?: string } {
-  if (!existsSync(LEGACY_AUTH_PATH)) return {};
-  try {
-    const parsed = parseYaml(readFileSync(LEGACY_AUTH_PATH, 'utf-8')) as Record<string, unknown> | null;
-    const auth = (parsed?.['auth'] as Record<string, unknown> | undefined) ?? (parsed ?? {});
-    return {
-      apiKey: auth['apiKey'] as string | undefined,
-      baseUrl: auth['baseUrl'] as string | undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
-function loadLegacyLsp(): { command?: string; servers?: Record<string, string> } {
-  if (!existsSync(LEGACY_LSP_PATH)) return {};
-  try {
-    const parsed = parseYaml(readFileSync(LEGACY_LSP_PATH, 'utf-8')) as Record<string, unknown> | null;
-    if (!parsed) return {};
-    const command =
-      (parsed['default'] as string | undefined) ??
-      (parsed['command'] as string | undefined);
-    const servers = parsed['servers'] as Record<string, string> | undefined;
-    return { command: command?.trim() || undefined, servers };
-  } catch {
-    return {};
-  }
-}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/** Load the unified config. Falls back to legacy separate files during migration. */
 export function loadConfig(): CoffeectxConfig {
   mkdirSync(COFFEECODE_DIR, { recursive: true });
 
@@ -221,104 +131,19 @@ export function loadConfig(): CoffeectxConfig {
     } catch { /* fall through */ }
   }
 
-  // ── Embed ───────────────────────────────────────────────────────────────────
-  const embed: CoffeectxConfig['embed'] = {
-    ...DEFAULTS.embed,
-    ...(raw.embed as Partial<CoffeectxConfig['embed']> | undefined),
-  };
-
-  // legacy flat db.path → ignored here, handled separately via active project
-  // legacy embed dimensions fallback
-  if (!embed.dimensions) embed.dimensions = 128;
-
-  // ── Auth — merge into embed if not already set ──────────────────────────────
-  const auth = (raw.auth as { apiKey?: string; baseUrl?: string } | undefined) ?? {};
-  if (!auth.apiKey && !embed.apiKey) {
-    const legacy = loadLegacyAuth();
-    if (legacy.apiKey) auth.apiKey = legacy.apiKey;
-    if (legacy.baseUrl && !auth.baseUrl) auth.baseUrl = legacy.baseUrl;
-  }
-  if (auth.apiKey && !embed.apiKey) embed.apiKey = auth.apiKey;
-  if (auth.baseUrl && !embed.baseUrl) embed.baseUrl = auth.baseUrl;
-
-  // ── Projects — merge from legacy projects.yaml if not in main config ────────
-  let projects = (raw.projects ?? {}) as Record<string, ProjectEntry>;
-  let active = raw.active;
-  if (Object.keys(projects).length === 0) {
-    const legacy = loadLegacyProjects();
-    if (Object.keys(legacy.projects).length > 0) {
-      projects = legacy.projects;
-      active ??= legacy.active;
-    }
+  const projects = raw.projects ?? {};
+  for (const p of Object.values(projects)) {
+    if (p.enabled === undefined) p.enabled = true;
   }
 
-  // ── LSP — merge from legacy lsp.yaml ───────────────────────────────────────
-  const rawLsp = (raw.lsp as Partial<CoffeectxConfig['lsp']> | undefined) ?? {};
-  const legacyLsp = loadLegacyLsp();
-  const lsp: CoffeectxConfig['lsp'] = {
-    command: rawLsp.command ?? legacyLsp.command ?? DEFAULTS.lsp.command,
-    servers: rawLsp.servers ?? legacyLsp.servers,
-  };
+  const types: CoffeectxConfig['types'] = { ...(raw.types ?? {}) };
 
-  // ── Tools ───────────────────────────────────────────────────────────────────
-  const tools: CoffeectxConfig['tools'] = {
-    ...DEFAULTS.tools,
-    ...(raw.tools as Partial<CoffeectxConfig['tools']> | undefined),
-  };
-
-  // ── Types ───────────────────────────────────────────────────────────────────
-  const types: CoffeectxConfig['types'] = {
-    ...DEFAULTS.types,
-    ...(raw.types as Partial<CoffeectxConfig['types']> | undefined),
-  };
-
-  // ── Indexers ─────────────────────────────────────────────────────────────────
-  const indexers: CoffeectxConfig['indexers'] = {
-    ...DEFAULTS.indexers,
-    ...(raw.indexers as Partial<CoffeectxConfig['indexers']> | undefined),
-  };
-
-  // ── Environment variable overrides ──────────────────────────────────────────
-  const envProvider = process.env['COFFEECTX_EMBED_PROVIDER'] as EmbedProvider | undefined;
-  if (envProvider && ['stub', 'openai', 'openrouter', 'ollama'].includes(envProvider)) {
-    embed.provider = envProvider;
-  }
-  const envInsert = process.env['COFFEECTX_INSERT'];
-  if (envInsert === '1' || envInsert === 'true') tools.insert = true;
-
-  const agent = raw.agent ? (raw.agent as CoffeectxConfig['agent']) : undefined;
-
-  // ── Jobs — project legacy keys forward when `jobs:` is absent ───────────────
-  const rawJobs = (raw as unknown as { jobs?: Record<string, unknown> }).jobs;
-  let jobs: CoffeectxConfig['jobs'] = rawJobs
-    ? Object.fromEntries(
-        Object.entries(rawJobs).map(([k, v]) => [k, v as { enabled?: boolean; intervalMs?: number }]),
-      )
-    : undefined;
-  if (!jobs || Object.keys(jobs).length === 0) {
-    const projected: Record<string, { enabled?: boolean; intervalMs?: number }> = {};
-    if (raw.indexers) {
-      const ix = raw.indexers as Partial<{ lsp: boolean; logs: boolean; agent: boolean }>;
-      if (ix.lsp !== undefined) projected['lsp'] = { enabled: ix.lsp };
-      if (ix.logs !== undefined) projected['logs'] = { enabled: ix.logs };
-    }
-    if (agent?.skills) {
-      for (const [skillName, enabled] of Object.entries(agent.skills)) {
-        projected[`skill:${skillName}`] = { enabled: !!enabled };
-      }
-    }
-    if (Object.keys(projected).length > 0) jobs = projected;
-  }
-
-  const cfg: CoffeectxConfig = { active, projects, embed, auth, tools, types, indexers, lsp, agent, jobs };
-
-  return cfg;
+  return { active: raw.active, projects, types };
 }
 
 /** Save the full config back to ~/.coffeecode/config.yaml. */
 export function saveConfig(cfg: CoffeectxConfig): void {
   mkdirSync(COFFEECODE_DIR, { recursive: true });
-  // Don't persist env-only credentials
   writeFileSync(CONFIG_PATH, stringifyYaml(cfg), 'utf-8');
 }
 
@@ -330,20 +155,83 @@ export function updateConfig(fn: (cfg: CoffeectxConfig) => void): CoffeectxConfi
   return cfg;
 }
 
-/** Resolve the db path for a given project name (or the active project). */
+// ── Project / settings resolvers ─────────────────────────────────────────────
+
+/** Resolve the db path for a project name (or the active project). */
 export function resolveDbPath(cfg: CoffeectxConfig, name?: string): string {
   const projectName = name ?? cfg.active;
-  if (projectName && cfg.projects[projectName]) {
-    return cfg.projects[projectName]!.db;
-  }
-  // Legacy fallback: flat db.path in old config.yaml
-  const raw = existsSync(CONFIG_PATH)
-    ? ((parseYaml(readFileSync(CONFIG_PATH, 'utf-8')) as Record<string, unknown> | null) ?? {})
-    : {};
-  const legacyDb = (raw['db'] as Record<string, unknown> | undefined)?.['path'] as string | undefined;
-  return legacyDb ?? join(COFFEECODE_DIR, 'retrival.db');
+  if (projectName && cfg.projects[projectName]) return cfg.projects[projectName]!.db;
+  throw new Error(`No db path: project "${projectName ?? '<none>'}" not registered`);
 }
 
 export function dbPathForName(name: string): string {
   return join(DB_DIR, `${name}.db`);
+}
+
+/** Effective embed settings for a project: project.core.embed → defaults. */
+export function resolveProjectEmbed(cfg: CoffeectxConfig, projectName: string): EmbedSettings {
+  const merged: EmbedSettings = {
+    ...DEFAULT_EMBED,
+    ...(cfg.projects[projectName]?.core?.embed ?? {}),
+  };
+  if (!merged.dimensions) merged.dimensions = 128;
+  // Env override (cheap escape hatch for development).
+  const envProvider = process.env['COFFEECTX_EMBED_PROVIDER'] as EmbedProvider | undefined;
+  if (envProvider && ['stub', 'openai', 'openrouter', 'ollama'].includes(envProvider)) {
+    merged.provider = envProvider;
+  }
+  return merged;
+}
+
+/** Effective MCP tool toggles for a project: project.mcp.tools → defaults. */
+export function resolveProjectTools(cfg: CoffeectxConfig, projectName: string): ToolsSettings {
+  const merged: ToolsSettings = {
+    ...DEFAULT_TOOLS,
+    ...(cfg.projects[projectName]?.mcp?.tools ?? {}),
+  };
+  const envInsert = process.env['COFFEECTX_INSERT'];
+  if (envInsert === '1' || envInsert === 'true') merged.insert = true;
+  return merged;
+}
+
+/** Effective auth for a particular (project, job): only project.jobs[name].parameters.auth. */
+export function resolveJobAuth(cfg: CoffeectxConfig, projectName: string, jobName: string): AuthSettings {
+  return (cfg.projects[projectName]?.jobs?.[jobName]?.parameters?.['auth'] as AuthSettings | undefined) ?? {};
+}
+
+/** Per-job parameters (whole bag) with empty fallback. */
+export function resolveJobParameters(cfg: CoffeectxConfig, projectName: string, jobName: string): Record<string, unknown> {
+  return cfg.projects[projectName]?.jobs?.[jobName]?.parameters ?? {};
+}
+
+/** Names of projects with enabled !== false. */
+export function listEnabledProjects(cfg: CoffeectxConfig): string[] {
+  return Object.entries(cfg.projects)
+    .filter(([, p]) => p.enabled !== false)
+    .map(([name]) => name);
+}
+
+/** Resolve symlinks (e.g. /tmp → /private/tmp on macOS) when possible. */
+function canonical(p: string): string {
+  try { return realpathSync(p); } catch { return pathResolve(p); }
+}
+
+/**
+ * Pick the project whose `repoPath` is the longest prefix of `cwd`.
+ * Considers only enabled projects. Paths are canonicalized via realpath so
+ * symlink differences (e.g. /tmp vs /private/tmp on macOS) don't prevent
+ * matches. Returns null if no project matches.
+ */
+export function resolveProjectByCwd(cfg: CoffeectxConfig, cwd: string): string | null {
+  const normalized = canonical(cwd);
+  let best: { name: string; length: number } | null = null;
+  for (const [name, p] of Object.entries(cfg.projects)) {
+    if (p.enabled === false) continue;
+    if (!p.repoPath) continue;
+    const rp = canonical(p.repoPath);
+    if (normalized === rp || normalized.startsWith(rp + '/')) {
+      if (!best || rp.length > best.length) best = { name, length: rp.length };
+    }
+  }
+  return best?.name ?? null;
 }

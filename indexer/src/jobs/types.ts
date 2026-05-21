@@ -17,6 +17,8 @@ export interface JobContext {
   dbPath: string;
   project: ProjectEntry & { name: string };
   config: CoffeectxConfig;
+  /** Resolved per-job parameters (project.jobs[name].parameters). */
+  parameters: Record<string, unknown>;
   signal: AbortSignal;
   log: (msg: string) => void;
 }

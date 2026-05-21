@@ -1,19 +1,22 @@
 /**
- * Build the list of jobs the scheduler manages.
+ * Build the list of jobs the scheduler manages for a given project.
  *
  * Built-in jobs:
- *   - lsp     : timer, wraps indexWithLsp
- *   - logs    : timer, wraps indexLogs (replaces the old fs.watch daemon)
- *   - skill:<dir> : one per skill directory under indexer/skills/. Triggered by
- *                   onTypeInsert on the agent-log event types, with a fallback timer.
+ *   - lsp[:<suffix>] : one per `lsp` / `lsp:*` entry in project.jobs. Each reads
+ *                      its own `parameters.{repoPath, lspCommand, intervalMs}`.
+ *                      If no lsp* entry exists in config, a single default `lsp`
+ *                      job is registered (defaultEnabled=false).
+ *   - logs           : reads `parameters.{logsPath, logsNewerThan?, intervalMs?}`.
+ *   - skill:<dir>    : one per skill directory under indexer/skills/. Triggered by
+ *                      onTypeInsert on the agent-log event types, with a fallback
+ *                      timer. Reads `parameters.{auth, batchStep?, intervalMs?}`.
  */
 
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
-import type { Db, CoffeectxConfig } from '@coffeectx/core';
+import type { Db, CoffeectxConfig, AuthSettings } from '@coffeectx/core';
 import type { Job, JobTrigger } from './types.js';
 import { indexWithLsp } from '../lsp/indexSymbols.js';
-import { resolveLspCommand } from '../lsp/config.js';
 import { indexLogs } from '../agentLog/indexLogs.js';
 import { runOneSkill, listAvailableSkills, loadSkillDef } from '../agentRun/indexAgent.js';
 import { loadFileHashes } from '../fileHashes.js';
@@ -21,6 +24,7 @@ import { loadFileHashes } from '../fileHashes.js';
 const DEFAULT_LSP_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_LOGS_INTERVAL_MS = 30_000;
 const DEFAULT_SKILL_FALLBACK_INTERVAL_MS = 10 * 60_000;
+const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
 
 /** Event types whose insertion should trigger agent skill jobs. */
 const SKILL_TRIGGER_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion'];
@@ -31,34 +35,52 @@ interface SkillJobState {
   cursor?: number;
 }
 
-function jobOverrides(config: CoffeectxConfig, name: string): { enabled?: boolean; intervalMs?: number } {
-  return config.jobs?.[name] ?? {};
+function projectJobParams(
+  config: CoffeectxConfig,
+  projectName: string,
+  jobName: string,
+): Record<string, unknown> {
+  return config.projects[projectName]?.jobs?.[jobName]?.parameters ?? {};
 }
 
-/** Build every job the scheduler knows about for the active project. */
-export function buildJobs(_db: Db, config: CoffeectxConfig): Job[] {
-  const jobs: Job[] = [];
+function readIntervalMs(params: Record<string, unknown>, fallback: number): number {
+  const v = params['intervalMs'];
+  return typeof v === 'number' && v > 0 ? v : fallback;
+}
 
-  // ── lsp ──────────────────────────────────────────────────────────────────
-  const lspOverride = jobOverrides(config, 'lsp');
-  jobs.push({
-    name: 'lsp',
+function readString(params: Record<string, unknown>, key: string): string | undefined {
+  const v = params[key];
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+/** Names of project.jobs keys that represent an LSP job instance. */
+function discoverLspJobNames(config: CoffeectxConfig, projectName: string): string[] {
+  const projectJobs = config.projects[projectName]?.jobs ?? {};
+  const names = Object.keys(projectJobs).filter(k => k === 'lsp' || k.startsWith('lsp:'));
+  // Always register a default `lsp` job so it shows up in `job list` even if
+  // the user hasn't configured one yet.
+  if (!names.includes('lsp')) names.unshift('lsp');
+  return names;
+}
+
+function buildLspJob(jobName: string, config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, jobName);
+  return {
+    name: jobName,
     description: 'Index repository source files via Language Server Protocol.',
     defaultEnabled: false,
-    triggers: [{ kind: 'timer', intervalMs: lspOverride.intervalMs ?? DEFAULT_LSP_INTERVAL_MS }],
+    triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_LSP_INTERVAL_MS) }],
     async run(ctx) {
-      const repoPath = ctx.project.repoPath;
-      if (!repoPath) {
-        return { message: 'no repoPath configured — skipped' };
-      }
-      const absRepo = resolve(repoPath);
-      const lspCmd = config.lsp.servers?.['typescript'] ?? resolveLspCommand(undefined, 'typescript');
+      const repoPath = readString(ctx.parameters, 'repoPath') ?? ctx.project.repoPath;
+      if (!repoPath) return { message: 'no repoPath configured — skipped' };
+
+      const lspCmd = readString(ctx.parameters, 'lspCommand') ?? DEFAULT_LSP_COMMAND;
       const [lspBin, ...lspArgs] = lspCmd.trim().split(/\s+/).filter(Boolean);
-      if (!lspBin) throw new Error(`invalid LSP command: "${lspCmd}"`);
+      if (!lspBin) throw new Error(`invalid lspCommand: "${lspCmd}"`);
       const lspBinPath = lspBin.startsWith('~/') ? `${homedir()}/${lspBin.slice(2)}` : lspBin;
 
       const hashes = loadFileHashes();
-      const r = await indexWithLsp(ctx.db, absRepo, lspBinPath, lspArgs, { hashes });
+      const r = await indexWithLsp(ctx.db, resolve(repoPath), lspBinPath, lspArgs, { hashes });
 
       if (r.skipped) return { message: 'no source files changed' };
       if (r.errors.length > 0) {
@@ -67,20 +89,22 @@ export function buildJobs(_db: Db, config: CoffeectxConfig): Job[] {
       }
       return { message: `${r.files} files, ${r.nodes} nodes`, metrics: { files: r.files, nodes: r.nodes } };
     },
-  });
+  };
+}
 
-  // ── logs ─────────────────────────────────────────────────────────────────
-  const logsOverride = jobOverrides(config, 'logs');
-  jobs.push({
+function buildLogsJob(config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, 'logs');
+  return {
     name: 'logs',
     description: 'Index Claude Code JSONL session logs.',
     defaultEnabled: true,
-    triggers: [{ kind: 'timer', intervalMs: logsOverride.intervalMs ?? DEFAULT_LOGS_INTERVAL_MS }],
+    triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_LOGS_INTERVAL_MS) }],
     async run(ctx) {
-      const logsPath = ctx.project.logsPath;
+      const logsPath = readString(ctx.parameters, 'logsPath');
       if (!logsPath) return { message: 'no logsPath configured — skipped' };
 
-      const newerThan = ctx.project.logsNewerThan ? new Date(ctx.project.logsNewerThan) : undefined;
+      const newerThanStr = readString(ctx.parameters, 'logsNewerThan');
+      const newerThan = newerThanStr ? new Date(newerThanStr) : undefined;
       const hashes = loadFileHashes();
       const r = await indexLogs(ctx.db, [resolve(logsPath)], { newerThan, hashes });
 
@@ -93,51 +117,73 @@ export function buildJobs(_db: Db, config: CoffeectxConfig): Job[] {
         metrics: { files: r.files, skipped: r.skipped, sessions: r.sessions, events: r.events, inserted: r.inserted },
       };
     },
-  });
+  };
+}
 
-  // ── skill:<dir> per agent skill ──────────────────────────────────────────
+function buildSkillJob(jobName: string, dirName: string, description: string, config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, jobName);
+  const triggers: JobTrigger[] = [
+    { kind: 'onTypeInsert', typeNames: SKILL_TRIGGER_TYPES },
+    { kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_SKILL_FALLBACK_INTERVAL_MS) },
+  ];
+  return {
+    name: jobName,
+    description,
+    defaultEnabled: dirName === 'local-decisions',
+    triggers,
+    async run(ctx) {
+      const initial = (ctx.db.getJobState<SkillJobState>(jobName)) ?? {};
+      const processed = new Set<string>(initial.processedEventIds ?? []);
+      const auth = (ctx.parameters['auth'] as AuthSettings | undefined) ?? {};
+      const batchStep = typeof ctx.parameters['batchStep'] === 'number'
+        ? (ctx.parameters['batchStep'] as number)
+        : undefined;
+
+      const r = await runOneSkill({
+        db: ctx.db,
+        dbPath: ctx.dbPath,
+        skillDirName: dirName,
+        processedEventIds: processed,
+        auth,
+        batchStep,
+        pathToQwenExecutable: auth.qwenPath,
+        onBatchProcessed: async (newlyProcessed) => {
+          for (const id of newlyProcessed) processed.add(id);
+          // Re-read state to preserve other keys the scheduler may have updated.
+          const fresh = (ctx.db.getJobState<SkillJobState>(jobName)) ?? {};
+          fresh.processedEventIds = Array.from(processed);
+          ctx.db.setJobState(jobName, fresh);
+        },
+      });
+
+      if (r.errors.length > 0) {
+        const first = r.errors[0]!;
+        throw new Error(`${r.errors.length} skill error(s); first: ${first.error}`);
+      }
+      return {
+        message: `${r.sessions} sessions, ${r.events} events, ${r.batches} batches`,
+        metrics: { sessions: r.sessions, events: r.events, batches: r.batches },
+      };
+    },
+  };
+}
+
+/**
+ * Build every job the scheduler knows about for the given project.
+ */
+export function buildJobs(_db: Db, config: CoffeectxConfig, projectName: string): Job[] {
+  const jobs: Job[] = [];
+
+  for (const name of discoverLspJobNames(config, projectName)) {
+    jobs.push(buildLspJob(name, config, projectName));
+  }
+
+  jobs.push(buildLogsJob(config, projectName));
+
   for (const dirName of listAvailableSkills()) {
     const def = loadSkillDef(dirName);
     if (!def) continue;
-    const jobName = `skill:${dirName}`;
-    const override = jobOverrides(config, jobName);
-    const triggers: JobTrigger[] = [
-      { kind: 'onTypeInsert', typeNames: SKILL_TRIGGER_TYPES },
-      { kind: 'timer', intervalMs: override.intervalMs ?? DEFAULT_SKILL_FALLBACK_INTERVAL_MS },
-    ];
-    jobs.push({
-      name: jobName,
-      description: def.description,
-      defaultEnabled: dirName === 'local-decisions',
-      triggers,
-      async run(ctx) {
-        const initial = (ctx.db.getJobState<SkillJobState>(jobName)) ?? {};
-        const processed = new Set<string>(initial.processedEventIds ?? []);
-
-        const r = await runOneSkill({
-          db: ctx.db,
-          dbPath: ctx.dbPath,
-          skillDirName: dirName,
-          processedEventIds: processed,
-          onBatchProcessed: async (newlyProcessed) => {
-            for (const id of newlyProcessed) processed.add(id);
-            // Re-read state to preserve any keys the scheduler has updated mid-run.
-            const fresh = (ctx.db.getJobState<SkillJobState>(jobName)) ?? {};
-            fresh.processedEventIds = Array.from(processed);
-            ctx.db.setJobState(jobName, fresh);
-          },
-        });
-
-        if (r.errors.length > 0) {
-          const first = r.errors[0]!;
-          throw new Error(`${r.errors.length} skill error(s); first: ${first.error}`);
-        }
-        return {
-          message: `${r.sessions} sessions, ${r.events} events, ${r.batches} batches`,
-          metrics: { sessions: r.sessions, events: r.events, batches: r.batches },
-        };
-      },
-    });
+    jobs.push(buildSkillJob(`skill:${dirName}`, dirName, def.description, config, projectName));
   }
 
   return jobs;

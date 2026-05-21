@@ -196,53 +196,80 @@ function buildConfig(
   auth: AuthConfig,
   embed: EmbedConfig,
 ): Record<string, unknown> {
+  const sharedAuthBlock = {
+    authType: auth.authType,
+    apiKey: auth.apiKey,
+    model: auth.model,
+    ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}),
+  };
+
+  const sharedEmbedBlock = {
+    provider: embed.provider,
+    model: embed.model,
+    apiKey: embed.apiKey,
+    ...(embed.baseUrl ? { baseUrl: embed.baseUrl } : {}),
+  };
+
+  const sharedToolsBlock = {
+    search: true,
+    exact: true,
+    regex: true,
+    raw_query: true,
+    skills: true,
+    load_node: true,
+    insert: false,
+  };
+
   const projectEntries: Record<string, unknown> = {};
 
   for (const p of projects) {
     const entry: Record<string, unknown> = {
       db: join(DB_DIR, `${p.name}.db`),
+      enabled: true,
       created: new Date().toISOString(),
     };
     if (p.repoPath) entry['repoPath'] = p.repoPath;
-    if (p.logsPath) entry['logsPath'] = p.logsPath;
-    if (p.logsNewerThan) entry['logsNewerThan'] = p.logsNewerThan;
+
+    entry['core'] = { embed: sharedEmbedBlock };
+    entry['mcp'] = { tools: sharedToolsBlock };
+
+    const logsParameters: Record<string, unknown> = {};
+    if (p.logsPath) logsParameters['logsPath'] = p.logsPath;
+    if (p.logsNewerThan) logsParameters['logsNewerThan'] = p.logsNewerThan;
+
+    const lspParameters: Record<string, unknown> = {};
+    if (p.repoPath) lspParameters['repoPath'] = p.repoPath;
+    lspParameters['lspCommand'] = 'typescript-language-server --stdio';
+
+    entry['jobs'] = {
+      lsp: {
+        enabled: false,
+        ...(Object.keys(lspParameters).length > 0 ? { parameters: lspParameters } : {}),
+      },
+      logs: {
+        enabled: true,
+        ...(Object.keys(logsParameters).length > 0 ? { parameters: logsParameters } : {}),
+      },
+      'skill:local-decisions': {
+        enabled: true,
+        parameters: { auth: sharedAuthBlock },
+      },
+      'skill:lsp-enrichment': {
+        enabled: false,
+        parameters: { auth: sharedAuthBlock },
+      },
+    };
+
     projectEntries[p.name] = entry;
   }
 
   const cfg: Record<string, unknown> = {
     active: projects[0]?.name,
     projects: projectEntries,
-    tools: {
-      search: true,
-      exact: true,
-      regex: true,
-      raw_query: true,
-      skills: true,
-      load_node: true,
-      insert: false,
-    },
     types: {
       include: [],
       exclude: [],
       userDir: null,
-    },
-    jobs: {
-      lsp: { enabled: false },
-      logs: { enabled: true },
-      'skill:local-decisions': { enabled: true },
-      'skill:lsp-enrichment': { enabled: false },
-    },
-    auth: {
-      authType: auth.authType,
-      apiKey: auth.apiKey,
-      model: auth.model,
-      ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}),
-    },
-    embed: {
-      provider: embed.provider,
-      model: embed.model,
-      apiKey: embed.apiKey,
-      ...(embed.baseUrl ? { baseUrl: embed.baseUrl } : {}),
     },
   };
 

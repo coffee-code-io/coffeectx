@@ -2,12 +2,13 @@ import { mkdirSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { Db, syncAllTypes, loadConfig } from '@coffeectx/core';
 import type { SyncResult } from '@coffeectx/core';
-import { DB_DIR, dbPathForName, registerProject, sanitizeName } from './projects.js';
+import { DB_DIR, dbPathForName, registerProject, setProjectLogsPath, sanitizeName } from './projects.js';
 
 export interface InitResult {
   name: string;
   dbPath: string;
   repoPath?: string;
+  /** Convenience echo: the value written to `jobs.logs.parameters.logsPath`. */
   logsPath?: string;
   alreadyExisted: boolean;
   sync: SyncResult;
@@ -39,7 +40,8 @@ export function initProject(name: string, repoPath?: string, logsPath?: string):
   });
   db.close();
 
-  registerProject(safe, dbPath, repoPath, logsPath);
+  registerProject(safe, dbPath, repoPath);
+  if (logsPath) setProjectLogsPath(safe, logsPath);
 
   return { name: safe, dbPath, repoPath, logsPath, alreadyExisted, sync };
 }

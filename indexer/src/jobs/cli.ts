@@ -2,7 +2,7 @@
  * Handlers for the `job` subcommands: list, on, off, trigger, status.
  */
 
-import { updateConfig, type Db, type CoffeectxConfig } from '@coffeectx/core';
+import { updateConfig, resolveJobParameters, type Db, type CoffeectxConfig } from '@coffeectx/core';
 import type { ProjectEntry } from '@coffeectx/core';
 import type { Job, JobContext } from './types.js';
 import { buildJobs } from './registry.js';
@@ -22,9 +22,10 @@ interface CliCtx {
  * boot so `job list` works correctly before `daemonize` has ever run.
  */
 function ensureJobsRegistered(ctx: CliCtx, jobs: Job[]): void {
+  const projectJobs = ctx.config.projects[ctx.project.name]?.jobs ?? {};
   for (const job of jobs) {
     const created = ctx.db.upsertJob(job.name, { description: job.description, defaultEnabled: job.defaultEnabled });
-    const cfgEntry = ctx.config.jobs?.[job.name];
+    const cfgEntry = projectJobs[job.name];
     if (cfgEntry?.enabled !== undefined) {
       ctx.db.setJobEnabled(job.name, cfgEntry.enabled);
     } else if (created) {
@@ -34,7 +35,7 @@ function ensureJobsRegistered(ctx: CliCtx, jobs: Job[]): void {
 }
 
 export function jobList(ctx: CliCtx): void {
-  const jobs = buildJobs(ctx.db, ctx.config);
+  const jobs = buildJobs(ctx.db, ctx.config, ctx.project.name);
   ensureJobsRegistered(ctx, jobs);
 
   const rows = ctx.db.listJobs();
@@ -56,26 +57,29 @@ export function jobList(ctx: CliCtx): void {
 
 export function jobOn(ctx: CliCtx, name: string): void {
   if (!ensureJobExists(ctx, name)) return;
-  updateConfig(cfg => {
-    if (!cfg.jobs) cfg.jobs = {};
-    cfg.jobs[name] = { ...(cfg.jobs[name] ?? {}), enabled: true };
-  });
+  setProjectJobEnabled(ctx.project.name, name, true);
   ctx.db.setJobEnabled(name, true);
-  console.log(`Enabled "${name}"`);
+  console.log(`Enabled "${name}" for project "${ctx.project.name}"`);
 }
 
 export function jobOff(ctx: CliCtx, name: string): void {
   if (!ensureJobExists(ctx, name)) return;
-  updateConfig(cfg => {
-    if (!cfg.jobs) cfg.jobs = {};
-    cfg.jobs[name] = { ...(cfg.jobs[name] ?? {}), enabled: false };
-  });
+  setProjectJobEnabled(ctx.project.name, name, false);
   ctx.db.setJobEnabled(name, false);
-  console.log(`Disabled "${name}"`);
+  console.log(`Disabled "${name}" for project "${ctx.project.name}"`);
+}
+
+function setProjectJobEnabled(projectName: string, jobName: string, enabled: boolean): void {
+  updateConfig(cfg => {
+    const project = cfg.projects[projectName];
+    if (!project) throw new Error(`project "${projectName}" not in config`);
+    if (!project.jobs) project.jobs = {};
+    project.jobs[jobName] = { ...(project.jobs[jobName] ?? {}), enabled };
+  });
 }
 
 export async function jobTrigger(ctx: CliCtx, name: string, now: boolean): Promise<number> {
-  const jobs = buildJobs(ctx.db, ctx.config);
+  const jobs = buildJobs(ctx.db, ctx.config, ctx.project.name);
   ensureJobsRegistered(ctx, jobs);
   const job = jobs.find(j => j.name === name);
   if (!job) {
@@ -95,6 +99,7 @@ export async function jobTrigger(ctx: CliCtx, name: string, now: boolean): Promi
     dbPath: ctx.dbPath,
     project: ctx.project,
     config: ctx.config,
+    parameters: resolveJobParameters(ctx.config, ctx.project.name, name),
     signal: abortCtl.signal,
     log: (msg) => console.log(`[${name}] ${msg}`),
   };
@@ -112,7 +117,7 @@ export async function jobTrigger(ctx: CliCtx, name: string, now: boolean): Promi
 }
 
 export function jobStatus(ctx: CliCtx, name?: string): void {
-  const jobs = buildJobs(ctx.db, ctx.config);
+  const jobs = buildJobs(ctx.db, ctx.config, ctx.project.name);
   ensureJobsRegistered(ctx, jobs);
   const targets = name ? [name] : ctx.db.listJobs().map(r => r.name);
   for (const n of targets) {
@@ -146,7 +151,7 @@ function ensureJobExists(ctx: CliCtx, name: string): boolean {
   const row = ctx.db.getJob(name);
   if (row) return true;
   // Register on demand so users can flip the switch before first boot.
-  const jobs = buildJobs(ctx.db, ctx.config);
+  const jobs = buildJobs(ctx.db, ctx.config, ctx.project.name);
   const job = jobs.find(j => j.name === name);
   if (!job) {
     console.error(`Unknown job: "${name}". Try \`job list\`.`);

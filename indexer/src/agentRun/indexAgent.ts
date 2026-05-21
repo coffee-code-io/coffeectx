@@ -4,9 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
-import type { Db, DeepNode } from '@coffeectx/core';
+import type { Db, DeepNode, AuthSettings } from '@coffeectx/core';
 import { formatDeepNode } from '@coffeectx/core';
-import { loadAuth, authToQueryOptions } from './auth.js';
+import { authToQueryOptions } from './auth.js';
 import { runSkillInteractive, PROJECT_ROOT, EPHEMERAL_CONTEXT_BEGIN, EPHEMERAL_CONTEXT_END } from './runSkill.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -150,6 +150,8 @@ export interface RunOneSkillOptions {
   onBatchProcessed?: (newlyProcessedIds: string[]) => Promise<void> | void;
   batchStep?: number;
   pathToQwenExecutable?: string;
+  /** LLM auth for this run (typically from project.jobs[name].parameters.auth). */
+  auth?: AuthSettings;
 }
 
 export interface RunOneSkillResult {
@@ -204,7 +206,7 @@ function loadNewEventsGroupedBySession(
  * callback that persists newly-processed IDs after each batch.
  */
 export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkillResult> {
-  const { db, dbPath, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, pathToQwenExecutable } = opts;
+  const { db, dbPath, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, pathToQwenExecutable, auth } = opts;
   const result: RunOneSkillResult = { batches: 0, sessions: 0, events: 0, errors: [] };
 
   const skill = loadSkillDef(skillDirName);
@@ -213,8 +215,7 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
     return result;
   }
 
-  const auth = loadAuth();
-  const qOpts = authToQueryOptions(auth);
+  const qOpts = authToQueryOptions(auth ?? {});
 
   const { sessions, total, skipped } = loadNewEventsGroupedBySession(db, processedEventIds);
   if (sessions.size === 0) {

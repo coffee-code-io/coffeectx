@@ -33,13 +33,14 @@
 import { resolve } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
-import { Db, syncAllTypes, syncFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadConfig } from '@coffeectx/core';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { Db, syncAllTypes, syncFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadConfig, resolveProjectEmbed, listEnabledProjects } from '@coffeectx/core';
 import type { InsertEntry } from '@coffeectx/core';
 import { initProject, promptProjectName } from './init.js';
 import {
   loadProjects,
   setActiveProject,
-  setProjectLogsNewerThan,
   getActiveProject,
   PROJECTS_PATH,
   DB_DIR,
@@ -51,17 +52,40 @@ import { jobList, jobOn, jobOff, jobTrigger, jobStatus } from './jobs/cli.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const args = process.argv.slice(2);
-const command = args[0];
+const rawArgs = process.argv.slice(2);
+
+// Strip flags (--name value, --bool) into a separate list so command and
+// positional arguments aren't confused by `--project foo job list`.
+const flagMap: Record<string, string | true> = {};
+const positionals: string[] = [];
+for (let i = 0; i < rawArgs.length; i++) {
+  const a = rawArgs[i]!;
+  if (!a.startsWith('--') && !(a.startsWith('-') && a.length === 2)) {
+    positionals.push(a);
+    continue;
+  }
+  const next = rawArgs[i + 1];
+  if (next !== undefined && !next.startsWith('-')) {
+    flagMap[a] = next;
+    i++;
+  } else {
+    flagMap[a] = true;
+  }
+}
+const args = rawArgs; // kept for callers that still iterate raw args (e.g. query builder)
+const command = positionals[0];
 
 function flag(name: string): string | undefined {
-  const i = args.indexOf(name);
-  return i !== -1 ? args[i + 1] : undefined;
+  const v = flagMap[name];
+  return typeof v === 'string' ? v : undefined;
+}
+
+function hasFlag(name: string): boolean {
+  return flagMap[name] !== undefined;
 }
 
 function positional(index: number): string | undefined {
-  // Return args[index] if it doesn't look like a flag
-  return args[index]?.startsWith('--') ? undefined : args[index];
+  return positionals[index];
 }
 
 function flagInt(name: string, defaultValue: number): number {
@@ -72,8 +96,6 @@ function flagInt(name: string, defaultValue: number): number {
 }
 
 const globalCfg = loadConfig();
-const embedCfg = globalCfg.embed;
-const embedFn = createEmbedFn(embedCfg);
 
 // ── init — does not need an existing DB ───────────────────────────────────────
 
@@ -114,7 +136,7 @@ if (command === 'init') {
 // ── use ───────────────────────────────────────────────────────────────────────
 
 if (command === 'use') {
-  const name = args[1];
+  const name = positional(1);
   if (!name) {
     console.error('Usage: coffeectx-index use <name>');
     process.exit(1);
@@ -151,6 +173,17 @@ if (command === 'list-projects') {
   process.exit(0);
 }
 
+// ── daemonize supervisor mode (no --project): spawn one child per enabled project
+if (command === 'daemonize' && !flag('--project')) {
+  const enabled = listEnabledProjects(globalCfg);
+  if (enabled.length === 0) {
+    console.error('No enabled projects in config. Run `coffeectx-index init` first.');
+    process.exit(1);
+  }
+  await runSupervisor(enabled);
+  process.exit(0);
+}
+
 // ── All remaining commands require an active project ─────────────────────────
 
 const projects = loadProjects();
@@ -162,35 +195,9 @@ try {
   process.exit(1);
 }
 
+const embedCfg = resolveProjectEmbed(globalCfg, project.name);
+const embedFn = createEmbedFn(embedCfg);
 const db = new Db({ path: project.db, embed: embedFn, dimensions: embedCfg.dimensions });
-
-/**
- * Resolve the effective newerThan date for a command.
- * If --newer-than is passed, save it to project config and use it.
- * If --newer-than "" is passed, clear the stored value.
- * Otherwise fall back to project.logsNewerThan from config.
- */
-function resolveNewerThan(): Date | undefined {
-  const raw = flag('--newer-than');
-  if (raw !== undefined) {
-    // Save to project config (empty string clears it)
-    setProjectLogsNewerThan(project.name, raw || undefined);
-    project.logsNewerThan = raw || undefined;
-    if (!raw) return undefined;
-    const d = new Date(raw);
-    if (isNaN(d.getTime())) {
-      console.error(`--newer-than: invalid date "${raw}"`);
-      db.close();
-      process.exit(1);
-    }
-    return d;
-  }
-  // Fall back to stored project value
-  if (project.logsNewerThan) {
-    return new Date(project.logsNewerThan);
-  }
-  return undefined;
-}
 
 switch (command) {
   case 'sync-types': {
@@ -211,7 +218,7 @@ switch (command) {
   }
 
   case 'load-types': {
-    const dir = args[1];
+    const dir = positional(1);
     if (!dir) {
       console.error('Usage: coffeectx-index load-types <dir> [--project <name>]');
       db.close();
@@ -515,7 +522,7 @@ switch (command) {
   }
 
   case 'daemonize': {
-    const jobs = buildJobs(db, globalCfg);
+    const jobs = buildJobs(db, globalCfg, project.name);
     const scheduler = new Scheduler({ db, dbPath: project.db, project, jobs });
     console.log(`[scheduler] project="${project.name}" jobs=${jobs.length}`);
     await scheduler.start();
@@ -523,7 +530,7 @@ switch (command) {
   }
 
   case 'job': {
-    const sub = args[1];
+    const sub = positional(1);
     const target = positional(2);
     const cliCtx = { db, dbPath: project.db, project, config: globalCfg };
 
@@ -608,3 +615,45 @@ Config file:     ${PROJECTS_PATH}
 }
 
 db.close();
+
+/**
+ * Supervisor mode for `daemonize` with no --project flag.
+ *
+ * Spawns one child Node process per enabled project, each running
+ * `daemonize --project <name>` to host that project's scheduler. Forwards
+ * SIGINT/SIGTERM to children and waits for them to exit. Children that die
+ * are NOT respawned — this matches the no-KeepAlive policy in setup/daemon.ts.
+ */
+async function runSupervisor(projectNames: string[]): Promise<void> {
+  const entry = fileURLToPath(import.meta.url);
+  console.log(`[supervisor] starting ${projectNames.length} child scheduler(s): ${projectNames.join(', ')}`);
+
+  const children: Array<{ name: string; proc: ChildProcess; exited: boolean }> = [];
+
+  for (const name of projectNames) {
+    const proc = spawn(process.execPath, [entry, 'daemonize', '--project', name], {
+      stdio: ['ignore', 'inherit', 'inherit'],
+      env: process.env,
+    });
+    const child = { name, proc, exited: false };
+    children.push(child);
+    proc.on('exit', (code, signal) => {
+      child.exited = true;
+      console.log(`[supervisor] child "${name}" exited code=${code} signal=${signal}`);
+      if (children.every(c => c.exited)) {
+        console.log('[supervisor] all children exited — shutting down');
+        process.exit(0);
+      }
+    });
+    console.log(`[supervisor] spawned "${name}" pid=${proc.pid}`);
+  }
+
+  const forward = (sig: NodeJS.Signals) => {
+    console.log(`[supervisor] received ${sig}, forwarding to ${children.length} child(ren)`);
+    for (const c of children) if (!c.exited) c.proc.kill(sig);
+  };
+  process.on('SIGINT', () => forward('SIGINT'));
+  process.on('SIGTERM', () => forward('SIGTERM'));
+
+  await new Promise<void>(() => { /* never resolves; child exit handler calls process.exit */ });
+}
