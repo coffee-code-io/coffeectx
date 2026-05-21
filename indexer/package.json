@@ -11,7 +11,8 @@
   "files": [
     "dist",
     "skills",
-    "prompts"
+    "prompts",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -19,7 +20,7 @@
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
-    "postinstall": "node dist/setup/index.js",
+    "postinstall": "echo '\n  Run npx coffeectx-setup to configure.\n'",
     "prepublishOnly": "npm run build && npm run bundle"
   },
   "dependencies": {
