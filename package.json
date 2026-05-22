@@ -4,7 +4,8 @@
   "workspaces": [
     "packages/*",
     "mcp",
-    "indexer"
+    "indexer",
+    "webui"
   ],
   "scripts": {
     "build": "npm run build --workspaces",

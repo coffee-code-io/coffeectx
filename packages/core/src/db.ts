@@ -1093,6 +1093,76 @@ export class Db implements QueryDb {
     return row ?? null;
   }
 
+  /**
+   * Find named-type root nodes whose subtree references `targetId` somewhere.
+   * Used for the detail view's "referenced by" list and for incoming graph edges.
+   * Walks up to 20 container levels (same as findNamedParent).
+   */
+  findReferencingNamedNodes(targetId: string, limit = 50): { id: string; typeName: string }[] {
+    const rows = this.raw.prepare(`
+      WITH RECURSIVE container(id, depth) AS (
+        SELECT map_id AS id, 1 AS depth FROM map_entries WHERE value_id = ?
+        UNION ALL
+        SELECT list_id AS id, 1 AS depth FROM list_items WHERE item_id = ?
+        UNION ALL
+        SELECT me.map_id, c.depth + 1 FROM map_entries me JOIN container c ON me.value_id = c.id WHERE c.depth < 20
+        UNION ALL
+        SELECT li.list_id, c.depth + 1 FROM list_items li JOIN container c ON li.item_id = c.id WHERE c.depth < 20
+      )
+      SELECT DISTINCT c.id, nt.name AS typeName FROM container c
+      JOIN nodes n ON n.id = c.id
+      JOIN named_types nt ON nt.type_id = n.type_id
+      WHERE c.id != ?
+      LIMIT ?
+    `).all(targetId, targetId, targetId, limit) as { id: string; typeName: string }[];
+    return rows;
+  }
+
+  /**
+   * Walk the subtree rooted at `rootId` (up to `depth` container hops) and
+   * collect every distinct named-type root node referenced from within it
+   * (other than the root itself). Powers outgoing graph edges.
+   */
+  collectOutgoingNamedRefs(rootId: string, depth = 10): { id: string; typeName: string }[] {
+    const rows = this.raw.prepare(`
+      WITH RECURSIVE descendant(id, depth) AS (
+        SELECT ?, 0
+        UNION ALL
+        SELECT me.value_id, d.depth + 1 FROM map_entries me JOIN descendant d ON me.map_id = d.id WHERE d.depth < ?
+        UNION ALL
+        SELECT li.item_id,  d.depth + 1 FROM list_items  li JOIN descendant d ON li.list_id = d.id WHERE d.depth < ?
+      )
+      SELECT DISTINCT d.id, nt.name AS typeName FROM descendant d
+      JOIN nodes n ON n.id = d.id
+      JOIN named_types nt ON nt.type_id = n.type_id
+      WHERE d.id != ?
+    `).all(rootId, depth, depth, rootId) as { id: string; typeName: string }[];
+    return rows;
+  }
+
+  // ── Scheduler heartbeat ────────────────────────────────────────────────────
+
+  /** Upsert the single-row heartbeat. Called by the running scheduler every 2s. */
+  writeHeartbeat(pid: number): void {
+    this.raw
+      .prepare(
+        `INSERT INTO scheduler_heartbeats(id, last_seen_at, pid)
+         VALUES(1, datetime('now'), ?)
+         ON CONFLICT(id) DO UPDATE
+           SET last_seen_at = excluded.last_seen_at,
+               pid          = excluded.pid`,
+      )
+      .run(pid);
+  }
+
+  /** Read the single-row heartbeat. Returns null if no scheduler has ever written one. */
+  readHeartbeat(): { lastSeenAt: string; pid: number | null } | null {
+    const row = this.raw
+      .prepare(`SELECT last_seen_at AS lastSeenAt, pid FROM scheduler_heartbeats WHERE id = 1`)
+      .get() as { lastSeenAt: string; pid: number | null } | undefined;
+    return row ?? null;
+  }
+
   // ── Vector search (with full node loading) ─────────────────────────────────
 
   async searchByText(query: string, limit = 10, offset = 0): Promise<SearchResult[]> {

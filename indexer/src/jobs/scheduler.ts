@@ -17,6 +17,7 @@ import type { Job, JobContext, JobTrigger } from './types.js';
 const DEBOUNCE_MS = 1_500;
 const TRIGGER_POLL_MS = 2_000;
 const CONFIG_POLL_MS = 5_000;
+const HEARTBEAT_MS = 2_000;
 const SHUTDOWN_GRACE_MS = 15_000;
 
 interface ProjectInfo extends ProjectEntry {
@@ -55,6 +56,7 @@ export class Scheduler {
   private unsubscribeInsert?: () => void;
   private triggerPollHandle: NodeJS.Timeout | null = null;
   private configPollHandle: NodeJS.Timeout | null = null;
+  private heartbeatHandle: NodeJS.Timeout | null = null;
   private stopping = false;
 
   constructor(opts: SchedulerOptions) {
@@ -83,6 +85,13 @@ export class Scheduler {
     // 1. Clear any 'running' status left over from an unclean shutdown.
     const stale = this.db.clearStaleRunning();
     if (stale > 0) this.log(`reclaimed ${stale} stale running job(s)`);
+
+    // 1b. Begin emitting heartbeats so the web UI shows us alive.
+    this.db.writeHeartbeat(process.pid);
+    this.heartbeatHandle = setInterval(() => {
+      try { this.db.writeHeartbeat(process.pid); }
+      catch (err) { this.log(`heartbeat write failed: ${(err as Error).message}`); }
+    }, HEARTBEAT_MS);
 
     // 2. Register every job in the DB; reconcile enabled from project config.
     const projectJobs = this.config.projects[this.project.name]?.jobs ?? {};
@@ -128,6 +137,7 @@ export class Scheduler {
     this.unsubscribeInsert?.();
     if (this.triggerPollHandle) clearInterval(this.triggerPollHandle);
     if (this.configPollHandle) clearInterval(this.configPollHandle);
+    if (this.heartbeatHandle) clearInterval(this.heartbeatHandle);
     for (const st of this.state.values()) {
       if (st.timerHandle) clearInterval(st.timerHandle);
       if (st.debounceTimer) clearTimeout(st.debounceTimer);

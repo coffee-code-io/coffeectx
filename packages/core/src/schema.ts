@@ -112,6 +112,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   state_json        TEXT
 );
 
+-- Scheduler heartbeat: single row, updated periodically by the running scheduler.
+-- The UI consults this to show a green/red "alive" indicator.
+CREATE TABLE IF NOT EXISTS scheduler_heartbeats (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  last_seen_at  TEXT    NOT NULL,
+  pid           INTEGER
+);
+
 -- Job execution history.
 CREATE TABLE IF NOT EXISTS job_runs (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,

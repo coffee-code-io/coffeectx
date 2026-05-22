@@ -1,0 +1,56 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+@import "@xyflow/react/dist/style.css";
+
+@theme {
+  /* Fonts */
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Strict Coffee palette */
+  --color-cream-50:  #FDF8F5;   /* main app bg — warm paper */
+  --color-cream-100: #F5EBE0;   /* card bg — foam */
+  --color-cream-200: #E3D5CA;   /* borders / dividers */
+  --color-cream-300: #D5BDAF;   /* hover states */
+
+  --color-roast-light:  #C19A6B; /* latte art / accents / secondary text */
+  --color-roast-medium: #8D6E63; /* body text */
+  --color-roast-dark:   #3E2723; /* headings / primary buttons / espresso */
+  --color-roast-black:  #261815; /* dark mode bg — dark roast beans */
+
+  /* Muted/earthy semantic colors */
+  --color-status-success: #556B2F; /* olive — green bean */
+  --color-status-warning: #D2691E; /* chocolate */
+  --color-status-error:   #8B4513; /* saddle brown */
+}
+
+html, body, #root { height: 100%; margin: 0; }
+body {
+  font-family: var(--font-sans);
+  background: var(--color-cream-50);
+  color: var(--color-roast-dark);
+}
+
+/* React-Flow tweaks so the canvas matches the cream palette */
+.react-flow__node-default { border-radius: 8px; }
+.react-flow__background { background-color: var(--color-cream-50); }
+.react-flow__controls button {
+  background: var(--color-cream-100) !important;
+  border-bottom: 1px solid var(--color-cream-200) !important;
+  color: var(--color-roast-dark) !important;
+}
+.react-flow__controls button:hover { background: var(--color-cream-200) !important; }
+.react-flow__minimap { background: var(--color-cream-100) !important; }
+.react-flow__edge-path { stroke: var(--color-roast-light); }
+
+/* Animations from the original config */
+@keyframes fadeUp {
+  0%   { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes scaleIn {
+  0%   { opacity: 0; transform: scale(0.95); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.animate-fade-up  { animation: fadeUp 0.5s ease-out forwards; }
+.animate-scale-in { animation: scaleIn 0.3s ease-out forwards; }

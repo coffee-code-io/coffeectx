@@ -1,10 +1,12 @@
 /**
  * Handlers for the `job` subcommands: list, on, off, trigger, status.
+ *
+ * All persistence / mutation logic lives in `control.ts`; this file is just
+ * formatting and CLI I/O.
  */
 
-import { updateConfig, resolveJobParameters, type Db, type CoffeectxConfig } from '@coffeectx/core';
-import type { ProjectEntry } from '@coffeectx/core';
-import type { Job, JobContext } from './types.js';
+import type { Db, CoffeectxConfig, ProjectEntry } from '@coffeectx/core';
+import { ensureJobsRegistered, setJobEnabled, queueJobTrigger, runJobInline } from './control.js';
 import { buildJobs } from './registry.js';
 
 type ProjectInfo = ProjectEntry & { name: string };
@@ -16,27 +18,8 @@ interface CliCtx {
   config: CoffeectxConfig;
 }
 
-/**
- * Ensure every registered job has a row in `jobs`, then reconcile the live
- * enabled flag from config (config wins). Mirrors what the scheduler does on
- * boot so `job list` works correctly before `daemonize` has ever run.
- */
-function ensureJobsRegistered(ctx: CliCtx, jobs: Job[]): void {
-  const projectJobs = ctx.config.projects[ctx.project.name]?.jobs ?? {};
-  for (const job of jobs) {
-    const created = ctx.db.upsertJob(job.name, { description: job.description, defaultEnabled: job.defaultEnabled });
-    const cfgEntry = projectJobs[job.name];
-    if (cfgEntry?.enabled !== undefined) {
-      ctx.db.setJobEnabled(job.name, cfgEntry.enabled);
-    } else if (created) {
-      ctx.db.setJobEnabled(job.name, job.defaultEnabled);
-    }
-  }
-}
-
 export function jobList(ctx: CliCtx): void {
-  const jobs = buildJobs(ctx.db, ctx.config, ctx.project.name);
-  ensureJobsRegistered(ctx, jobs);
+  ensureJobsRegistered(ctx.db, ctx.config, ctx.project.name);
 
   const rows = ctx.db.listJobs();
   if (rows.length === 0) {
@@ -56,69 +39,48 @@ export function jobList(ctx: CliCtx): void {
 }
 
 export function jobOn(ctx: CliCtx, name: string): void {
-  if (!ensureJobExists(ctx, name)) return;
-  setProjectJobEnabled(ctx.project.name, name, true);
-  ctx.db.setJobEnabled(name, true);
-  console.log(`Enabled "${name}" for project "${ctx.project.name}"`);
+  try {
+    setJobEnabled(ctx.db, ctx.config, ctx.project.name, name, true);
+    console.log(`Enabled "${name}" for project "${ctx.project.name}"`);
+  } catch (err) {
+    console.error((err as Error).message + '. Try `job list`.');
+  }
 }
 
 export function jobOff(ctx: CliCtx, name: string): void {
-  if (!ensureJobExists(ctx, name)) return;
-  setProjectJobEnabled(ctx.project.name, name, false);
-  ctx.db.setJobEnabled(name, false);
-  console.log(`Disabled "${name}" for project "${ctx.project.name}"`);
-}
-
-function setProjectJobEnabled(projectName: string, jobName: string, enabled: boolean): void {
-  updateConfig(cfg => {
-    const project = cfg.projects[projectName];
-    if (!project) throw new Error(`project "${projectName}" not in config`);
-    if (!project.jobs) project.jobs = {};
-    project.jobs[jobName] = { ...(project.jobs[jobName] ?? {}), enabled };
-  });
+  try {
+    setJobEnabled(ctx.db, ctx.config, ctx.project.name, name, false);
+    console.log(`Disabled "${name}" for project "${ctx.project.name}"`);
+  } catch (err) {
+    console.error((err as Error).message + '. Try `job list`.');
+  }
 }
 
 export async function jobTrigger(ctx: CliCtx, name: string, now: boolean): Promise<number> {
+  ensureJobsRegistered(ctx.db, ctx.config, ctx.project.name);
   const jobs = buildJobs(ctx.db, ctx.config, ctx.project.name);
-  ensureJobsRegistered(ctx, jobs);
-  const job = jobs.find(j => j.name === name);
-  if (!job) {
+  if (!jobs.find(j => j.name === name)) {
     console.error(`Unknown job: "${name}"`);
     return 1;
   }
   if (!now) {
-    ctx.db.setJobTriggerPending(name);
+    queueJobTrigger(ctx.db, name);
     console.log(`Queued "${name}" — a running daemon will pick it up within ~2s.`);
     return 0;
   }
   console.log(`Running "${name}" inline...`);
-  const runId = ctx.db.startJobRun(name, 'manual');
-  const abortCtl = new AbortController();
-  const jobCtx: JobContext = {
-    db: ctx.db,
-    dbPath: ctx.dbPath,
-    project: ctx.project,
-    config: ctx.config,
-    parameters: resolveJobParameters(ctx.config, ctx.project.name, name),
-    signal: abortCtl.signal,
-    log: (msg) => console.log(`[${name}] ${msg}`),
-  };
-  try {
-    const result = await job.run(jobCtx);
-    ctx.db.endJobRun(runId, 'ok', { message: result.message, metrics: result.metrics });
+  const result = await runJobInline(ctx.db, ctx.dbPath, ctx.project, ctx.config, name,
+    (msg) => console.log(`[${name}] ${msg}`));
+  if (result.ok) {
     console.log(`ok${result.message ? ` — ${result.message}` : ''}`);
     return 0;
-  } catch (err) {
-    const message = (err as Error).message ?? String(err);
-    ctx.db.endJobRun(runId, 'error', { error: message });
-    console.error(`error: ${message}`);
-    return 1;
   }
+  console.error(`error: ${result.error}`);
+  return 1;
 }
 
 export function jobStatus(ctx: CliCtx, name?: string): void {
-  const jobs = buildJobs(ctx.db, ctx.config, ctx.project.name);
-  ensureJobsRegistered(ctx, jobs);
+  ensureJobsRegistered(ctx.db, ctx.config, ctx.project.name);
   const targets = name ? [name] : ctx.db.listJobs().map(r => r.name);
   for (const n of targets) {
     const row = ctx.db.getJob(n);
@@ -145,20 +107,6 @@ export function jobStatus(ctx: CliCtx, name?: string): void {
       }
     }
   }
-}
-
-function ensureJobExists(ctx: CliCtx, name: string): boolean {
-  const row = ctx.db.getJob(name);
-  if (row) return true;
-  // Register on demand so users can flip the switch before first boot.
-  const jobs = buildJobs(ctx.db, ctx.config, ctx.project.name);
-  const job = jobs.find(j => j.name === name);
-  if (!job) {
-    console.error(`Unknown job: "${name}". Try \`job list\`.`);
-    return false;
-  }
-  ctx.db.upsertJob(job.name, { description: job.description, defaultEnabled: job.defaultEnabled });
-  return true;
 }
 
 function msBetween(start: string, end: string): string {
