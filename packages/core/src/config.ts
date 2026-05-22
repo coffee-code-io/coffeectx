@@ -48,13 +48,22 @@ export interface EmbedSettings {
   dimensions?: number;
 }
 
+/**
+ * Per-job LLM credentials. Mapped to pi.dev's provider/model selection +
+ * runtime auth storage at job-run time by `indexer/src/agentRun/auth.ts`.
+ */
 export interface AuthSettings {
-  authType?: 'openai' | 'anthropic' | 'qwen-oauth' | 'gemini' | 'vertex-ai';
-  apiKey?: string;
-  baseUrl?: string;
+  /** pi provider id, e.g. 'openai' | 'anthropic' | 'openrouter' | 'google' | 'xai' | … */
+  authType?: string;
+  /** Provider-specific model id, e.g. 'gpt-4o-mini' or 'claude-sonnet-4-5'. */
   model?: string;
-  /** Absolute path to a qwen CLI executable; overrides the auto-resolved packaged default. */
-  qwenPath?: string;
+  apiKey?: string;
+  /**
+   * Optional override of the provider's default base URL. Reserved for
+   * future use — pi resolves base URLs from the provider's built-in config
+   * today; this field is currently ignored.
+   */
+  baseUrl?: string;
 }
 
 export interface ToolsSettings {

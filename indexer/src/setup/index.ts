@@ -59,9 +59,10 @@ type Provider = (typeof PROVIDERS)[number];
 
 const MODELS: Record<Provider, string[]> = {
   OpenRouter: [
-    'qwen/qwen3-32b',
-    'anthropic/claude-opus-4',
+    'anthropic/claude-sonnet-4-5',
+    'anthropic/claude-haiku-4-5',
     'openai/gpt-4o',
+    'openai/gpt-4o-mini',
     'google/gemini-2.0-flash',
   ],
   OpenAI: ['gpt-4o', 'gpt-4o-mini', 'o1'],

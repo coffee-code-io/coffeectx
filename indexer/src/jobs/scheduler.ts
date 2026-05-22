@@ -13,6 +13,7 @@
 
 import { loadConfig, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry } from '@coffeectx/core';
 import type { Job, JobContext, JobTrigger } from './types.js';
+import { withRunLog } from './runLog.js';
 
 const DEBOUNCE_MS = 1_500;
 const TRIGGER_POLL_MS = 2_000;
@@ -285,7 +286,7 @@ export class Scheduler {
     const cursorBefore = this.state.get(job.name)!.cursorTypes ? this.db.maxNodeRowid() : null;
 
     try {
-      const result = await job.run(ctx);
+      const result = await withRunLog(this.project.name, runId, () => job.run(ctx));
       this.db.endJobRun(runId, 'ok', { message: result.message, metrics: result.metrics });
       this.log(`[${job.name}] ok${result.message ? ` — ${result.message}` : ''}`);
       if (cursorBefore !== null) writeCatchupCursor(this.db, job.name, cursorBefore);

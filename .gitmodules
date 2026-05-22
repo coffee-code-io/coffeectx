@@ -1,3 +1,0 @@
-[submodule "qwen-code"]
-	path = qwen-code
-	url = git@github.com:QwenLM/qwen-code.git

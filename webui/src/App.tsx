@@ -5,6 +5,7 @@ import { GraphView } from './components/GraphView';
 import { ListView } from './components/ListView';
 import { NodeDetail } from './components/NodeDetail';
 import { SchedulerView } from './components/SchedulerView';
+import { RunsView } from './components/RunsView';
 import { SchedulerDot } from './components/SchedulerDot';
 import { AgentChatPanel } from './components/AgentChatPanel';
 import { useUi, type Tab } from './state/store';
@@ -48,6 +49,8 @@ export function App() {
                 {viewMode === 'graph' ? <GraphView /> : <ListView />}
               </div>
             </div>
+          ) : tab === 'runs' ? (
+            <RunsView />
           ) : (
             <SchedulerView />
           )}
@@ -65,6 +68,7 @@ export function App() {
 function Tabs({ current, onChange }: { current: Tab; onChange: (t: Tab) => void }) {
   const items: { value: Tab; label: string }[] = [
     { value: 'graph', label: 'Graph' },
+    { value: 'runs', label: 'Runs' },
     { value: 'scheduler', label: 'Scheduler' },
   ];
   return (

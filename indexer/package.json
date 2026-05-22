@@ -7,7 +7,7 @@
   "bin": {
     "coffeectx-index": "./dist/index.js",
     "coffeectx-setup": "./dist/setup/index.js",
-    "coffeectx-ui":    "./dist/ui/index.js"
+    "coffeectx-ui": "./dist/ui/index.js"
   },
   "files": [
     "dist",
@@ -18,28 +18,29 @@
   ],
   "scripts": {
     "build": "tsc",
-    "bundle": "node scripts/bundle.mjs",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "postinstall": "echo '\n  Run npx coffeectx-setup to configure.\n'",
-    "prepublishOnly": "npm run build && npm run bundle",
+    "prepublishOnly": "npm run build",
     "ui": "node dist/ui/index.js"
   },
   "dependencies": {
     "@coffeectx/core": "^0.1.0",
     "@coffeectx/server": "^0.1.0",
+    "@coffeectx/tools": "^0.1.0",
+    "@earendil-works/pi-coding-agent": "^0.75.4",
+    "@earendil-works/pi-ai": "^0.75.4",
     "@fastify/cors": "^10.0.0",
     "@fastify/static": "^8.0.0",
     "fastify": "^5.0.0",
+    "typebox": "^1.1.38",
     "vscode-jsonrpc": "^8.2.0",
     "vscode-languageserver-protocol": "^3.17.5",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
-    "@qwen-code/sdk": "file:../qwen-code/packages/sdk-typescript",
     "@types/node": "^20.14.0",
-    "esbuild": "^0.25.12",
     "typescript": "^5.4.5"
   },
   "engines": {

@@ -12,6 +12,7 @@ import {
 } from '@coffeectx/core';
 import type { Job, JobContext } from './types.js';
 import { buildJobs } from './registry.js';
+import { withRunLog } from './runLog.js';
 
 export type ProjectInfo = ProjectEntry & { name: string };
 
@@ -89,7 +90,7 @@ export async function runJobInline(
     log,
   };
   try {
-    const result = await job.run(ctx);
+    const result = await withRunLog(project.name, runId, () => job.run(ctx));
     db.endJobRun(runId, 'ok', { message: result.message, metrics: result.metrics });
     return { ok: true, message: result.message };
   } catch (err) {

@@ -1485,6 +1485,25 @@ export class Db implements QueryDb {
   }
 
   /**
+   * Return the N most-recent runs across ALL jobs (newest first).
+   * Used by the UI's Runs tab.
+   */
+  listAllJobRuns(limit = 100): JobRunRow[] {
+    const rows = this.raw
+      .prepare(`SELECT * FROM job_runs ORDER BY id DESC LIMIT ?`)
+      .all(limit) as RawJobRunRow[];
+    return rows.map(toJobRunRow);
+  }
+
+  /** Fetch a single run by id. */
+  getJobRun(runId: number): JobRunRow | null {
+    const row = this.raw
+      .prepare(`SELECT * FROM job_runs WHERE id = ?`)
+      .get(runId) as RawJobRunRow | undefined;
+    return row ? toJobRunRow(row) : null;
+  }
+
+  /**
    * Clear any 'running' status left over from an unclean shutdown. Should be
    * called once at scheduler startup before reconciliation.
    */

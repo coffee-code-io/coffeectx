@@ -1,13 +1,10 @@
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import type { Db, DeepNode, AuthSettings } from '@coffeectx/core';
 import { formatDeepNode } from '@coffeectx/core';
-import { authToQueryOptions } from './auth.js';
-import { runSkillInteractive, PROJECT_ROOT, EPHEMERAL_CONTEXT_BEGIN, EPHEMERAL_CONTEXT_END } from './runSkill.js';
+import { runSkillInteractive, type BatchPayload } from './runSkill.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -39,36 +36,6 @@ function getSymbolValue(node: DeepNode | undefined): string | undefined {
   return node.atom.value;
 }
 
-/**
- * Derive a deterministic Qwen session ID from a log session ID and skill name.
- * Formatted as a UUID so it's compatible with Qwen's session file naming.
- * Using a fixed ID means we can always find the session file without storing it.
- */
-function deriveQwenSessionId(logSessionId: string, skillName: string): string {
-  const hash = createHash('sha256').update(`${logSessionId}:${skillName}`).digest('hex');
-  // Force UUID v4 format required by Qwen's UUID_REGEX:
-  //   xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx
-  //   version nibble = '4' (position 12), variant nibble = '8' (position 16)
-  return [
-    hash.slice(0, 8),
-    hash.slice(8, 12),
-    '4' + hash.slice(13, 16),   // version 4
-    '8' + hash.slice(17, 20),   // variant 10xx
-    hash.slice(20, 32),
-  ].join('-');
-}
-
-/**
- * Check whether a Qwen CLI session file exists on disk for the given session ID.
- * Sessions are stored at: ~/.qwen/projects/<sanitized-cwd>/chats/<sessionId>.jsonl
- * The cwd used is PROJECT_ROOT (same value passed as options.cwd to the CLI).
- */
-function qwenSessionFileExists(sessionId: string): boolean {
-  const sanitized = PROJECT_ROOT.replace(/[^a-zA-Z0-9]/g, '-');
-  const chatsDir = join(homedir(), '.qwen', 'projects', sanitized, 'chats');
-  return existsSync(join(chatsDir, `${sessionId}.jsonl`));
-}
-
 /** Resolve the absolute path of the bundled skills directory. */
 export function skillsDir(): string {
   return join(__dirname, '../../skills');
@@ -89,56 +56,50 @@ export function loadSkillDef(dirName: string): SkillDef | null {
 
 /** Return the directory names of all available skills. */
 export function listAvailableSkills(): string[] {
-  try {
-    return readdirSync(skillsDir());
-  } catch {
-    return [];
-  }
+  try { return readdirSync(skillsDir()); }
+  catch { return []; }
 }
 
-/** Split a sorted event list into batches of batchStep non-thought events. */
-interface Batch {
-  text: string;
+/** Split a sorted event list into batches of `batchStep` non-thought events. */
+interface BuiltBatch {
+  payload: BatchPayload;
   eventIds: string[];
 }
 
-function buildBatches(events: EventSnapshot[], batchStep: number): Batch[] {
-  const batches: Batch[] = [];
-  let currentBatch: EventSnapshot[] = [];
-  let nonThoughtCount = 0;
+function buildBatches(events: EventSnapshot[], batchStep: number): BuiltBatch[] {
+  const batches: BuiltBatch[] = [];
+  let current: EventSnapshot[] = [];
+  let nonThought = 0;
+
+  const flush = (group: EventSnapshot[]) => ({
+    payload: {
+      thoughts: group.filter(e => e.isThought).map(e => e.summary),
+      events: group.filter(e => !e.isThought).map(e => e.summary),
+    },
+    eventIds: group.map(e => e.id),
+  });
 
   for (const event of events) {
-    currentBatch.push(event);
+    current.push(event);
     if (!event.isThought) {
-      nonThoughtCount++;
-      if (nonThoughtCount >= batchStep) {
-        batches.push({ text: flushBatch(currentBatch), eventIds: currentBatch.map(e => e.id) });
-        currentBatch = [];
-        nonThoughtCount = 0;
+      nonThought++;
+      if (nonThought >= batchStep) {
+        batches.push(flush(current));
+        current = [];
+        nonThought = 0;
       }
     }
   }
-  if (currentBatch.length > 0) {
-    batches.push({ text: flushBatch(currentBatch), eventIds: currentBatch.map(e => e.id) });
-  }
+  if (current.length > 0) batches.push(flush(current));
   return batches;
-}
-
-function flushBatch(batch: EventSnapshot[]): string {
-  const thoughts = batch.filter(e => e.isThought).map(e => e.summary);
-  const regular = batch.filter(e => !e.isThought).map(e => e.summary);
-  let text = JSON.stringify(regular, null, 2);
-  if (thoughts.length > 0) {
-    text = `${EPHEMERAL_CONTEXT_BEGIN}\n${JSON.stringify(thoughts, null, 2)}\n${EPHEMERAL_CONTEXT_END}\n\n${text}`;
-  }
-  return text;
 }
 
 // ── Single-skill executor (used by the per-skill scheduler jobs) ─────────────
 
 export interface RunOneSkillOptions {
   db: Db;
-  dbPath: string;
+  /** Active project name (used to namespace persisted pi sessions). */
+  projectName: string;
   /** Directory name of the skill under indexer/skills/. */
   skillDirName: string;
   /** Event IDs already processed in prior runs of this skill. */
@@ -149,7 +110,8 @@ export interface RunOneSkillOptions {
    */
   onBatchProcessed?: (newlyProcessedIds: string[]) => Promise<void> | void;
   batchStep?: number;
-  pathToQwenExecutable?: string;
+  /** Whether the agent is allowed to call the `upsert_entries` tool. */
+  allowInsert?: boolean;
   /** LLM auth for this run (typically from project.jobs[name].parameters.auth). */
   auth?: AuthSettings;
 }
@@ -163,7 +125,6 @@ export interface RunOneSkillResult {
 
 /**
  * Load all new (unprocessed) log events grouped by sessionId, sorted by timestamp.
- * Returns the snapshots plus a type-name lookup for convenience.
  */
 function loadNewEventsGroupedBySession(
   db: Db,
@@ -206,7 +167,7 @@ function loadNewEventsGroupedBySession(
  * callback that persists newly-processed IDs after each batch.
  */
 export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkillResult> {
-  const { db, dbPath, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, pathToQwenExecutable, auth } = opts;
+  const { db, projectName, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, allowInsert, auth } = opts;
   const result: RunOneSkillResult = { batches: 0, sessions: 0, events: 0, errors: [] };
 
   const skill = loadSkillDef(skillDirName);
@@ -214,8 +175,10 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
     result.errors.push({ error: `Skill "${skillDirName}" not found in indexer/skills/` });
     return result;
   }
-
-  const qOpts = authToQueryOptions(auth ?? {});
+  if (!auth) {
+    result.errors.push({ error: `Skill "${skillDirName}" requires parameters.auth (provider + model + apiKey)` });
+    return result;
+  }
 
   const { sessions, total, skipped } = loadNewEventsGroupedBySession(db, processedEventIds);
   if (sessions.size === 0) {
@@ -226,27 +189,23 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
   console.log(`[indexAgent:${skillDirName}] ${sessions.size} sessions with new events (${total} total, ${skipped} processed)`);
 
   for (const [sessionId, sessionEvents] of sessions) {
-    const qwenId = deriveQwenSessionId(sessionId, skill.name);
-    const sessionFileExists = qwenSessionFileExists(qwenId);
     const batches = buildBatches(sessionEvents, batchStep);
-    const resumeLabel = sessionFileExists ? ' [resuming]' : ' [new]';
-    console.log(`  Session ${sessionId} (qwen ${qwenId}${resumeLabel}): ${sessionEvents.length} events → ${batches.length} batches`);
+    console.log(`  Session ${sessionId}: ${sessionEvents.length} events → ${batches.length} batches`);
 
     try {
       await runSkillInteractive({
+        db,
         skillName: skill.name,
         skillPrompt: skill.prompt,
-        eventBatches: batches.map(b => b.text),
-        dbPath,
-        queryOptions: qOpts,
-        pathToQwenExecutable,
+        eventBatches: batches.map(b => b.payload),
+        logSessionId: sessionId,
+        projectName,
+        auth,
+        allowInsert,
         onBatchComplete: async (batchIndex: number) => {
           const batchEventIds = batches[batchIndex]!.eventIds;
           if (onBatchProcessed) await onBatchProcessed(batchEventIds);
         },
-        ...(sessionFileExists
-          ? { resumeSessionId: qwenId }
-          : { newSessionId: qwenId }),
       });
       result.batches += batches.length;
       result.events += sessionEvents.length;
@@ -258,4 +217,3 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
 
   return result;
 }
-

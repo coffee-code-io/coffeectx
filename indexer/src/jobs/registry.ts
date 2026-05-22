@@ -138,15 +138,16 @@ function buildSkillJob(jobName: string, dirName: string, description: string, co
       const batchStep = typeof ctx.parameters['batchStep'] === 'number'
         ? (ctx.parameters['batchStep'] as number)
         : undefined;
+      const allowInsert = ctx.project.mcp?.tools?.insert === true;
 
       const r = await runOneSkill({
         db: ctx.db,
-        dbPath: ctx.dbPath,
+        projectName: ctx.project.name,
         skillDirName: dirName,
         processedEventIds: processed,
         auth,
         batchStep,
-        pathToQwenExecutable: auth.qwenPath,
+        allowInsert,
         onBatchProcessed: async (newlyProcessed) => {
           for (const id of newlyProcessed) processed.add(id);
           // Re-read state to preserve other keys the scheduler may have updated.

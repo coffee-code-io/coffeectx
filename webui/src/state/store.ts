@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { FilterMode } from '../api/client';
 
-export type Tab = 'graph' | 'scheduler';
+export type Tab = 'graph' | 'scheduler' | 'runs';
 export type GraphViewMode = 'graph' | 'list';
 
 interface UiState {

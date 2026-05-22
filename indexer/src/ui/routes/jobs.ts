@@ -10,6 +10,7 @@ import {
   setJobEnabled,
   queueJobTrigger,
 } from '../../jobs/control.js';
+import { readRunLog } from '../../jobs/runLog.js';
 
 const ALIVE_WINDOW_MS = 5_000;
 
@@ -109,4 +110,50 @@ export async function registerJobsRoutes(app: FastifyInstance): Promise<void> {
       return { alive, lastSeenAt: isoUtc, pid: hb.pid };
     },
   );
+
+  // ── Cross-job run history ───────────────────────────────────────────────
+  app.get<{ Params: { p: string }; Querystring: { limit?: string } }>(
+    '/api/p/:p/runs',
+    async (req, reply) => {
+      const cfg = loadConfig();
+      if (!cfg.projects[req.params.p]) {
+        reply.code(404);
+        return { error: `unknown project "${req.params.p}"` };
+      }
+      const limit = clampInt(req.query.limit, 100, 1, 500);
+      const db = getDb(req.params.p, cfg);
+      return db.listAllJobRuns(limit);
+    },
+  );
+
+  app.get<{ Params: { p: string; id: string } }>(
+    '/api/p/:p/runs/:id',
+    async (req, reply) => {
+      const cfg = loadConfig();
+      if (!cfg.projects[req.params.p]) {
+        reply.code(404);
+        return { error: `unknown project "${req.params.p}"` };
+      }
+      const runId = parseInt(req.params.id, 10);
+      if (Number.isNaN(runId)) {
+        reply.code(400);
+        return { error: 'run id must be an integer' };
+      }
+      const db = getDb(req.params.p, cfg);
+      const run = db.getJobRun(runId);
+      if (!run) {
+        reply.code(404);
+        return { error: `run #${runId} not found` };
+      }
+      const log = readRunLog(req.params.p, runId);
+      return { run, log };
+    },
+  );
+}
+
+function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (raw === undefined) return fallback;
+  const n = parseInt(raw, 10);
+  if (Number.isNaN(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
 }

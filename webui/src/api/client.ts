@@ -71,6 +71,23 @@ export interface SchedulerStatus {
   pid: number | null;
 }
 
+export interface JobRunRow {
+  id: number;
+  jobName: string;
+  triggerKind: 'timer' | 'onTypeInsert' | 'manual' | 'startup';
+  startedAt: string;
+  endedAt: string | null;
+  result: 'ok' | 'error' | 'cancelled' | null;
+  message: string | null;
+  error: string | null;
+  metrics: Record<string, number> | null;
+}
+
+export interface RunDetailResponse {
+  run: JobRunRow;
+  log: string | null;
+}
+
 /** "Symbolic" in the UI maps to mode=search server-side (semantic vector search). */
 export type FilterMode = 'query' | 'exact' | 'regex' | 'search';
 
@@ -143,4 +160,10 @@ export const api = {
 
   scheduler: (project: string) =>
     http<SchedulerStatus>(`/api/p/${encodeURIComponent(project)}/scheduler`),
+
+  listRuns: (project: string, limit = 100) =>
+    http<JobRunRow[]>(`/api/p/${encodeURIComponent(project)}/runs?limit=${limit}`),
+
+  getRun: (project: string, runId: number) =>
+    http<RunDetailResponse>(`/api/p/${encodeURIComponent(project)}/runs/${runId}`),
 };
