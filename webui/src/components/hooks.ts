@@ -30,5 +30,8 @@ export function useFilteredNodes() {
   });
 
   const matches = query.data?.results ?? [];
-  return { matches, query, enabled };
+  const total = query.data?.total ?? matches.length;
+  const count = query.data?.count ?? matches.length;
+  const depthForced = query.data?.depthForced ?? false;
+  return { matches, total, count, depthForced, limit: NODE_LIMIT, query, enabled };
 }

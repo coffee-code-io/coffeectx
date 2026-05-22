@@ -6,7 +6,10 @@ import './index.css';
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 1_000, refetchOnWindowFocus: false },
+    // staleTime: data is reused without refetch for 60s. Most server state in
+    // this app (refs, types, node detail) changes only when an indexer job
+    // runs — drilling into a node and backing out should feel instant.
+    queries: { staleTime: 60_000, refetchOnWindowFocus: false },
   },
 });
 

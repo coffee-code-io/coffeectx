@@ -13,10 +13,19 @@ export function NodeDetail() {
   const setSelected = useUi(s => s.setSelected);
   const [tab, setTab] = useState<Tab>('cards');
 
+  // Cards tab uses depth=3 — anything deeper renders as a drill-in chip via
+  // formatDeepNode's `{$id}` placeholders. Keeps DOM small on busy nodes.
   const { data, error, isLoading } = useQuery({
-    queryKey: ['node', project, id],
-    queryFn: () => (project && id ? api.loadNode(project, id, 10) : Promise.resolve(null)),
+    queryKey: ['node', project, id, 'cards'],
+    queryFn: () => (project && id ? api.loadNode(project, id, 3) : Promise.resolve(null)),
     enabled: !!(project && id),
+  });
+
+  // JSON tab fetches a fuller tree, but only when the user actually clicks it.
+  const jsonQuery = useQuery({
+    queryKey: ['node', project, id, 'json'],
+    queryFn: () => (project && id ? api.loadNode(project, id, 12) : Promise.resolve(null)),
+    enabled: !!(project && id) && tab === 'json',
   });
 
   const refs = useQuery({
@@ -61,6 +70,10 @@ export function NodeDetail() {
           <div className="max-w-3xl mx-auto space-y-6">
             {tab === 'cards' ? (
               <Card value={data.node} />
+            ) : jsonQuery.isLoading ? (
+              <div className="text-roast-medium text-sm">loading JSON…</div>
+            ) : jsonQuery.data ? (
+              <JsonView value={jsonQuery.data.node} />
             ) : (
               <JsonView value={data.node} />
             )}
@@ -141,13 +154,19 @@ function NotANodeBanner({ id, message }: { id: string; message: string }) {
   );
 }
 
+const REFS_INITIAL = 20;
+
 function RefsBlock({ title, refs }: { title: string; refs: { id: string; typeName: string }[] }) {
   const setSelected = useUi(s => s.setSelected);
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? refs : refs.slice(0, REFS_INITIAL);
+  const hidden = refs.length - visible.length;
+
   return (
     <div>
       <div className="text-[10px] uppercase tracking-widest text-roast-light mb-1.5">{title}</div>
       <div className="flex flex-wrap gap-1.5">
-        {refs.map(r => (
+        {visible.map(r => (
           <button
             key={r.id}
             onClick={() => setSelected(r.id)}
@@ -157,6 +176,14 @@ function RefsBlock({ title, refs }: { title: string; refs: { id: string; typeNam
             <span className="font-mono text-roast-light">{r.id.slice(0, 6)}</span>
           </button>
         ))}
+        {hidden > 0 && (
+          <button
+            onClick={() => setExpanded(true)}
+            className="inline-flex items-center gap-1 bg-cream-50 border border-roast-medium/30 text-roast-medium hover:bg-cream-200 rounded px-2 py-1 text-xs transition"
+          >
+            Show all ({refs.length})
+          </button>
+        )}
       </div>
     </div>
   );

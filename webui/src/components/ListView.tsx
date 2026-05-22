@@ -1,11 +1,12 @@
 import { useUi } from '../state/store';
 import { useFilteredNodes } from './hooks';
 import type { NodeSummary } from '../api/client';
+import { TruncationBanner } from './TruncationBanner';
 
 export function ListView() {
   const setSelected = useUi(s => s.setSelected);
   const project = useUi(s => s.project);
-  const { matches, query, enabled } = useFilteredNodes();
+  const { matches, total, count, depthForced, limit, query, enabled } = useFilteredNodes();
 
   if (!project) return <Placeholder>Pick a project to begin.</Placeholder>;
   if (!enabled) return <Placeholder>Set a query or pick types on the left.</Placeholder>;
@@ -14,11 +15,14 @@ export function ListView() {
   if (matches.length === 0) return <Placeholder>No matches.</Placeholder>;
 
   return (
-    <ul className="h-full overflow-y-auto p-4 space-y-2">
-      {matches.map(m => (
-        <ListItem key={m.id} item={m} onClick={() => setSelected(m.id)} />
-      ))}
-    </ul>
+    <div className="h-full flex flex-col">
+      <TruncationBanner total={total} count={count} limit={limit} depthForced={depthForced} />
+      <ul className="flex-1 overflow-y-auto p-4 space-y-2">
+        {matches.map(m => (
+          <ListItem key={m.id} item={m} onClick={() => setSelected(m.id)} />
+        ))}
+      </ul>
+    </div>
   );
 }
 

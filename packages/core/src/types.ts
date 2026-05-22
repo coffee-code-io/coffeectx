@@ -78,7 +78,7 @@ export interface StoredType {
 export type DeepNode =
   | { kind: 'atom'; atom: Atom }
   | { kind: 'list'; items: DeepNode[] }
-  | { kind: 'map'; entries: Record<Sym, DeepNode>; type: Type; typeName?: string }
+  | { kind: 'map'; id?: string; entries: Record<Sym, DeepNode>; type: Type; typeName?: string }
   | { kind: 'ref'; id: string }
   | { kind: 'cycle'; id: string };
 

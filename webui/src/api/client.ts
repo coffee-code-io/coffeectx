@@ -30,7 +30,11 @@ export interface NodesResponse {
   count: number;
   offset: number;
   results: NodeSummary[];
+  /** True if the server forced depth=0 because the request had no `q` filter. */
+  depthForced?: boolean;
 }
+
+export type RefsBatchResponse = Record<string, RefsResponse>;
 
 export interface NodeDetailResponse {
   id: string;
@@ -141,6 +145,13 @@ export const api = {
 
   loadRefs: (project: string, id: string) =>
     http<RefsResponse>(`/api/p/${encodeURIComponent(project)}/nodes/${encodeURIComponent(id)}/refs`),
+
+  loadRefsBatch: (project: string, ids: string[]) =>
+    http<RefsBatchResponse>(`/api/p/${encodeURIComponent(project)}/refs/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    }),
 
   listJobs: (project: string) =>
     http<JobRow[]>(`/api/p/${encodeURIComponent(project)}/jobs`),

@@ -1,13 +1,20 @@
 /**
  * Recursive renderer for the JSON shape that `formatDeepNode` produces.
  *
- *   - object with $type     → nested card
- *   - object with $id       → clickable ref chip
+ *   - object with $type     → nested card (drilled into) OR ref chip when over budget
+ *   - object with $id only  → clickable ref chip (truncated subtree from depth-limited fetch)
  *   - plain object          → rows
  *   - array                 → numbered list
  *   - string matching UUID  → clickable ref chip
  *   - markdown-like string  → rendered via react-markdown
  *   - short string          → plain text
+ *
+ * Performance budget:
+ *  - At most CARD_BFS_CAP (30) named-type cards are rendered per Card<root>.
+ *  - Named-type cards beyond CARD_DEPTH_CAP (2) hops from the root render as
+ *    drill-in chips, regardless of remaining cap.
+ *  - Plain-map / list / atom rendering is uncapped — only named-type expansion
+ *    consumes the budget.
  */
 
 import ReactMarkdown from 'react-markdown';
@@ -16,16 +23,32 @@ import { useUi } from '../state/store';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const CARD_BFS_CAP = 30;
+const CARD_DEPTH_CAP = 2;
+
+interface CardBudget {
+  /** How many named-type cards have already been rendered in this Card tree. */
+  rendered: number;
+}
+
 interface Props {
   value: unknown;
   depth?: number;
 }
 
 export function Card({ value, depth = 0 }: Props) {
-  return <ValueView value={value} depth={depth} />;
+  // Single mutable budget object shared across the recursion.
+  const budget: CardBudget = { rendered: 0 };
+  return <ValueView value={value} depth={depth} budget={budget} />;
 }
 
-function ValueView({ value, depth }: { value: unknown; depth: number }) {
+interface ValueProps {
+  value: unknown;
+  depth: number;
+  budget: CardBudget;
+}
+
+function ValueView({ value, depth, budget }: ValueProps) {
   if (value == null) return <span className="text-roast-light italic">∅</span>;
 
   if (typeof value === 'string') return <StringView text={value} />;
@@ -40,7 +63,7 @@ function ValueView({ value, depth }: { value: unknown; depth: number }) {
       <ol className="list-decimal list-inside space-y-1 marker:text-roast-light">
         {value.map((item, i) => (
           <li key={i} className="text-roast-dark">
-            <ValueView value={item} depth={depth + 1} />
+            <ValueView value={item} depth={depth} budget={budget} />
           </li>
         ))}
       </ol>
@@ -49,25 +72,41 @@ function ValueView({ value, depth }: { value: unknown; depth: number }) {
 
   if (typeof value === 'object') {
     const obj = value as Record<string, unknown>;
-    if (typeof obj.$id === 'string') return <RefChip id={obj.$id} kind="node" />;
-    if (typeof obj.$type === 'string') return <TypedCard obj={obj} depth={depth} />;
-    return <ObjectRows obj={obj} depth={depth} />;
+    const hasType = typeof obj.$type === 'string';
+    const hasId = typeof obj.$id === 'string';
+
+    if (hasType) {
+      const overDepth = depth >= CARD_DEPTH_CAP;
+      const overBudget = budget.rendered >= CARD_BFS_CAP;
+      // Demote to a drill-in chip if we're past depth or out of budget AND
+      // we have a $id to chip on. Otherwise expand inline.
+      if ((overDepth || overBudget) && hasId) {
+        return <RefChip id={obj.$id as string} kind="node" typeName={obj.$type as string} />;
+      }
+      budget.rendered += 1;
+      return <TypedCard obj={obj} depth={depth} budget={budget} />;
+    }
+
+    if (hasId) return <RefChip id={obj.$id as string} kind="node" />;
+    return <ObjectRows obj={obj} depth={depth} budget={budget} />;
   }
 
   return <span>{String(value)}</span>;
 }
 
-function TypedCard({ obj, depth }: { obj: Record<string, unknown>; depth: number }) {
-  const { $type, ...rest } = obj;
+function TypedCard({ obj, depth, budget }: { obj: Record<string, unknown>; depth: number; budget: CardBudget }) {
+  // Strip the metadata keys so they don't render as data rows.
+  const { $type, $id: _id, ...rest } = obj;
+  void _id;
   return (
     <div className="bg-cream-100 border border-cream-200 rounded-lg p-3 space-y-2 animate-fade-up">
       <div className="text-[10px] uppercase tracking-widest text-roast-light">{String($type)}</div>
-      <ObjectRows obj={rest} depth={depth + 1} />
+      <ObjectRows obj={rest} depth={depth + 1} budget={budget} />
     </div>
   );
 }
 
-function ObjectRows({ obj, depth }: { obj: Record<string, unknown>; depth: number }) {
+function ObjectRows({ obj, depth, budget }: { obj: Record<string, unknown>; depth: number; budget: CardBudget }) {
   const keys = Object.keys(obj);
   if (keys.length === 0) return <span className="text-roast-light italic">{}</span>;
   return (
@@ -76,7 +115,7 @@ function ObjectRows({ obj, depth }: { obj: Record<string, unknown>; depth: numbe
         <div key={k} className="flex flex-col gap-1">
           <div className="text-[11px] text-roast-light font-mono">{k}</div>
           <div className="pl-2 border-l-2 border-cream-200">
-            <ValueView value={obj[k]} depth={depth} />
+            <ValueView value={obj[k]} depth={depth} budget={budget} />
           </div>
         </div>
       ))}
@@ -84,7 +123,7 @@ function ObjectRows({ obj, depth }: { obj: Record<string, unknown>; depth: numbe
   );
 }
 
-function RefChip({ id, kind }: { id: string; kind: 'node' | 'uuid' }) {
+function RefChip({ id, kind, typeName }: { id: string; kind: 'node' | 'uuid'; typeName?: string }) {
   const setSelected = useUi(s => s.setSelected);
   const isNode = kind === 'node';
   return (
@@ -98,7 +137,8 @@ function RefChip({ id, kind }: { id: string; kind: 'node' | 'uuid' }) {
       }
       title={isNode ? id : `${id} — may be an external UUID; click to inspect`}
     >
-      {isNode ? '→' : '⋯'} {id.slice(0, 8)}
+      {isNode ? '→' : '⋯'} {typeName ? <span className="text-roast-light">{typeName}</span> : null}{' '}
+      {id.slice(0, 8)}
     </button>
   );
 }

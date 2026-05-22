@@ -130,7 +130,13 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
     const mode = (req.query.mode ?? 'query') as SearchMode;
     const q = req.query.q?.trim() || undefined;
     const types = (req.query.types ?? '').split(',').map(s => s.trim()).filter(Boolean);
-    const depth = clampInt(req.query.depth, 0, 0, 5);
+    const requestedDepth = clampInt(req.query.depth, 0, 0, 5);
+    // BFS expansion from a seed-set has no upper bound unless the seed-set
+    // itself is small. We can only assume that when the user provides a query
+    // (text / search / regex / exact). With just type filters, the seed-set is
+    // every node of that type — depth>0 would fan out unboundedly.
+    const depthForced = !q && requestedDepth > 0;
+    const depth = depthForced ? 0 : requestedDepth;
     const limit = clampInt(req.query.limit, 50, 1, 500);
     const offset = clampInt(req.query.offset, 0, 0, 10_000);
     const includeHidden = req.query.includeHidden === 'true' || req.query.includeHidden === '1';
@@ -192,7 +198,7 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
     // ── Depth expansion via outgoing refs ───────────────────────────────────
     const all = expandByDepth(db, seeds, depth, includeHidden);
     const page = all.slice(offset, offset + limit);
-    return { total: all.length, count: page.length, offset, results: page };
+    return { total: all.length, count: page.length, offset, results: page, depthForced };
   });
 
   // ── Single node detail ────────────────────────────────────────────────────
@@ -231,6 +237,33 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
       const incoming = db.findReferencingNamedNodes(req.params.id, 100);
       const outgoing = db.collectOutgoingNamedRefs(req.params.id, 10);
       return { in: incoming, out: outgoing };
+    },
+  );
+
+  // ── Batch refs — GraphView wants edges for N matches in one round-trip ────
+  // Body: { ids: string[] }
+  // Returns: Record<nodeId, { in: NodeRef[]; out: NodeRef[] }>
+  // The per-node caps mirror /nodes/:id/refs (100 in / 10 out).
+  app.post<{ Params: { p: string }; Body: { ids?: unknown } }>(
+    '/api/p/:p/refs/batch',
+    async (req, reply) => {
+      let db: Db;
+      try { db = getDb(req.params.p); }
+      catch (err) { reply.code(404); return { error: (err as Error).message }; }
+
+      const rawIds = Array.isArray(req.body?.ids) ? req.body!.ids : [];
+      const ids = (rawIds as unknown[])
+        .filter((x): x is string => typeof x === 'string')
+        .slice(0, 500); // hard cap on batch size
+
+      const out: Record<string, { in: { id: string; typeName: string }[]; out: { id: string; typeName: string }[] }> = {};
+      for (const id of ids) {
+        out[id] = {
+          in: db.findReferencingNamedNodes(id, 100),
+          out: db.collectOutgoingNamedRefs(id, 10),
+        };
+      }
+      return out;
     },
   );
 }

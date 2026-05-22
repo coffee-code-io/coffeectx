@@ -153,6 +153,24 @@ export class Db implements QueryDb {
       this.raw.pragma('foreign_keys = ON');
     }
 
+    // One-time purge of empty-meaning rows from the vector index. Earlier
+    // versions of insertNode/buildEntryNode wrote a zero vector for every
+    // MeaningType field, even when the text was empty — those rows pollute
+    // search results since they all sit at the same arbitrary distance.
+    try {
+      const info = this.raw.prepare(`
+        DELETE FROM meaning_vecs WHERE node_id IN (
+          SELECT id FROM nodes WHERE kind='meaning'
+            AND (meaning_text IS NULL OR meaning_text='' OR TRIM(meaning_text)='')
+        )
+      `).run();
+      if (info.changes > 0) {
+        log(`db.migrate: purged ${info.changes} empty-meaning vec rows`);
+      }
+    } catch (err) {
+      log(`db.migrate: empty-meaning purge failed: ${(err as Error).message}`);
+    }
+
     // Backfill node_refs once if the table is empty but named-type nodes exist.
     try {
       const hasRefs = this.raw.prepare(`SELECT 1 AS x FROM node_refs LIMIT 1`).get();
@@ -547,13 +565,18 @@ export class Db implements QueryDb {
     }
 
     if (atom.kind === 'meaning') {
+      const text = atom.value.text;
       this.raw
         .prepare(`INSERT INTO nodes(id, kind, meaning_text) VALUES(?,?,?)`)
-        .run(id, 'meaning', atom.value.text);
-      const vec = embeds.get(atom.value.text) ?? new Float32Array(this.dims);
-      this.raw
-        .prepare(`INSERT INTO meaning_vecs(node_id, embedding) VALUES(?,?)`)
-        .run(id, vec);
+        .run(id, 'meaning', text);
+      // Skip embedding for empty meanings — they have no semantic content and
+      // would pollute vector-search results with arbitrarily-ranked zero rows.
+      const vec = embeds.get(text);
+      if (vec) {
+        this.raw
+          .prepare(`INSERT INTO meaning_vecs(node_id, embedding) VALUES(?,?)`)
+          .run(id, vec);
+      }
       return id;
     }
 
@@ -884,8 +907,11 @@ export class Db implements QueryDb {
         throw new Error(`${path}: expected string for MeaningType, got ${typeof value}`);
       const id = uuidv4();
       this.raw.prepare(`INSERT INTO nodes(id, kind, meaning_text) VALUES(?,?,?)`).run(id, 'meaning', value);
-      const vec = embedMap.get(value) ?? new Float32Array(this.dims);
-      this.raw.prepare(`INSERT INTO meaning_vecs(node_id, embedding) VALUES(?,?)`).run(id, vec);
+      // Skip embedding for empty meanings — see insertNode's atom='meaning' branch.
+      const vec = embedMap.get(value);
+      if (vec) {
+        this.raw.prepare(`INSERT INTO meaning_vecs(node_id, embedding) VALUES(?,?)`).run(id, vec);
+      }
       return id;
     }
 
@@ -1032,7 +1058,7 @@ export class Db implements QueryDb {
       for (const { key, value_id } of entries) {
         result[key] = this.loadNodeDeep(value_id, depth - 1, childAncestors);
       }
-      return { kind: 'map', entries: result, type, typeName: namedRow?.name };
+      return { kind: 'map', id, entries: result, type, typeName: namedRow?.name };
     }
 
     throw new Error(`Unknown node kind: ${row.kind}`);
@@ -1255,17 +1281,29 @@ export class Db implements QueryDb {
 
   async searchByText(query: string, limit = 10, offset = 0): Promise<SearchResult[]> {
     const vec = await this.embed(query);
+    // Over-fetch so we can drop empty-meaning rows (legacy data) without
+    // shrinking the page below the caller's requested limit.
+    const fetchK = (limit + offset) * 2;
     const rows = this.raw
       .prepare(
         `SELECT node_id, distance FROM meaning_vecs
          WHERE embedding MATCH ? AND k=? ORDER BY distance`,
       )
-      .all(vec, limit + offset) as { node_id: string; distance: number }[];
-    return rows.slice(offset).map(r => ({
-      nodeId: r.node_id,
-      node: this.loadNode(r.node_id),
-      distance: r.distance,
-    }));
+      .all(vec, fetchK) as { node_id: string; distance: number }[];
+
+    const out: SearchResult[] = [];
+    for (const r of rows) {
+      const node = this.loadNode(r.node_id);
+      if (
+        node.kind === 'atom' &&
+        node.atom.kind === 'meaning' &&
+        (!node.atom.value.text || node.atom.value.text.trim() === '')
+      ) {
+        continue;
+      }
+      out.push({ nodeId: r.node_id, node, distance: r.distance });
+    }
+    return out.slice(offset, offset + limit);
   }
 
   listByKind(kind: StoredNode['kind'], limit = 100, offset = 0): Node[] {

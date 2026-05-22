@@ -24,7 +24,13 @@ export function formatDeepNode(node: DeepNode): unknown {
 
     case 'map': {
       const out: Record<string, unknown> = {};
-      if (node.typeName) out['$type'] = node.typeName;
+      // For named-type maps, surface both `$type` and `$id` so the UI can
+      // either render the map inline as a card OR demote it to a drill-in
+      // chip depending on its render-time depth/fan-out budget.
+      if (node.typeName) {
+        out['$type'] = node.typeName;
+        if (node.id) out['$id'] = node.id;
+      }
       for (const [key, child] of Object.entries(node.entries)) {
         const v = formatDeepNode(child);
         if (isEmpty(v)) continue;

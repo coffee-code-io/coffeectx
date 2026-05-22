@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { useQueries } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   ReactFlow,
   Background,
@@ -18,9 +18,10 @@ import {
   type SimulationNodeDatum,
   type SimulationLinkDatum,
 } from 'd3-force';
-import { api, type NodeSummary, type RefsResponse } from '../api/client';
+import { api, type NodeSummary, type RefsBatchResponse, type RefsResponse } from '../api/client';
 import { useUi } from '../state/store';
 import { useFilteredNodes } from './hooks';
+import { TruncationBanner } from './TruncationBanner';
 
 const COLOR_BY_TYPE: Record<string, string> = {
   // Coffee-palette node colors per common type. Anything not listed gets the
@@ -57,25 +58,29 @@ export function GraphView() {
   const setSelected = useUi(s => s.setSelected);
   const selectedNodeId = useUi(s => s.selectedNodeId);
 
-  const { matches, query } = useFilteredNodes();
+  const { matches, total, count, depthForced, limit, query } = useFilteredNodes();
 
-  // Fan-out: fetch outgoing refs per matched node to derive edges within the set.
-  const refQueries = useQueries({
-    queries: matches.map(m => ({
-      queryKey: ['refs', project, m.id],
-      queryFn: () => (project ? api.loadRefs(project, m.id) : Promise.resolve(null)),
-      enabled: !!project,
-    })),
+  // Single batched fetch for every matched node's refs. Cache key is the
+  // sorted id list so the same match set hits the cache regardless of ordering.
+  const matchIds = useMemo(() => matches.map(m => m.id), [matches]);
+  const sortedIdsKey = useMemo(() => [...matchIds].sort().join(','), [matchIds]);
+
+  const refsBatch = useQuery({
+    queryKey: ['refs-batch', project, sortedIdsKey],
+    queryFn: () =>
+      project && matchIds.length > 0
+        ? api.loadRefsBatch(project, matchIds)
+        : Promise.resolve({} as RefsBatchResponse),
+    enabled: !!project && matchIds.length > 0,
   });
 
   const refMap = useMemo(() => {
     const m = new Map<string, RefsResponse>();
-    refQueries.forEach((q, i) => {
-      const id = matches[i]?.id;
-      if (id && q.data) m.set(id, q.data);
-    });
+    if (refsBatch.data) {
+      for (const [id, refs] of Object.entries(refsBatch.data)) m.set(id, refs);
+    }
     return m;
-  }, [refQueries, matches]);
+  }, [refsBatch.data]);
 
   const { nodes, edges } = useGraph(matches, refMap, selectedNodeId);
 
@@ -87,23 +92,26 @@ export function GraphView() {
   if (matches.length === 0) return <Placeholder>No matches. Adjust the filter on the left.</Placeholder>;
 
   return (
-    <div className="h-full w-full">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodeClick={onNodeClick}
-        fitView
-        minZoom={0.1}
-        maxZoom={2}
-        proOptions={{ hideAttribution: true }}
-        nodesDraggable
-        nodesConnectable={false}
-        edgesFocusable={false}
-      >
-        <Background color="#E3D5CA" gap={20} />
-        <Controls />
-        <MiniMap pannable zoomable maskColor="rgba(253,248,245,0.7)" />
-      </ReactFlow>
+    <div className="h-full w-full flex flex-col">
+      <TruncationBanner total={total} count={count} limit={limit} depthForced={depthForced} />
+      <div className="flex-1 min-h-0">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodeClick={onNodeClick}
+          fitView
+          minZoom={0.1}
+          maxZoom={2}
+          proOptions={{ hideAttribution: true }}
+          nodesDraggable
+          nodesConnectable={false}
+          edgesFocusable={false}
+        >
+          <Background color="#E3D5CA" gap={20} />
+          <Controls />
+          <MiniMap pannable zoomable maskColor="rgba(253,248,245,0.7)" />
+        </ReactFlow>
+      </div>
     </div>
   );
 }

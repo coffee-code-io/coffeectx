@@ -167,21 +167,30 @@ export function FilterRail() {
         </ul>
       </div>
 
-      {/* Depth */}
+      {/* Depth — only meaningful when there's a query to seed expansion from. */}
       <div>
-        <Label>Depth (neighbors): <span className="text-roast-dark">{filter.depth}</span></Label>
+        <Label>
+          Depth (neighbors): <span className="text-roast-dark">{filter.q.trim() ? filter.depth : 0}</span>
+        </Label>
         <input
           type="range"
           min={0}
           max={3}
           step={1}
-          value={filter.depth}
+          value={filter.q.trim() ? filter.depth : 0}
           onChange={e => setFilter({ depth: parseInt(e.target.value, 10) })}
-          className="w-full accent-roast-dark"
+          disabled={!filter.q.trim()}
+          title={filter.q.trim() ? '' : 'Enter a query to enable depth expansion'}
+          className="w-full accent-roast-dark disabled:opacity-40 disabled:cursor-not-allowed"
         />
         <div className="flex justify-between text-[10px] text-roast-light">
           <span>0</span><span>1</span><span>2</span><span>3</span>
         </div>
+        {!filter.q.trim() && (
+          <p className="mt-1 text-[10px] text-roast-light leading-tight">
+            Enter a query to expand by neighbors.
+          </p>
+        )}
       </div>
 
       {/* Show hidden */}
