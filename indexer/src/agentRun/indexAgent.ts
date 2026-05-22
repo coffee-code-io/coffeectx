@@ -8,11 +8,13 @@ import { runSkillInteractive, type BatchPayload } from './runSkill.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/** Named types that represent indexable log events. */
-const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentThought'];
-
-/** AgentThought entries enrich context but don't count toward batch size. */
-const THOUGHT_ONLY_TYPE = 'AgentThought';
+/**
+ * Named types that represent indexable agent-log events. Each row is a
+ * candidate batch item for skill jobs. AgentSummary is one-per-session and
+ * carries the ai-title — included so skills can attach the title to the
+ * session context.
+ */
+const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentMessage', 'AgentSummary'];
 
 interface SkillDef {
   name: string;
@@ -22,7 +24,6 @@ interface SkillDef {
 
 interface EventSnapshot {
   id: string;
-  isThought: boolean;
   timestamp: string;
   sessionId: string;
   typeName: string;
@@ -60,7 +61,7 @@ export function listAvailableSkills(): string[] {
   catch { return []; }
 }
 
-/** Split a sorted event list into batches of `batchStep` non-thought events. */
+/** Split a sorted event list into batches of `batchStep` events. */
 interface BuiltBatch {
   payload: BatchPayload;
   eventIds: string[];
@@ -68,29 +69,13 @@ interface BuiltBatch {
 
 function buildBatches(events: EventSnapshot[], batchStep: number): BuiltBatch[] {
   const batches: BuiltBatch[] = [];
-  let current: EventSnapshot[] = [];
-  let nonThought = 0;
-
-  const flush = (group: EventSnapshot[]) => ({
-    payload: {
-      thoughts: group.filter(e => e.isThought).map(e => e.summary),
-      events: group.filter(e => !e.isThought).map(e => e.summary),
-    },
-    eventIds: group.map(e => e.id),
-  });
-
-  for (const event of events) {
-    current.push(event);
-    if (!event.isThought) {
-      nonThought++;
-      if (nonThought >= batchStep) {
-        batches.push(flush(current));
-        current = [];
-        nonThought = 0;
-      }
-    }
+  for (let i = 0; i < events.length; i += batchStep) {
+    const group = events.slice(i, i + batchStep);
+    batches.push({
+      payload: { events: group.map(e => e.summary) },
+      eventIds: group.map(e => e.id),
+    });
   }
-  if (current.length > 0) batches.push(flush(current));
   return batches;
 }
 
@@ -144,9 +129,10 @@ function loadNewEventsGroupedBySession(
       const sessionId = getSymbolValue(node.entries['sessionId']);
       if (!sessionId) continue;
 
+      // AgentSummary has no timestamp; use empty string so it sorts first
+      // within the session (it's a session-level header).
       const timestamp = getSymbolValue(node.entries['timestamp']) ?? '';
-      const isThought = typeName === THOUGHT_ONLY_TYPE;
-      const snap: EventSnapshot = { id, isThought, timestamp, sessionId, typeName, summary: formatDeepNode(node) };
+      const snap: EventSnapshot = { id, timestamp, sessionId, typeName, summary: formatDeepNode(node) };
       if (!sessions.has(sessionId)) sessions.set(sessionId, []);
       sessions.get(sessionId)!.push(snap);
     } catch {
@@ -162,9 +148,7 @@ function loadNewEventsGroupedBySession(
 }
 
 /**
- * Execute one skill across all sessions with unprocessed events. The scheduler
- * passes the skill's own processed-event set (from `jobs.state_json`) and a
- * callback that persists newly-processed IDs after each batch.
+ * Execute one skill across all sessions with unprocessed events.
  */
 export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkillResult> {
   const { db, projectName, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, allowInsert, auth } = opts;
@@ -198,7 +182,7 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
         skillName: skill.name,
         skillPrompt: skill.prompt,
         eventBatches: batches.map(b => b.payload),
-        logSessionId: sessionId,
+        sourceId: sessionId,
         projectName,
         auth,
         allowInsert,

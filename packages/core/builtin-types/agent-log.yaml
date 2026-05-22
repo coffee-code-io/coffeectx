@@ -72,14 +72,32 @@ types:
         kind: List
         item: AnyLspSymbol
 
-  AgentThought:
-    description: An internal reasoning/thinking block from the coding agent — captured as a separate entry so it enriches the current indexing batch without polluting later context.
+  AgentMessage:
+    description: A plain-text reply from the coding agent to the user — status updates, explanations, summaries of what was done. Replaces AgentThought (modern LLM providers no longer expose chain-of-thought, so the user-facing message is now the primary signal of agent intent).
     hidden: true
     kind: Map
     fields:
       sessionId: Symbol
-      uuid: Symbol         # same UUID as the message that contained this thinking block
+      uuid: Symbol
       timestamp: Symbol
-      text: Meaning        # full thinking block content
-      linkedTo: Symbol?    # UUID of the next event (FileOperation/ShellExecution/AgentQuestion) this thought immediately preceded
+      text: Meaning        # the assistant message body (markdown)
+      comment: Meaning?    # optional analyst annotation
       agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
+      relatedSymbols:      # LSP symbol nodes mentioned in the message — populated during LSP indexing
+        kind: List
+        item: AnyLspSymbol
+
+  AgentSummary:
+    description: A wrap-up message the agent emits at the end of a turn — explains what was done after tool calls completed. Distinct from in-progress narration (AgentMessage) which lives in assistant turns that ALSO contain tool calls; AgentSummary turns contain only text.
+    hidden: true
+    kind: Map
+    fields:
+      sessionId: Symbol
+      uuid: Symbol
+      timestamp: Symbol
+      text: Meaning        # the wrap-up text body (markdown)
+      comment: Meaning?    # optional analyst annotation
+      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
+      relatedSymbols:      # LSP symbol nodes mentioned in the summary — populated during LSP indexing
+        kind: List
+        item: AnyLspSymbol

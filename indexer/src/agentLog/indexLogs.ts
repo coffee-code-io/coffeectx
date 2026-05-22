@@ -102,11 +102,18 @@ async function indexSingleFile(db: Db, filePath: string, result: IndexLogsResult
     });
   }
 
-  // Event entries — skip if a node with the same uuid already exists
+  // Event entries — skip if a node with the same uuid already exists.
+  // Note: AgentMessage and AgentSummary share their parent assistant message's
+  // uuid, so a turn that emits both kinds will only land one entry — that's
+  // by design: each assistant turn is either narration (work-in-progress) or
+  // summary (work-done), never both at once.
   for (const event of enriched) {
     if (existingUuids.has(event.uuid)) continue;
     const entry = eventToInsertEntry(event);
-    if (entry) entries.push(entry);
+    if (entry) {
+      entries.push(entry);
+      existingUuids.add(event.uuid);
+    }
   }
 
   if (entries.length === 0) return;
@@ -178,15 +185,27 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
         },
       };
 
-    case 'agent_thought':
+    case 'agent_message':
       return {
-        type: 'AgentThought',
+        type: 'AgentMessage',
         data: {
           sessionId: event.sessionId,
           uuid: event.uuid,
           timestamp: event.timestamp,
           text: event.text ?? '',
-          ...(event.linkedTo ? { linkedTo: event.linkedTo } : {}),
+          relatedSymbols: [],
+        },
+      };
+
+    case 'agent_summary':
+      return {
+        type: 'AgentSummary',
+        data: {
+          sessionId: event.sessionId,
+          uuid: event.uuid,
+          timestamp: event.timestamp,
+          text: event.text ?? '',
+          relatedSymbols: [],
         },
       };
 
@@ -195,7 +214,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
   }
 }
 
-const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentThought'];
+const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentMessage', 'AgentSummary'];
 
 /** Load all existing event UUIDs from the DB in one pass. */
 function loadExistingUuids(db: Db): Set<string> {

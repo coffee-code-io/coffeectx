@@ -12,7 +12,7 @@
  *                      timer. Reads `parameters.{auth, batchStep?, intervalMs?}`.
  */
 
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { Db, CoffeectxConfig, AuthSettings } from '@coffeectx/core';
 import type { Job, JobTrigger } from './types.js';
@@ -20,14 +20,24 @@ import { indexWithLsp } from '../lsp/indexSymbols.js';
 import { indexLogs } from '../agentLog/indexLogs.js';
 import { runOneSkill, listAvailableSkills, loadSkillDef } from '../agentRun/indexAgent.js';
 import { loadFileHashes } from '../fileHashes.js';
+import { indexPlans } from '../plans/indexPlans.js';
 
 const DEFAULT_LSP_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_LOGS_INTERVAL_MS = 30_000;
+const DEFAULT_PLANS_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_SKILL_FALLBACK_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
+const DEFAULT_PLANS_DIR = join(homedir(), '.claude', 'plans');
 
-/** Event types whose insertion should trigger agent skill jobs. */
-const SKILL_TRIGGER_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion'];
+/**
+ * Event types whose insertion should trigger agent skill jobs.
+ * AgentMessage replaces AgentThought as the primary signal of agent intent;
+ * Plan inserts are also interesting (a new plan was authored).
+ */
+const SKILL_TRIGGER_TYPES = [
+  'UserInput', 'FileOperation', 'ShellExecution',
+  'AgentQuestion', 'AgentMessage', 'Plan',
+];
 
 interface SkillJobState {
   processedEventIds?: string[];
@@ -120,6 +130,28 @@ function buildLogsJob(config: CoffeectxConfig, projectName: string): Job {
   };
 }
 
+function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, 'plans');
+  return {
+    name: 'plans',
+    description: 'Ingest Claude plan-mode markdown files from ~/.claude/plans/.',
+    defaultEnabled: true,
+    triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_PLANS_INTERVAL_MS) }],
+    async run(ctx) {
+      const plansDir = readString(ctx.parameters, 'plansDir') ?? DEFAULT_PLANS_DIR;
+      const r = await indexPlans(ctx.db, { plansDir: resolve(plansDir) });
+      if (r.errors.length > 0) {
+        const first = r.errors[0]!;
+        throw new Error(`${r.errors.length} plan error(s); first: ${first.path}: ${first.error}`);
+      }
+      return {
+        message: `${r.scanned} scanned, ${r.inserted} new, ${r.patched} patched, ${r.skipped} unchanged`,
+        metrics: { scanned: r.scanned, inserted: r.inserted, patched: r.patched, skipped: r.skipped },
+      };
+    },
+  };
+}
+
 function buildSkillJob(jobName: string, dirName: string, description: string, config: CoffeectxConfig, projectName: string): Job {
   const params = projectJobParams(config, projectName, jobName);
   const triggers: JobTrigger[] = [
@@ -138,7 +170,11 @@ function buildSkillJob(jobName: string, dirName: string, description: string, co
       const batchStep = typeof ctx.parameters['batchStep'] === 'number'
         ? (ctx.parameters['batchStep'] as number)
         : undefined;
-      const allowInsert = ctx.project.mcp?.tools?.insert === true;
+      // Skill jobs are how the indexer writes structured knowledge — the agent
+      // MUST be able to call upsert_entries. The project's mcp.tools.insert
+      // flag only gates the *external* MCP server's exposure of the tool to
+      // Claude Desktop & friends; the in-process skill agent is unrelated.
+      const allowInsert = true;
 
       const r = await runOneSkill({
         db: ctx.db,
@@ -180,6 +216,7 @@ export function buildJobs(_db: Db, config: CoffeectxConfig, projectName: string)
   }
 
   jobs.push(buildLogsJob(config, projectName));
+  jobs.push(buildPlansJob(config, projectName));
 
   for (const dirName of listAvailableSkills()) {
     const def = loadSkillDef(dirName);

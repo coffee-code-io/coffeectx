@@ -24,8 +24,9 @@ export interface RawLogMessage {
 
 /**
  * Stream-parse a Claude Code JSONL session log.
- * Only returns "user" and "assistant" type entries; skips queue-operation,
- * file-history-snapshot, and any other internal bookkeeping entries.
+ * Returns the structured "user"/"assistant" entries. All other line types
+ * (queue-operation, file-history-snapshot, attachment, ai-title, last-prompt …)
+ * are skipped as internal bookkeeping.
  */
 export async function readLogFile(path: string): Promise<RawLogMessage[]> {
   const rl = createInterface({
@@ -41,7 +42,7 @@ export async function readLogFile(path: string): Promise<RawLogMessage[]> {
     try {
       obj = JSON.parse(trimmed) as Record<string, unknown>;
     } catch {
-      continue; // skip malformed lines
+      continue;
     }
     if (obj.type === 'user' || obj.type === 'assistant') {
       messages.push(obj as unknown as RawLogMessage);
