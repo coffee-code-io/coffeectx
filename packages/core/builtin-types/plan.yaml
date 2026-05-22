@@ -11,3 +11,9 @@ types:
       content: Meaning     # full markdown body
       comment: Meaning?    # optional analyst annotation
       agentIndexed: Symbol?  # ISO timestamp when this plan was processed by the agent indexer
+      relatedFiles:        # File nodes whose path appears in the plan content (markdown links / fenced refs)
+        kind: List
+        item: File
+      relatedSymbols:      # LSP symbol nodes whose name appears in fenced inline code in the plan
+        kind: List
+        item: AnyLspSymbol

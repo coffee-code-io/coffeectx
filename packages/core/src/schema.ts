@@ -133,6 +133,19 @@ CREATE TABLE IF NOT EXISTS job_runs (
   metrics_json TEXT
 );
 
+-- Materialized edge index between named-type nodes.
+-- Populated by insertEntries / rebuildNodeRefs; read by findReferencingNamedNodes
+-- and collectOutgoingNamedRefs to power the graph view and detail-page "refs".
+-- One row per (src, dst, field_path); src/dst are both named-type node IDs.
+CREATE TABLE IF NOT EXISTS node_refs (
+  src_id     TEXT NOT NULL,
+  dst_id     TEXT NOT NULL,
+  field_path TEXT NOT NULL,
+  src_type   TEXT NOT NULL,
+  dst_type   TEXT NOT NULL,
+  PRIMARY KEY (src_id, dst_id, field_path)
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_nodes_kind         ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_list_items_list    ON list_items(list_id);
@@ -140,6 +153,8 @@ CREATE INDEX IF NOT EXISTS idx_map_entries_map    ON map_entries(map_id);
 CREATE INDEX IF NOT EXISTS idx_type_children_type ON type_children(type_id);
 CREATE INDEX IF NOT EXISTS idx_type_map_type      ON type_map_entries(type_id);
 CREATE INDEX IF NOT EXISTS idx_job_runs_job       ON job_runs(job_name, started_at);
+CREATE INDEX IF NOT EXISTS idx_node_refs_dst      ON node_refs(dst_id);
+CREATE INDEX IF NOT EXISTS idx_node_refs_src      ON node_refs(src_id);
 `;
 
 /** Generate the DDL for the sqlite-vec virtual table with the given embedding dimension. */

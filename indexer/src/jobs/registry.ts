@@ -145,8 +145,14 @@ function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
         throw new Error(`${r.errors.length} plan error(s); first: ${first.path}: ${first.error}`);
       }
       return {
-        message: `${r.scanned} scanned, ${r.inserted} new, ${r.patched} patched, ${r.skipped} unchanged`,
-        metrics: { scanned: r.scanned, inserted: r.inserted, patched: r.patched, skipped: r.skipped },
+        message: `${r.scanned} scanned, ${r.inserted} new, ${r.patched} patched (${r.linksAdded} links added), ${r.skipped} unchanged`,
+        metrics: {
+          scanned: r.scanned,
+          inserted: r.inserted,
+          patched: r.patched,
+          linksAdded: r.linksAdded,
+          skipped: r.skipped,
+        },
       };
     },
   };

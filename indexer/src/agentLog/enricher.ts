@@ -1,60 +1,104 @@
 import { parseQuery, executeQuery } from '@coffeectx/core';
-import type { QueryDb } from '@coffeectx/core';
+import type { Db } from '@coffeectx/core';
 import type { ClassifiedEvent } from './classifier.js';
 
+/** Named types that are containers, not link targets we care about here. */
+const OWNED_TYPES = new Set(['Location', 'Span', 'Folder', 'File']);
+
 export interface EnrichedEvent extends ClassifiedEvent {
-  /** IDs of existing DB nodes that this event relates to (file, symbol, etc.) */
-  linkedNodeIds: string[];
+  /**
+   * Existing LSP-symbol nodes this event relates to, resolved conservatively:
+   * each identifier extracted from the event's text is keyed to the *single*
+   * unique non-container named-type ancestor of its matching Symbol atom.
+   * Wrapped as `{ $id }` so callers can splice straight into a
+   * `List<AnyLspSymbol>` field of an InsertEntry.
+   *
+   * FileOperation events leave this empty — the LSP indexer's reverse pass
+   * populates `touchedSymbols` at the file-path level instead.
+   */
+  linkedRefs: { $id: string }[];
 }
 
 /**
- * For each classified event, attempt to find related nodes already in the DB.
+ * For each classified event, find existing named-type nodes it relates to.
  *
- * Strategy (recall over precision):
- * - FileOperation (path): exact Symbol match on the file path.
- * - UserInput / AgentQuestion (text): exact Symbol matches on any word that looks
- *   like a code identifier (PascalCase, camelCase, snake_case longer than 4 chars).
- * - ShellExecution: no enrichment (commands rarely map to stored graph nodes).
+ * Conservative strategy: each candidate identifier (a file path for FileOps,
+ * a PascalCase/camelCase/snake_case token in text otherwise) is looked up by
+ * exact Symbol match. If the matching Symbol atom has exactly one named-type
+ * ancestor (skipping container types like Location/Folder), we keep that
+ * ancestor's UUID. Ambiguous matches are dropped — skill agents can resolve
+ * them later with full type context.
+ *
+ * - FileOperation: file-path lookup → matches go to `linkedFileRefs`.
+ * - UserInput / AgentQuestion / AgentMessage / AgentSummary: identifier
+ *   extraction from text → matches go to `linkedRefs`.
+ * - ShellExecution: no enrichment.
  */
 export async function enrichEvents(
   events: ClassifiedEvent[],
-  db: QueryDb,
+  db: Db,
 ): Promise<EnrichedEvent[]> {
   const enriched: EnrichedEvent[] = [];
 
   for (const event of events) {
-    const linkedNodeIds: string[] = [];
+    const linkedRefs: { $id: string }[] = [];
 
     try {
-      if ((event.kind === 'file_create' || event.kind === 'file_edit') && event.path) {
-        // Look for File/Location nodes whose path symbol matches exactly.
-        const ids = await querySymbol(event.path, db);
-        linkedNodeIds.push(...ids);
-      } else if ((event.kind === 'user_input' || event.kind === 'agent_question')) {
-        const text = event.text ?? event.question ?? '';
+      // Skip path-only events — the LSP enricher handles touchedSymbols.
+      if (event.kind === 'shell_exec' || event.kind === 'file_create' || event.kind === 'file_edit') {
+        enriched.push({ ...event, linkedRefs });
+        continue;
+      }
+
+      const text =
+        event.kind === 'agent_question'
+          ? (event.question ?? '')
+          : (event.text ?? '');
+      if (text) {
         const identifiers = extractIdentifiers(text);
+        const seen = new Set<string>();
         for (const ident of identifiers) {
-          const ids = await querySymbol(ident, db);
-          linkedNodeIds.push(...ids);
+          const owner = await resolveSingleNamedOwner(ident, db);
+          if (owner && !seen.has(owner)) {
+            seen.add(owner);
+            linkedRefs.push({ $id: owner });
+          }
         }
       }
     } catch {
       // enrichment is best-effort — never block indexing
     }
 
-    enriched.push({ ...event, linkedNodeIds: dedup(linkedNodeIds) });
+    enriched.push({ ...event, linkedRefs });
   }
 
   return enriched;
 }
 
-async function querySymbol(value: string, db: QueryDb): Promise<string[]> {
+/**
+ * Look up `value` as an exact Symbol, then resolve each match to its single
+ * named-type ancestor. Return the ancestor UUID iff exactly one distinct
+ * non-container ancestor was found.
+ */
+async function resolveSingleNamedOwner(value: string, db: Db): Promise<string | null> {
+  let symbolIds: string[];
   try {
     const q = parseQuery(`Symbol "${escapeStr(value)}"`);
-    return await executeQuery(q, db);
+    symbolIds = await executeQuery(q, db);
   } catch {
-    return [];
+    return null;
   }
+  if (symbolIds.length === 0) return null;
+
+  const owners = new Set<string>();
+  for (const sid of symbolIds) {
+    const parent = db.findNamedParent(sid);
+    if (!parent) continue;
+    if (OWNED_TYPES.has(parent.typeName)) continue;
+    owners.add(parent.id);
+    if (owners.size > 1) return null; // ambiguous — drop
+  }
+  return owners.size === 1 ? [...owners][0]! : null;
 }
 
 /** Escape double-quotes so the value is safe inside a Symbol "..." query clause. */
@@ -67,7 +111,7 @@ function escapeStr(s: string): string {
  * Heuristic: words that are PascalCase, camelCase, or snake_case with 5+ chars,
  * and don't look like common English words or log noise.
  */
-function extractIdentifiers(text: string): string[] {
+export function extractIdentifiers(text: string): string[] {
   const WORD_RE = /\b([A-Z][a-zA-Z0-9]{3,}|[a-z][a-zA-Z0-9]{3,}(?:[A-Z][a-zA-Z0-9]*)+|[a-z][a-z0-9_]{4,})\b/g;
   const STOP_WORDS = new Set([
     'true', 'false', 'null', 'undefined', 'string', 'number', 'boolean',
@@ -79,8 +123,4 @@ function extractIdentifiers(text: string): string[] {
     if (!STOP_WORDS.has(word)) found.add(word);
   }
   return Array.from(found);
-}
-
-function dedup(ids: string[]): string[] {
-  return Array.from(new Set(ids));
 }

@@ -10,6 +10,7 @@ import { registerRawQueryTool } from './tools/rawQuery.js';
 import { registerSkillsTools } from './tools/skills.js';
 import { registerLoadNodeTool } from './tools/loadNode.js';
 import { registerUpsertEntriesTool } from './tools/upsertEntries.js';
+import { registerResolveSymbolsTool } from './tools/resolveSymbols.js';
 
 const resolved = loadConfig();
 log(`[mcp] start project=${resolved.projectName} cwd=${process.cwd()} provider=${resolved.embed.provider} dbPath=${resolved.dbPath} pid=${process.pid}`);
@@ -29,6 +30,7 @@ if (resolved.tools.regex) reg('regex', () => registerRegexTool(server, db));
 if (resolved.tools.raw_query) reg('raw_query', () => registerRawQueryTool(server, db));
 if (resolved.tools.skills) reg('skills', () => registerSkillsTools(server, db));
 if (resolved.tools.load_node) reg('load_node', () => registerLoadNodeTool(server, db));
+if (resolved.tools.exact) reg('resolve_symbols', () => registerResolveSymbolsTool(server, db));
 if (resolved.tools.insert) reg('insert', () => registerUpsertEntriesTool(server, db));
 
 log(`[mcp] registered tools (${registeredTools.length}): ${registeredTools.join(', ')}`);

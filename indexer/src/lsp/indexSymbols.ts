@@ -19,6 +19,10 @@ import {
   markRepoIndexed,
   saveFileHashes,
 } from '../fileHashes.js';
+import {
+  extractFilePathCandidates,
+  extractIdentifierCandidates,
+} from '../plans/indexPlans.js';
 
 // Extensions the indexer will process
 const SOURCE_EXTENSIONS = new Set([
@@ -146,12 +150,23 @@ interface LogEventInfo {
 }
 
 /**
- * Build a map from file path variants → FileOperation event info.
- * All path variants (full path, basename, last-two-segment path) are indexed
- * so relative and absolute paths both match.
+ * Build a map from file path variants → event info. Indexes both
+ * FileOperation.path (variants of full path / basename / last-two-segments)
+ * and any file-path tokens parsed out of Plan.content's markdown links.
+ *
+ * The resulting field that will be patched:
+ *   FileOperation → touchedSymbols (LSP symbols inside that file)
+ *   Plan          → relatedSymbols (LSP symbols inside the referenced file)
  */
 function buildFileEventIndex(db: Db): Map<string, LogEventInfo[]> {
   const index = new Map<string, LogEventInfo[]>();
+
+  const push = (key: string, info: LogEventInfo) => {
+    const arr = index.get(key) ?? [];
+    arr.push(info);
+    index.set(key, arr);
+  };
+
   for (const eventId of db.queryByNamedType(['FileOperation'])) {
     try {
       const node = db.loadNodeDeep(eventId, 2);
@@ -159,43 +174,70 @@ function buildFileEventIndex(db: Db): Map<string, LogEventInfo[]> {
       const pathNode = node.entries['path'];
       if (pathNode?.kind !== 'atom' || pathNode.atom.kind !== 'symbol') continue;
       const info: LogEventInfo = { id: eventId, typeName: 'FileOperation', fieldName: 'touchedSymbols' };
-      for (const key of pathVariants(pathNode.atom.value)) {
-        const arr = index.get(key) ?? [];
-        arr.push(info);
-        index.set(key, arr);
+      for (const key of pathVariants(pathNode.atom.value)) push(key, info);
+    } catch { /* best-effort */ }
+  }
+
+  for (const planId of db.queryByNamedType(['Plan'])) {
+    try {
+      const node = db.loadNodeDeep(planId, 2);
+      if (node.kind !== 'map') continue;
+      const content = node.entries['content'];
+      if (content?.kind !== 'atom' || content.atom.kind !== 'meaning') continue;
+      const info: LogEventInfo = { id: planId, typeName: 'Plan', fieldName: 'relatedSymbols' };
+      for (const path of extractFilePathCandidates(content.atom.value.text)) {
+        for (const key of pathVariants(path)) push(key, info);
       }
     } catch { /* best-effort */ }
   }
+
   return index;
 }
 
 /**
- * Build a map from code identifier → [UserInput / AgentQuestion event info].
- * Identifiers are extracted from the text/question Meaning fields.
+ * Build a map from code identifier → event info. Indexes
+ * UserInput.text, AgentQuestion.question, AgentMessage.text,
+ * AgentSummary.text (PascalCase / camelCase / snake_case tokens), and
+ * identifiers extracted from inline-code spans inside Plan.content.
  */
 function buildNameEventIndex(db: Db): Map<string, LogEventInfo[]> {
   const index = new Map<string, LogEventInfo[]>();
-  const pairs: Array<{ typeName: string; fieldKey: string; resultField: 'relatedSymbols' }> = [
-    { typeName: 'UserInput',      fieldKey: 'text',     resultField: 'relatedSymbols' },
-    { typeName: 'AgentQuestion',  fieldKey: 'question', resultField: 'relatedSymbols' },
+  const push = (key: string, info: LogEventInfo) => {
+    const arr = index.get(key) ?? [];
+    arr.push(info);
+    index.set(key, arr);
+  };
+
+  const eventSources: Array<{ typeName: string; fieldKey: string }> = [
+    { typeName: 'UserInput',     fieldKey: 'text' },
+    { typeName: 'AgentQuestion', fieldKey: 'question' },
+    { typeName: 'AgentMessage',  fieldKey: 'text' },
+    { typeName: 'AgentSummary',  fieldKey: 'text' },
   ];
-  for (const { typeName, fieldKey, resultField } of pairs) {
+  for (const { typeName, fieldKey } of eventSources) {
     for (const eventId of db.queryByNamedType([typeName])) {
       try {
         const node = db.loadNodeDeep(eventId, 2);
         if (node.kind !== 'map') continue;
         const field = node.entries[fieldKey];
         if (field?.kind !== 'atom' || field.atom.kind !== 'meaning') continue;
-        const identifiers = extractIdentifiers(field.atom.value.text);
-        const info: LogEventInfo = { id: eventId, typeName, fieldName: resultField };
-        for (const ident of identifiers) {
-          const arr = index.get(ident) ?? [];
-          arr.push(info);
-          index.set(ident, arr);
-        }
+        const info: LogEventInfo = { id: eventId, typeName, fieldName: 'relatedSymbols' };
+        for (const ident of extractIdentifiers(field.atom.value.text)) push(ident, info);
       } catch { /* best-effort */ }
     }
   }
+
+  for (const planId of db.queryByNamedType(['Plan'])) {
+    try {
+      const node = db.loadNodeDeep(planId, 2);
+      if (node.kind !== 'map') continue;
+      const content = node.entries['content'];
+      if (content?.kind !== 'atom' || content.atom.kind !== 'meaning') continue;
+      const info: LogEventInfo = { id: planId, typeName: 'Plan', fieldName: 'relatedSymbols' };
+      for (const ident of extractIdentifierCandidates(content.atom.value.text)) push(ident, info);
+    } catch { /* best-effort */ }
+  }
+
   return index;
 }
 
@@ -404,7 +446,7 @@ export async function indexWithLsp(
     if (symbolIds.length === 0) continue;
     try {
       const listId = db.getMapFieldId(info.id, info.fieldName);
-      if (listId) db.appendListItems(listId, [...new Set(symbolIds)]);
+      if (listId) db.appendListItemsUnique(listId, symbolIds);
     } catch { /* best-effort */ }
   }
 

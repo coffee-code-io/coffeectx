@@ -142,7 +142,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           timestamp: event.timestamp,
           text: event.text ?? '',
           relatedFiles: [],
-          relatedSymbols: [],
+          relatedSymbols: event.linkedRefs,
         },
       };
 
@@ -181,7 +181,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           uuid: event.uuid,
           timestamp: event.timestamp,
           question: event.question ?? '',
-          relatedSymbols: [],
+          relatedSymbols: event.linkedRefs,
         },
       };
 
@@ -193,7 +193,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           uuid: event.uuid,
           timestamp: event.timestamp,
           text: event.text ?? '',
-          relatedSymbols: [],
+          relatedSymbols: event.linkedRefs,
         },
       };
 
@@ -205,7 +205,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           uuid: event.uuid,
           timestamp: event.timestamp,
           text: event.text ?? '',
-          relatedSymbols: [],
+          relatedSymbols: event.linkedRefs,
         },
       };
 

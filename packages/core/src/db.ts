@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { SCHEMA_DDL, makeVecTableDDL } from './schema.js';
 import type { Node, Type, Atom, Sym, EmbedFn, SearchResult, StoredNode, DeepNode, InsertEntry, InsertResult } from './types.js';
 import type { QueryDb } from './query.js';
+import { populateNodeRefsFor, rebuildNodeRefs } from './nodeRefs.js';
 
 import { log } from './logger.js';
 
@@ -151,6 +152,26 @@ export class Db implements QueryDb {
       `);
       this.raw.pragma('foreign_keys = ON');
     }
+
+    // Backfill node_refs once if the table is empty but named-type nodes exist.
+    try {
+      const hasRefs = this.raw.prepare(`SELECT 1 AS x FROM node_refs LIMIT 1`).get();
+      if (!hasRefs) {
+        const hasNamed = this.raw
+          .prepare(
+            `SELECT 1 AS x FROM nodes n JOIN named_types nt ON nt.type_id = n.type_id LIMIT 1`,
+          )
+          .get();
+        if (hasNamed) {
+          log(`db.migrate: backfilling node_refs`);
+          const t0 = Date.now();
+          const { rows } = rebuildNodeRefs(this.raw);
+          log(`db.migrate: backfilled node_refs: ${rows} rows in ${Date.now() - t0}ms`);
+        }
+      }
+    } catch (err) {
+      log(`db.migrate: node_refs backfill failed: ${(err as Error).message}`);
+    }
   }
 
   // ── Type upsert ────────────────────────────────────────────────────────────
@@ -243,13 +264,37 @@ export class Db implements QueryDb {
             .map(([k, v]) => `${k}=${v}`)
             .join(',') +
           '}';
-      return this.upsertStructural('MapType', contentKey, cache, type, id => {
+      const insertChildren = (id: string) => {
         for (const [key, valId] of Object.entries(fieldIds)) {
           this.raw
             .prepare(`INSERT INTO type_map_entries(type_id, key, value_type_id) VALUES(?,?,?)`)
             .run(id, key, valId);
         }
-      });
+      };
+      const id = this.upsertStructural('MapType', contentKey, cache, type, insertChildren);
+
+      // Named-type maps are identified by NAME, not structure — so when the
+      // YAML definition gains/loses/changes fields, the existing row stays
+      // (content_key still matches) but its type_map_entries are stale. Detect
+      // drift and replace the children.
+      if (namedName) {
+        const currentRows = this.raw
+          .prepare(`SELECT key, value_type_id FROM type_map_entries WHERE type_id=?`)
+          .all(id) as Array<{ key: string; value_type_id: string }>;
+        const current = new Map(currentRows.map(r => [r.key, r.value_type_id]));
+        let drift = current.size !== Object.keys(fieldIds).length;
+        if (!drift) {
+          for (const [k, v] of Object.entries(fieldIds)) {
+            if (current.get(k) !== v) { drift = true; break; }
+          }
+        }
+        if (drift) {
+          this.raw.prepare(`DELETE FROM type_map_entries WHERE type_id=?`).run(id);
+          insertChildren(id);
+        }
+      }
+
+      return id;
     }
 
     throw new Error(`Unknown Type kind: ${(type as Type).kind}`);
@@ -277,9 +322,15 @@ export class Db implements QueryDb {
   }
 
   /**
-   * Remove type rows that are no longer reachable from any named type.
-   * Returns the number of deleted rows.
-   * Call after bulk sync operations to keep the types table clean.
+   * Remove type rows that are no longer reachable from any named type AND
+   * have no surviving node referencing them. Returns the number of deleted
+   * rows. Call after bulk sync operations to keep the types table clean.
+   *
+   * Types that are unreachable from named_types but still referenced by an
+   * existing node are LEFT IN PLACE — those node rows are stuck on an old
+   * version of their named type until they're explicitly migrated/deleted.
+   * Skipping them avoids a foreign-key cascade that would silently drop user
+   * data on a routine type-sync.
    */
   gcOrphanedTypes(): number {
     const info = this.raw.prepare(`
@@ -294,7 +345,9 @@ export class Db implements QueryDb {
           FROM type_map_entries tme
           INNER JOIN reachable r ON r.id = tme.type_id
       )
-      DELETE FROM types WHERE id NOT IN (SELECT id FROM reachable)
+      DELETE FROM types
+       WHERE id NOT IN (SELECT id FROM reachable)
+         AND id NOT IN (SELECT DISTINCT type_id FROM nodes WHERE type_id IS NOT NULL)
     `).run();
     return info.changes;
   }
@@ -708,6 +761,18 @@ export class Db implements QueryDb {
     });
     txn();
 
+    // Update materialized edge index for every touched entry (inserts and
+    // patches alike — patches may have added new $id refs). INSERT OR IGNORE
+    // keeps it idempotent if a root is walked again later.
+    const touchedIds = allocatedIds.filter((id): id is string => typeof id === 'string');
+    if (touchedIds.length > 0) {
+      try {
+        populateNodeRefsFor(this.raw, touchedIds);
+      } catch (err) {
+        log(`insertEntries: populateNodeRefs failed: ${(err as Error).message}`);
+      }
+    }
+
     // Emit one event covering all newly-inserted (non-patch) entries.
     const insertedIds: string[] = [];
     const typeNameSet = new Set<string>();
@@ -1071,6 +1136,35 @@ export class Db implements QueryDb {
   }
 
   /**
+   * Append item node IDs to a list, skipping IDs already present. Returns the
+   * number of items actually appended. Also refreshes node_refs for any
+   * named-type ancestor of the list so the materialized edge index stays
+   * consistent with the new contents.
+   */
+  appendListItemsUnique(listId: string, itemIds: string[]): number {
+    if (itemIds.length === 0) return 0;
+    const existing = new Set(
+      (this.raw.prepare(`SELECT item_id FROM list_items WHERE list_id=?`).all(listId) as Array<{ item_id: string }>)
+        .map(r => r.item_id),
+    );
+    const toAdd = [...new Set(itemIds)].filter(id => !existing.has(id));
+    if (toAdd.length === 0) return 0;
+
+    this.appendListItems(listId, toAdd);
+
+    // Refresh node_refs for the nearest named-type ancestor (and its ancestors).
+    // We walk up via map_entries / list_items until we hit a named-type node,
+    // then repopulate that root. Cheap relative to query cost; INSERT OR IGNORE
+    // keeps it idempotent.
+    try {
+      const parent = this.findNamedParent(listId);
+      if (parent) populateNodeRefsFor(this.raw, [parent.id]);
+    } catch { /* best-effort */ }
+
+    return toAdd.length;
+  }
+
+  /**
    * Find the nearest ancestor of nodeId that is a named-type map node.
    * Returns { id, typeName } or null if none is found within 20 hops.
    */
@@ -1094,50 +1188,44 @@ export class Db implements QueryDb {
   }
 
   /**
-   * Find named-type root nodes whose subtree references `targetId` somewhere.
-   * Used for the detail view's "referenced by" list and for incoming graph edges.
-   * Walks up to 20 container levels (same as findNamedParent).
+   * Find named-type nodes that reference `targetId` from somewhere in their
+   * subtree. Backed by the materialized `node_refs` index.
    */
   findReferencingNamedNodes(targetId: string, limit = 50): { id: string; typeName: string }[] {
     const rows = this.raw.prepare(`
-      WITH RECURSIVE container(id, depth) AS (
-        SELECT map_id AS id, 1 AS depth FROM map_entries WHERE value_id = ?
-        UNION ALL
-        SELECT list_id AS id, 1 AS depth FROM list_items WHERE item_id = ?
-        UNION ALL
-        SELECT me.map_id, c.depth + 1 FROM map_entries me JOIN container c ON me.value_id = c.id WHERE c.depth < 20
-        UNION ALL
-        SELECT li.list_id, c.depth + 1 FROM list_items li JOIN container c ON li.item_id = c.id WHERE c.depth < 20
-      )
-      SELECT DISTINCT c.id, nt.name AS typeName FROM container c
-      JOIN nodes n ON n.id = c.id
-      JOIN named_types nt ON nt.type_id = n.type_id
-      WHERE c.id != ?
+      SELECT DISTINCT src_id AS id, src_type AS typeName
+      FROM node_refs
+      WHERE dst_id = ?
       LIMIT ?
-    `).all(targetId, targetId, targetId, limit) as { id: string; typeName: string }[];
+    `).all(targetId, limit) as { id: string; typeName: string }[];
     return rows;
   }
 
   /**
-   * Walk the subtree rooted at `rootId` (up to `depth` container hops) and
-   * collect every distinct named-type root node referenced from within it
-   * (other than the root itself). Powers outgoing graph edges.
+   * Collect every named-type node referenced from somewhere inside the subtree
+   * rooted at `rootId`. Backed by the materialized `node_refs` index.
+   *
+   * The `depth` parameter is preserved for API compatibility but no longer
+   * used — node_refs stores transitive edges directly.
    */
-  collectOutgoingNamedRefs(rootId: string, depth = 10): { id: string; typeName: string }[] {
+  collectOutgoingNamedRefs(rootId: string, _depth = 10): { id: string; typeName: string }[] {
     const rows = this.raw.prepare(`
-      WITH RECURSIVE descendant(id, depth) AS (
-        SELECT ?, 0
-        UNION ALL
-        SELECT me.value_id, d.depth + 1 FROM map_entries me JOIN descendant d ON me.map_id = d.id WHERE d.depth < ?
-        UNION ALL
-        SELECT li.item_id,  d.depth + 1 FROM list_items  li JOIN descendant d ON li.list_id = d.id WHERE d.depth < ?
-      )
-      SELECT DISTINCT d.id, nt.name AS typeName FROM descendant d
-      JOIN nodes n ON n.id = d.id
-      JOIN named_types nt ON nt.type_id = n.type_id
-      WHERE d.id != ?
-    `).all(rootId, depth, depth, rootId) as { id: string; typeName: string }[];
+      SELECT DISTINCT dst_id AS id, dst_type AS typeName
+      FROM node_refs
+      WHERE src_id = ?
+    `).all(rootId) as { id: string; typeName: string }[];
     return rows;
+  }
+
+  /** Rebuild the materialized `node_refs` index from scratch. */
+  rebuildNodeRefs(): { rows: number } {
+    return rebuildNodeRefs(this.raw);
+  }
+
+  /** True if the `node_refs` index has any rows. Used to gate one-shot backfill. */
+  hasNodeRefs(): boolean {
+    const row = this.raw.prepare(`SELECT 1 AS x FROM node_refs LIMIT 1`).get() as { x: number } | undefined;
+    return !!row;
   }
 
   // ── Scheduler heartbeat ────────────────────────────────────────────────────

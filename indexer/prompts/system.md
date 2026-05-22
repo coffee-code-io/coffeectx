@@ -24,7 +24,8 @@ Each batch is a JSON array of events from one Claude Code session, in chronologi
 # Available tools
 
 - `upsert_entries` — insert new nodes OR patch existing ones (with `$id`)
-- `get_by_symbol_text` — exact symbol-value lookup
+- `get_by_symbol_text` — exact symbol-value lookup for one name
+- `resolve_symbols` — **batched** name → node lookup, takes `{ names: [...], typeNames?: [...] }`. Prefer this over many `get_by_symbol_text` calls when populating a link list like `relatedSymbols`.
 - `regex` — regex over symbols + meanings (case-insensitive)
 - `raw_query` — query-language search (IsType / Symbol / Meaning / Field / HasItem composition)
 - `search` — semantic vector search by natural-language description

@@ -17,6 +17,7 @@ import {
   loadNode,
   skills,
   upsertEntries,
+  resolveSymbols,
 } from '@coffeectx/tools';
 
 /** Tool name → wraps a JSON-serialised body inside the pi content payload. */
@@ -77,6 +78,11 @@ const ListSkillsParams = Type.Object({});
 
 const GetSkillParams = Type.Object({
   name: Type.String({ description: 'Skill name, e.g. "ArchitecturalDecisionIndexing"' }),
+});
+
+const ResolveSymbolsParams = Type.Object({
+  names: Type.Array(Type.String(), { minItems: 1, description: 'Symbol values to look up — typically function/class/file names extracted from text.' }),
+  typeNames: Type.Optional(Type.Array(Type.String(), { description: 'If set, only return candidates whose typeName is in this list (e.g. ["LspFunction","LspMethod"]).' })),
 });
 
 const UpsertEntriesParams = Type.Object({
@@ -215,6 +221,21 @@ export function buildGraphTools(db: Db, allowInsert: boolean) {
         return textResult(result);
       },
     }),
+
+    defineTool({
+      name: 'resolve_symbols',
+      label: 'Resolve symbol names',
+      description: resolveSymbols.description,
+      parameters: ResolveSymbolsParams,
+      execute: async (_id, raw: Static<typeof ResolveSymbolsParams>) => {
+        try {
+          const result = resolveSymbols.run(db, { names: raw.names, typeNames: raw.typeNames });
+          return textResult(result);
+        } catch (err) {
+          return errorResult((err as Error).message);
+        }
+      },
+    }),
   ];
 
   if (allowInsert) {
@@ -252,5 +273,6 @@ export const GRAPH_TOOL_NAMES = [
   'get_node_by_id',
   'list_skills',
   'get_skill',
+  'resolve_symbols',
   'upsert_entries',
 ] as const;
