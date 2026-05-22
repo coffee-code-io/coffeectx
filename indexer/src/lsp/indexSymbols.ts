@@ -114,22 +114,81 @@ interface SymbolRecord {
   column: number;
 }
 
-function flattenDocumentSymbols(symbols: DocumentSymbol[], containerName: string, out: SymbolRecord[]): void {
+/**
+ * Kinds whose body contains local-scope symbols. Variables, constants, and
+ * nested functions declared inside them are implementation details — they
+ * pollute the graph (every `const x = ...` inside a function gets indexed)
+ * without adding query value.
+ */
+const FUNCTION_LIKE_KINDS = new Set<SymbolKind>([
+  SymbolKind.Function,
+  SymbolKind.Method,
+  SymbolKind.Constructor,
+]);
+
+/** Kinds we drop when their containing scope is a function-like. */
+const LOCAL_SCOPE_NOISE_KINDS = new Set<SymbolKind>([
+  SymbolKind.Variable,
+  SymbolKind.Constant,
+  SymbolKind.Function,   // nested / arrow functions assigned to a var inside another function
+]);
+
+/**
+ * Anonymous-symbol names produced by some language servers (`<anonymous>`,
+ * `<function>`, `<lambda>`, `()`, or just empty). These are lambdas / IIFEs /
+ * synthesised symbols that can't be referenced by name.
+ */
+const ANONYMOUS_NAME_RE = /^<[^>]*>$|^\(\)$|^$/;
+
+function isAnonymous(name: string): boolean {
+  return ANONYMOUS_NAME_RE.test(name.trim());
+}
+
+function flattenDocumentSymbols(
+  symbols: DocumentSymbol[],
+  containerName: string,
+  out: SymbolRecord[],
+  insideFunction = false,
+): void {
   for (const s of symbols) {
     const typeName = kindToTypeName(s.kind);
-    if (typeName) {
-      out.push({ typeName, name: s.name, containerName, detail: s.detail ?? '', line: s.selectionRange.start.line, column: s.selectionRange.start.character });
+    const drop =
+      !typeName ||
+      isAnonymous(s.name) ||
+      (insideFunction && LOCAL_SCOPE_NOISE_KINDS.has(s.kind));
+    if (!drop) {
+      out.push({
+        typeName: typeName!,
+        name: s.name,
+        containerName,
+        detail: s.detail ?? '',
+        line: s.selectionRange.start.line,
+        column: s.selectionRange.start.character,
+      });
     }
-    if (s.children?.length) flattenDocumentSymbols(s.children, s.name, out);
+    if (s.children?.length) {
+      const childInside = insideFunction || FUNCTION_LIKE_KINDS.has(s.kind);
+      flattenDocumentSymbols(s.children, s.name, out, childInside);
+    }
   }
 }
 
 function flattenSymbolInformation(symbols: SymbolInformation[], out: SymbolRecord[]): void {
+  // SymbolInformation is a flat list (older LSP protocol) — we don't have a
+  // tree to inspect, so only the anonymous-name filter applies. Locals from
+  // inside functions also tend to be elided by servers that emit this shape.
   for (const s of symbols) {
     const typeName = kindToTypeName(s.kind);
-    if (typeName) {
-      out.push({ typeName, name: s.name, containerName: s.containerName ?? '', detail: '', line: s.location.range.start.line, column: s.location.range.start.character });
-    }
+    if (!typeName) continue;
+    if (isAnonymous(s.name)) continue;
+    out.push({
+      typeName,
+      name: s.name,
+      containerName: s.containerName ?? '',
+      detail: '',
+      line: s.location.range.start.line,
+      column: s.location.range.start.character,
+    });
   }
 }
 
