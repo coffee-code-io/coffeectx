@@ -53,14 +53,6 @@ export function NodeDetail() {
           </button>
           <div className="h-4 w-px bg-cream-200" />
           <span className="text-[11px] uppercase tracking-widest text-roast-light">{data?.typeName ?? '—'}</span>
-          {data?.state && (
-            <span
-              className="text-[10px] uppercase tracking-wider text-roast-dark bg-cream-200 rounded px-1.5 py-0.5"
-              title={`State: ${data.state}`}
-            >
-              {data.state}
-            </span>
-          )}
           <span className="font-mono text-xs text-roast-medium truncate">{id}</span>
         </div>
         <div className="flex items-center gap-1">

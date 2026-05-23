@@ -96,11 +96,19 @@ function ValueView({ value, depth, budget }: ValueProps) {
 
 function TypedCard({ obj, depth, budget }: { obj: Record<string, unknown>; depth: number; budget: CardBudget }) {
   // Strip the metadata keys so they don't render as data rows.
-  const { $type, $id: _id, ...rest } = obj;
+  const { $type, $id: _id, $state, ...rest } = obj;
   void _id;
   return (
     <div className="bg-cream-100 border border-cream-200 rounded-lg p-3 space-y-2 animate-fade-up">
-      <div className="text-[10px] uppercase tracking-widest text-roast-light">{String($type)}</div>
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="text-[10px] uppercase tracking-widest text-roast-light">{String($type)}</div>
+        {typeof $state === 'string' && (
+          <div className="text-[10px] font-mono text-roast-light">
+            state:{' '}
+            <span className="text-roast-medium">{$state}</span>
+          </div>
+        )}
+      </div>
       <ObjectRows obj={rest} depth={depth + 1} budget={budget} />
     </div>
   );
