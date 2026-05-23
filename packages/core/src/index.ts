@@ -27,6 +27,8 @@ export type {
   DbOptions,
   InsertEvent,
   InsertListener,
+  NodeEvent,
+  NodeEventListener,
   JobRow,
   JobRunRow,
   JobStatus,

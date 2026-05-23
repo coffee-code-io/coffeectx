@@ -88,7 +88,7 @@ export interface StoredType {
 export type DeepNode =
   | { kind: 'atom'; atom: Atom }
   | { kind: 'list'; items: DeepNode[] }
-  | { kind: 'map'; id?: string; entries: Record<Sym, DeepNode>; type: Type; typeName?: string }
+  | { kind: 'map'; id?: string; entries: Record<Sym, DeepNode>; type: Type; typeName?: string; state?: string }
   | { kind: 'ref'; id: string }
   | { kind: 'cycle'; id: string };
 
@@ -110,6 +110,14 @@ export interface InsertEntry {
    * Required-field validation is relaxed — partial data is accepted.
    */
   id?: string;
+  /**
+   * Optional target state. For inserts: persists with this state instead of
+   * the type's first state. For patches: bumps the node to this state if it
+   * differs from the current one. Must be a member of the type's declared
+   * state machine. Patches on a node already in the final state without an
+   * explicit `$state` are rejected as immutable.
+   */
+  state?: string;
 }
 
 export interface InsertResult {

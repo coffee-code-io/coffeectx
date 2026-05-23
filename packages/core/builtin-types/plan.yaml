@@ -1,6 +1,7 @@
 types:
   Plan:
     description: A markdown plan authored during a Claude Code "plan mode" turn and saved by Claude to `~/.claude/plans/<slug>.md`. Plans capture the agent's intended implementation approach (context, files to modify, verification) before any code is written, so they're high-signal artefacts for understanding what was about to happen in a session.
+    states: [extracted, linked]
     kind: Map
     fields:
       name: Symbol         # filename slug (no extension) — also the natural unique key

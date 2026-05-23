@@ -578,5 +578,38 @@ export async function indexWithLsp(
     saveFileHashes(hashes);
   }
 
+  // Bump every event node that's been "considered" by this LSP run from
+  // `extracted` to `linked`. We bump unconditionally — `linked` means "LSP
+  // has done its pass over this node", not "LSP found something". Without
+  // this, events with no matching symbols would sit at `extracted` forever
+  // and skill jobs that gate on `linked` would never see them.
+  bumpEventsToLinked(db);
+
   return result;
+}
+
+const LINKABLE_EVENT_TYPES = [
+  'UserInput', 'AgentQuestion', 'AgentMessage', 'AgentSummary',
+  'FileOperation', 'ShellExecution', 'Plan',
+];
+
+function bumpEventsToLinked(db: Db): void {
+  let bumped = 0;
+  for (const typeName of LINKABLE_EVENT_TYPES) {
+    for (const eventId of db.queryByNamedType([typeName])) {
+      // `extracted` is the initial state for these types; anything else
+      // (already `linked`, or absent state machine) is left alone.
+      if (db.getNodeState(eventId) === 'extracted') {
+        try {
+          db.setNodeState(eventId, 'linked');
+          bumped++;
+        } catch (err) {
+          // Defensive: a missing state machine row would throw here; we'd
+          // rather log and continue than fail the whole LSP run.
+          console.warn(`[indexSymbols] setNodeState failed on ${typeName} ${eventId}: ${(err as Error).message}`);
+        }
+      }
+    }
+  }
+  if (bumped > 0) console.log(`[indexSymbols] bumped ${bumped} event nodes to 'linked'`);
 }

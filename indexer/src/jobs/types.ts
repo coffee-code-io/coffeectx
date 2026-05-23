@@ -10,7 +10,13 @@ import type { Db, CoffeectxConfig, ProjectEntry } from '@coffeectx/core';
 
 export type JobTrigger =
   | { kind: 'timer'; intervalMs: number }
-  | { kind: 'onTypeInsert'; typeNames: string[] };
+  | { kind: 'onTypeInsert'; typeNames: string[] }
+  /**
+   * Fires when any node of one of the named types transitions INTO `state`.
+   * Used to gate downstream jobs on upstream completion — e.g. skill jobs run
+   * only after the LSP indexer bumps event nodes from `extracted` → `linked`.
+   */
+  | { kind: 'onNodeState'; typeNames: string[]; state: string };
 
 export interface JobContext {
   db: Db;

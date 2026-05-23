@@ -99,6 +99,8 @@ export interface RunOneSkillOptions {
   allowInsert?: boolean;
   /** LLM auth for this run (typically from project.jobs[name].parameters.auth). */
   auth?: AuthSettings;
+  /** Scheduler abort signal — propagated to runSkillInteractive. */
+  signal?: AbortSignal;
 }
 
 export interface RunOneSkillResult {
@@ -151,7 +153,7 @@ function loadNewEventsGroupedBySession(
  * Execute one skill across all sessions with unprocessed events.
  */
 export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkillResult> {
-  const { db, projectName, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, allowInsert, auth } = opts;
+  const { db, projectName, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, allowInsert, auth, signal } = opts;
   const result: RunOneSkillResult = { batches: 0, sessions: 0, events: 0, errors: [] };
 
   const skill = loadSkillDef(skillDirName);
@@ -173,6 +175,10 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
   console.log(`[indexAgent:${skillDirName}] ${sessions.size} sessions with new events (${total} total, ${skipped} processed)`);
 
   for (const [sessionId, sessionEvents] of sessions) {
+    if (signal?.aborted) {
+      console.log(`[indexAgent:${skillDirName}] aborted before session ${sessionId}`);
+      break;
+    }
     const batches = buildBatches(sessionEvents, batchStep);
     console.log(`  Session ${sessionId}: ${sessionEvents.length} events → ${batches.length} batches`);
 
@@ -186,6 +192,7 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
         projectName,
         auth,
         allowInsert,
+        signal,
         onBatchComplete: async (batchIndex: number) => {
           const batchEventIds = batches[batchIndex]!.eventIds;
           if (onBatchProcessed) await onBatchProcessed(batchEventIds);
@@ -195,6 +202,11 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
       result.events += sessionEvents.length;
       result.sessions += 1;
     } catch (err) {
+      // Aborted runs aren't errors — the scheduler initiated the cancel.
+      if (signal?.aborted) {
+        console.log(`[indexAgent:${skillDirName}] session ${sessionId} aborted: ${(err as Error).message}`);
+        break;
+      }
       result.errors.push({ error: `[${skillDirName}/${sessionId}] ${(err as Error).message}` });
     }
   }

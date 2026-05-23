@@ -62,6 +62,13 @@ export interface RunSkillInteractiveOptions {
   allowInsert?: boolean;
   /** Per-batch progress callback (0-indexed) — fires after the batch turn ends. */
   onBatchComplete?: (batchIndex: number) => Promise<void>;
+  /**
+   * Scheduler abort signal. Honoured between batches (pi's `session.prompt()`
+   * does not accept a signal today). When aborted, the loop exits cleanly and
+   * post-abort `onBatchComplete` failures are silenced — the DB may already
+   * be closed by the scheduler's shutdown sequence.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -107,7 +114,7 @@ export async function runSkillInteractive(
 ): Promise<RunSkillResult> {
   const {
     skillName, skillPrompt, eventBatches, sourceId, projectName, auth,
-    allowInsert = false, onBatchComplete, db,
+    allowInsert = false, onBatchComplete, db, signal,
   } = opts;
 
   if (eventBatches.length === 0) {
@@ -185,6 +192,10 @@ export async function runSkillInteractive(
   // ── 5. Per-batch loop ─────────────────────────────────────────────────────
   let batchesRun = 0;
   for (let i = 0; i < eventBatches.length; i++) {
+    if (signal?.aborted) {
+      console.log(`[runSkill:${skillName}] aborted before batch ${i + 1}`);
+      break;
+    }
     const text = renderBatch(eventBatches[i]!, i, eventBatches.length);
     lastAgentEnd = null;
     try {
@@ -193,13 +204,22 @@ export async function runSkillInteractive(
       console.error(`[runSkill:${skillName}] batch ${i + 1} prompt failed: ${(err as Error).message}`);
       throw err;
     }
+    if (signal?.aborted) {
+      console.log(`[runSkill:${skillName}] aborted after batch ${i + 1} prompt`);
+      break;
+    }
     checkProviderError(i);
 
     batchesRun = i + 1;
     if (onBatchComplete) {
       try { await onBatchComplete(i); }
       catch (cbErr) {
-        console.warn(`[runSkill:${skillName}] onBatchComplete failed: ${(cbErr as Error).message}`);
+        // After abort the DB may already be closed by the scheduler; that's
+        // expected and not worth warning about. Only surface unexpected
+        // failures.
+        if (!signal?.aborted) {
+          console.warn(`[runSkill:${skillName}] onBatchComplete failed: ${(cbErr as Error).message}`);
+        }
       }
     }
   }

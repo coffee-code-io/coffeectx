@@ -50,6 +50,12 @@ export type YamlTypeSpec =
 export interface YamlNamedTypeEntry {
   description?: string;
   hidden?: boolean;
+  /**
+   * Ordered state machine for this type. Defaults to `['ready']` when absent.
+   * The last element is the final (immutable) state — upserts on a node at
+   * that state throw unless they explicitly bump $state.
+   */
+  states?: string[];
   spec: YamlTypeSpec;
 }
 
@@ -77,10 +83,15 @@ function extractTypeEntry(raw: unknown): YamlNamedTypeEntry {
   if (typeof raw === 'string') return { spec: raw };
 
   const obj = raw as Record<string, unknown>;
-  const { description, hidden, ...rest } = obj;
+  const { description, hidden, states, ...rest } = obj;
+  let parsedStates: string[] | undefined;
+  if (Array.isArray(states) && states.every(s => typeof s === 'string') && states.length > 0) {
+    parsedStates = states as string[];
+  }
   return {
     description: typeof description === 'string' ? description : undefined,
     hidden: hidden === true,
+    states: parsedStates,
     spec: rest as YamlTypeSpec,
   };
 }
@@ -270,6 +281,10 @@ export function syncFromDir(
       const type = resolveYamlType(entry.spec, specRegistry);
       const typeId = db.upsertType(type, typeIdCache, name);
       db.upsertNamedType(name, typeId, source, entry.description, entry.hidden);
+      // Sync the state machine. `setStatesForType` wipes any pre-existing
+      // rows so removing `states:` from the YAML restores the default
+      // `[ready]` behaviour at read time.
+      db.setStatesForType(name, entry.states ?? []);
       typesSynced.push(name);
     } catch (err) {
       typesErrors.push({ name, error: (err as Error).message });

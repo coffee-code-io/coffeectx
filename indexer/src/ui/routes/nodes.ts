@@ -213,9 +213,11 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
       try {
         const node = db.loadNodeDeep(req.params.id, depth);
         const typeName = db.getNodeTypeName(req.params.id);
+        const state = node.kind === 'map' ? node.state ?? null : null;
         return {
           id: req.params.id,
           typeName,
+          state,
           node: formatDeepNode(node),
           raw: node,
         };

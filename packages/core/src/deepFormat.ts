@@ -30,6 +30,7 @@ export function formatDeepNode(node: DeepNode): unknown {
       if (node.typeName) {
         out['$type'] = node.typeName;
         if (node.id) out['$id'] = node.id;
+        if (node.state) out['$state'] = node.state;
       }
       for (const [key, child] of Object.entries(node.entries)) {
         const v = formatDeepNode(child);

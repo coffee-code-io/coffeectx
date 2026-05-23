@@ -15,19 +15,37 @@ export interface DbOptions {
   dimensions?: number;
 }
 
-/** Fired after `insertNode`/`insertEntries` commits, for each inserted root node. */
-export interface InsertEvent {
-  /** Root node IDs that were newly inserted (patches are not reported). */
+/**
+ * Fired after node lifecycle commits — root insertions (`insertNode` /
+ * `insertEntries`) and explicit state-changes (`setNodeState`).
+ *
+ * `kind: 'insert'`        → ids/typeNames carry one or more new root nodes.
+ *                           `state` is the post-insert state (the type's
+ *                           first state by default).
+ * `kind: 'state-change'`  → ids is a single node moving from `fromState` to
+ *                           `state`. typeNames is that node's named type.
+ */
+export interface NodeEvent {
+  kind: 'insert' | 'state-change';
   ids: string[];
-  /** Deduped named-type names of those root nodes, when known. */
   typeNames: string[];
+  /** Target state after the event. Always set for state-change; for
+   * inserts only set when the type declares a state machine. */
+  state?: string | null;
+  /** Previous state. Only set for state-change events. */
+  fromState?: string | null;
 }
 
-export type InsertListener = (event: InsertEvent) => void;
+/** @deprecated Kept as an alias while call sites migrate. Use NodeEvent. */
+export type InsertEvent = NodeEvent;
+
+export type NodeEventListener = (event: NodeEvent) => void;
+/** @deprecated Use NodeEventListener. */
+export type InsertListener = NodeEventListener;
 
 export type JobStatus = 'idle' | 'running' | 'disabled';
 export type JobResult = 'ok' | 'error' | 'cancelled';
-export type JobTriggerKind = 'timer' | 'onTypeInsert' | 'manual' | 'startup';
+export type JobTriggerKind = 'timer' | 'onTypeInsert' | 'onNodeState' | 'manual' | 'startup';
 
 export interface JobRow {
   name: string;
@@ -61,7 +79,7 @@ export class Db implements QueryDb {
   private readonly raw: Database.Database;
   private readonly embed: EmbedFn;
   readonly dims: number;
-  private readonly insertListeners = new Set<InsertListener>();
+  private readonly nodeEventListeners = new Set<NodeEventListener>();
 
   constructor(options: DbOptions) {
     this.raw = new Database(options.path);
@@ -86,6 +104,10 @@ export class Db implements QueryDb {
   private migrate(): void {
     // named_types.description (pre-skills schema)
     try { this.raw.exec(`ALTER TABLE named_types ADD COLUMN description TEXT`); } catch { /* ok */ }
+
+    // nodes.state — per-node state machine slot. NULL means the node's type
+    // declares no state machine (default `[ready]`, single final state).
+    try { this.raw.exec(`ALTER TABLE nodes ADD COLUMN state TEXT`); } catch { /* ok */ }
 
     // named_types.hidden (post-initial schema)
     try { this.raw.exec(`ALTER TABLE named_types ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`); } catch { /* ok */ }
@@ -712,14 +734,22 @@ export class Db implements QueryDb {
     const skippedKeys: string[][] = entries.map(() => []);
 
     // ── Phase 1: validate types ─────────────────────────────────────────────
-    const typeInfos: Array<{ typeId: string; schema: Extract<Type, { kind: 'MapType' }> } | null> = [];
+    // Per-entry effective state: the value to write into nodes.state.
+    //  - `null`  → leave nodes.state NULL (default `[ready]`, single final).
+    //  - string  → write this explicit state.
+    // Captured here so phase 4 can persist + emit state-change consistently.
+    const targetStates: Array<string | null> = entries.map(() => null);
+    // Patches that need to fire a state-change after their fields land.
+    const stateBumps = new Map<number, { from: string | null; to: string }>();
+
+    const typeInfos: Array<{ typeId: string; schema: Extract<Type, { kind: 'MapType' }>; states: string[] } | null> = [];
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]!;
 
       // For patch entries verify the existing node exists and has a compatible type.
       if (entry.id) {
         // Reject empty patch — there's nothing to do.
-        if (Object.keys(entry.data).length === 0) {
+        if (Object.keys(entry.data).length === 0 && entry.state == null) {
           errors.push({
             index: i,
             path: '',
@@ -768,7 +798,45 @@ export class Db implements QueryDb {
           typeInfos.push(null);
           continue;
         }
-        typeInfos.push({ typeId: row.type_id, schema });
+
+        const states = this.getStatesForType(entry.type);
+        const finalState = states[states.length - 1]!;
+        const currentRaw = this.getNodeState(entry.id);
+        const currentEffective = currentRaw ?? finalState;
+
+        // Final-state immutability — only relaxed when the patch supplies an
+        // explicit $state to bump out of the final slot. Single-state types
+        // (default `[ready]`) are always immutable: their only state IS final.
+        if (currentEffective === finalState && entry.state == null) {
+          errors.push({
+            index: i,
+            path: '',
+            message: `Node "${entry.id}" is in final state '${finalState}' for type "${entry.type}" and is immutable. Provide $state to bump it out of the final state, or delete and re-insert.`,
+          });
+          typeInfos.push(null);
+          continue;
+        }
+
+        if (entry.state != null) {
+          if (!states.includes(entry.state)) {
+            errors.push({
+              index: i,
+              path: '',
+              message: `$state "${entry.state}" not in [${states.join(', ')}] for type "${entry.type}"`,
+            });
+            typeInfos.push(null);
+            continue;
+          }
+          if (entry.state !== currentEffective) {
+            stateBumps.set(i, { from: currentRaw, to: entry.state });
+            // For multi-state types we write the explicit state. For single-
+            // state types the only state IS the bump target; that's a no-op
+            // we can safely encode by keeping NULL.
+            targetStates[i] = states.length > 1 ? entry.state : null;
+          }
+        }
+
+        typeInfos.push({ typeId: row.type_id, schema, states });
         continue;
       }
 
@@ -785,7 +853,23 @@ export class Db implements QueryDb {
         typeInfos.push(null);
         continue;
       }
-      typeInfos.push({ typeId: named.typeId, schema });
+
+      const states = this.getStatesForType(entry.type);
+      const initialState = entry.state ?? states[0]!;
+      if (entry.state != null && !states.includes(entry.state)) {
+        errors.push({
+          index: i,
+          path: '',
+          message: `$state "${entry.state}" not in [${states.join(', ')}] for type "${entry.type}"`,
+        });
+        typeInfos.push(null);
+        continue;
+      }
+      // Only persist state for multi-state types — single-state ones encode
+      // their (only & final) state as NULL.
+      targetStates[i] = states.length > 1 ? initialState : null;
+
+      typeInfos.push({ typeId: named.typeId, schema, states });
     }
 
     // ── Phase 2: allocate IDs ───────────────────────────────────────────────
@@ -855,7 +939,20 @@ export class Db implements QueryDb {
         const ti = typeInfos[i];
         const id = allocatedIds[i];
         if (!ti || !id || entries[i]!.id) continue; // skip patches and failed entries
-        this.raw.prepare(`INSERT INTO nodes(id, kind, type_id) VALUES(?,?,?)`).run(id, 'map', ti.typeId);
+        this.raw
+          .prepare(`INSERT INTO nodes(id, kind, type_id, state) VALUES(?,?,?,?)`)
+          .run(id, 'map', ti.typeId, targetStates[i]);
+      }
+
+      // Apply patch-driven state bumps (multi-state types only — single-state
+      // bumps short-circuit to a no-op above).
+      for (let i = 0; i < entries.length; i++) {
+        const id = allocatedIds[i];
+        if (!id || !entries[i]!.id) continue;
+        if (!stateBumps.has(i)) continue;
+        const ti = typeInfos[i];
+        if (!ti || ti.states.length <= 1) continue;
+        this.raw.prepare(`UPDATE nodes SET state=? WHERE id=?`).run(targetStates[i], id);
       }
 
       // Write field values for all entries.
@@ -916,6 +1013,22 @@ export class Db implements QueryDb {
     }
     if (insertedIds.length > 0) {
       this.emitInsert({ ids: insertedIds, typeNames: Array.from(typeNameSet) });
+    }
+
+    // Emit one state-change event per patch that bumped state. Listeners
+    // (e.g. the scheduler) react to these to mark `onNodeState` jobs pending.
+    for (let i = 0; i < entries.length; i++) {
+      const bump = stateBumps.get(i);
+      const id = allocatedIds[i];
+      const entry = entries[i]!;
+      if (!bump || !id) continue;
+      this.emitNodeEvent({
+        kind: 'state-change',
+        ids: [id],
+        typeNames: [entry.type],
+        state: bump.to,
+        fromState: bump.from,
+      });
     }
 
     log(`insertEntries: done, ${errors.length} errors`);
@@ -1229,7 +1342,20 @@ export class Db implements QueryDb {
       for (const { key, value_id } of entries) {
         result[key] = this.loadNodeDeep(value_id, childDepth, childAncestors);
       }
-      return { kind: 'map', id, entries: result, type, typeName: namedRow?.name };
+      // Resolve $state: stored value wins; NULL falls back to the type's
+      // final state when the type declares a state machine. Single-state
+      // types report their only state.
+      let state: string | undefined;
+      if (namedRow) {
+        const stored = this.getNodeState(id);
+        if (stored != null) {
+          state = stored;
+        } else {
+          const states = this.getStatesForType(namedRow.name);
+          state = states[states.length - 1];
+        }
+      }
+      return { kind: 'map', id, entries: result, type, typeName: namedRow?.name, state };
     }
 
     throw new Error(`Unknown node kind: ${row.kind}`);
@@ -1740,24 +1866,102 @@ export class Db implements QueryDb {
     });
   }
 
-  // ── Insert event bus ───────────────────────────────────────────────────────
+  // ── Node-event bus ─────────────────────────────────────────────────────────
 
   /**
-   * Subscribe to insert events. Returns an unsubscribe function.
-   * Fired synchronously after the insertion transaction commits. Listeners that
-   * throw are logged and never surface back to the inserter.
+   * Subscribe to node-lifecycle events (`insert` and `state-change`).
+   * Fired synchronously after the underlying write commits. Listeners that
+   * throw are logged and never surface back to the caller.
    */
-  onInsert(listener: InsertListener): () => void {
-    this.insertListeners.add(listener);
-    return () => { this.insertListeners.delete(listener); };
+  onNodeEvent(listener: NodeEventListener): () => void {
+    this.nodeEventListeners.add(listener);
+    return () => { this.nodeEventListeners.delete(listener); };
   }
 
-  private emitInsert(event: InsertEvent): void {
-    for (const fn of this.insertListeners) {
+  /** @deprecated Use `onNodeEvent` and filter by `event.kind === 'insert'`. */
+  onInsert(listener: NodeEventListener): () => void {
+    return this.onNodeEvent(listener);
+  }
+
+  private emitNodeEvent(event: NodeEvent): void {
+    for (const fn of this.nodeEventListeners) {
       try { fn(event); } catch (err) {
-        log(`insert listener error: ${(err as Error).message}`);
+        log(`node-event listener error: ${(err as Error).message}`);
       }
     }
+  }
+
+  private emitInsert(event: Omit<NodeEvent, 'kind'>): void {
+    this.emitNodeEvent({ kind: 'insert', ...event });
+  }
+
+  // ── State machine ──────────────────────────────────────────────────────────
+
+  /**
+   * Return the ordered state list for a named type. Defaults to `['ready']`
+   * when no rows are configured. The last element is the final (immutable)
+   * state.
+   */
+  getStatesForType(typeName: string): string[] {
+    const rows = this.raw
+      .prepare(
+        `SELECT state FROM named_type_states WHERE type_name=? ORDER BY position`,
+      )
+      .all(typeName) as { state: string }[];
+    if (rows.length === 0) return ['ready'];
+    return rows.map(r => r.state);
+  }
+
+  /**
+   * Overwrite the ordered state machine for a named type. Pass an empty array
+   * to clear (which restores the default `['ready']` behaviour at read time).
+   */
+  setStatesForType(typeName: string, states: string[]): void {
+    const txn = this.raw.transaction(() => {
+      this.raw.prepare(`DELETE FROM named_type_states WHERE type_name=?`).run(typeName);
+      const stmt = this.raw.prepare(
+        `INSERT INTO named_type_states(type_name, position, state) VALUES(?,?,?)`,
+      );
+      for (let i = 0; i < states.length; i++) stmt.run(typeName, i, states[i]);
+    });
+    txn();
+  }
+
+  /**
+   * Read a node's current state. Returns NULL when the node has no row, isn't
+   * a named-type map, or its type declares no state machine.
+   */
+  getNodeState(nodeId: string): string | null {
+    const row = this.raw
+      .prepare(`SELECT state FROM nodes WHERE id=?`)
+      .get(nodeId) as { state: string | null } | undefined;
+    return row?.state ?? null;
+  }
+
+  /**
+   * Move a node to a new state. The state must belong to the node's type's
+   * declared state machine. No-op if the node is already at the target state.
+   * Fires a `state-change` event on success.
+   */
+  setNodeState(nodeId: string, state: string): void {
+    const typeName = this.getNodeTypeName(nodeId);
+    if (!typeName) throw new Error(`setNodeState: node "${nodeId}" has no named type`);
+    const states = this.getStatesForType(typeName);
+    if (!states.includes(state)) {
+      throw new Error(
+        `setNodeState: state "${state}" not in [${states.join(', ')}] for type "${typeName}"`,
+      );
+    }
+    const current = this.getNodeState(nodeId);
+    if (current === state) return;
+    this.raw.prepare(`UPDATE nodes SET state=? WHERE id=?`).run(state, nodeId);
+    this.emitNodeEvent({
+      kind: 'state-change',
+      ids: [nodeId],
+      typeNames: [typeName],
+      state,
+      fromState: current,
+    });
   }
 
   // ── Catch-up polling helper ────────────────────────────────────────────────

@@ -41,13 +41,15 @@ const DEFAULT_PLANS_DIR = join(homedir(), '.claude', 'plans');
 const DEFAULT_CODEX_STATE_PATH = join(homedir(), '.codex', 'state_5.sqlite');
 
 /**
- * Event types whose insertion should trigger agent skill jobs.
- * AgentMessage replaces AgentThought as the primary signal of agent intent;
- * Plan inserts are also interesting (a new plan was authored).
+ * Event types whose transition to the `linked` state should trigger agent
+ * skill jobs. Skill agents need post-LSP enrichment to see Plan/AgentMessage
+ * etc. with `relatedSymbols` populated, so jobs fire on the LSP-driven
+ * `extracted → linked` bump, not on raw insertion. The fallback timer below
+ * is the safety net for state-machine misses.
  */
 const SKILL_TRIGGER_TYPES = [
   'UserInput', 'FileOperation', 'ShellExecution',
-  'AgentQuestion', 'AgentMessage', 'Plan',
+  'AgentQuestion', 'AgentMessage', 'AgentSummary', 'Plan',
 ];
 
 interface SkillJobState {
@@ -248,7 +250,7 @@ function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
 function buildSkillJob(jobName: string, dirName: string, description: string, config: CoffeectxConfig, projectName: string): Job {
   const params = projectJobParams(config, projectName, jobName);
   const triggers: JobTrigger[] = [
-    { kind: 'onTypeInsert', typeNames: SKILL_TRIGGER_TYPES },
+    { kind: 'onNodeState', typeNames: SKILL_TRIGGER_TYPES, state: 'linked' },
     { kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_SKILL_FALLBACK_INTERVAL_MS) },
   ];
   return {
@@ -277,6 +279,7 @@ function buildSkillJob(jobName: string, dirName: string, description: string, co
         auth,
         batchStep,
         allowInsert,
+        signal: ctx.signal,
         onBatchProcessed: async (newlyProcessed) => {
           for (const id of newlyProcessed) processed.add(id);
           // Re-read state to preserve other keys the scheduler may have updated.

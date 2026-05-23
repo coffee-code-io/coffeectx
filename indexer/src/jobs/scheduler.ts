@@ -11,7 +11,7 @@
  *   - a single global mutex: at most one job runs at a time
  */
 
-import { loadConfig, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry } from '@coffeectx/core';
+import { loadConfig, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry, type NodeEvent } from '@coffeectx/core';
 import type { Job, JobContext, JobTrigger } from './types.js';
 import { withRunLog } from './runLog.js';
 
@@ -26,7 +26,7 @@ interface ProjectInfo extends ProjectEntry {
 }
 
 interface PendingTrigger {
-  kind: 'timer' | 'onTypeInsert' | 'manual' | 'startup';
+  kind: 'timer' | 'onTypeInsert' | 'onNodeState' | 'manual' | 'startup';
 }
 
 interface JobState {
@@ -54,11 +54,12 @@ export class Scheduler {
   private config: CoffeectxConfig;
   private running = false;
   private currentJob: string | null = null;
-  private unsubscribeInsert?: () => void;
+  private unsubscribeNodeEvents?: () => void;
   private triggerPollHandle: NodeJS.Timeout | null = null;
   private configPollHandle: NodeJS.Timeout | null = null;
   private heartbeatHandle: NodeJS.Timeout | null = null;
   private stopping = false;
+  private hardKillHandle: NodeJS.Timeout | null = null;
 
   constructor(opts: SchedulerOptions) {
     this.db = opts.db;
@@ -106,8 +107,8 @@ export class Scheduler {
       }
     }
 
-    // 3. Subscribe to insert events.
-    this.unsubscribeInsert = this.db.onInsert(event => this.onInsertEvent(event));
+    // 3. Subscribe to node-lifecycle events (insert + state-change).
+    this.unsubscribeNodeEvents = this.db.onNodeEvent(event => this.onNodeEvent(event));
 
     // 4. Wire timers for enabled jobs.
     for (const job of this.jobs.values()) this.installTimers(job);
@@ -119,7 +120,9 @@ export class Scheduler {
     this.triggerPollHandle = setInterval(() => this.pollTriggerPending(), TRIGGER_POLL_MS);
     this.configPollHandle = setInterval(() => this.pollConfig(), CONFIG_POLL_MS);
 
-    // 7. Shutdown hooks.
+    // 7. Shutdown hooks. A second SIGINT short-circuits to an immediate exit
+    // — pi-coding-agent's `session.prompt()` doesn't honour AbortSignal and
+    // we want Ctrl-C-twice to behave like Ctrl-C-then-Ctrl-C in any other CLI.
     const shutdown = (sig: string) => { this.log(`received ${sig}, shutting down`); void this.shutdown(); };
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -132,10 +135,24 @@ export class Scheduler {
   }
 
   private async shutdown(): Promise<void> {
-    if (this.stopping) return;
+    if (this.stopping) {
+      // Second SIGINT/SIGTERM — user wants out NOW. Don't bother trying to
+      // unwind anything; pi-coding-agent's session.prompt() is hopeless to
+      // cancel cooperatively.
+      this.log('second shutdown signal — force exit');
+      process.exit(1);
+    }
     this.stopping = true;
 
-    this.unsubscribeInsert?.();
+    // Hard deadline: if the grace loop hasn't released us within
+    // SHUTDOWN_GRACE_MS, force-exit. Unrefed so it doesn't keep the loop alive.
+    this.hardKillHandle = setTimeout(() => {
+      console.error('[scheduler] shutdown timeout — force exit');
+      process.exit(1);
+    }, SHUTDOWN_GRACE_MS);
+    this.hardKillHandle.unref();
+
+    this.unsubscribeNodeEvents?.();
     if (this.triggerPollHandle) clearInterval(this.triggerPollHandle);
     if (this.configPollHandle) clearInterval(this.configPollHandle);
     if (this.heartbeatHandle) clearInterval(this.heartbeatHandle);
@@ -144,19 +161,22 @@ export class Scheduler {
       if (st.debounceTimer) clearTimeout(st.debounceTimer);
     }
 
-    // Wait briefly for an in-flight job to finish before aborting the wait loop.
+    // Signal in-flight jobs to stop, then wait for them to honour it.
+    this.abortController.abort();
     const deadline = Date.now() + SHUTDOWN_GRACE_MS;
     while (this.running && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 200));
     }
-    if (this.running) {
-      this.log(`job "${this.currentJob}" still running after ${SHUTDOWN_GRACE_MS / 1000}s — exiting anyway`);
+
+    // Only close the DB if the job actually finished. If it's still spinning
+    // (pi-coding-agent ignoring the signal), leaving the handle open avoids
+    // the "database connection is not open" stderr spam from late writes —
+    // the hard-kill watchdog will terminate the process anyway.
+    if (!this.running) {
+      try { this.db.close(); } catch { /* idempotent */ }
+    } else {
+      this.log(`job "${this.currentJob}" still running after grace; deferring db.close to watchdog`);
     }
-    this.abortController.abort();
-    // Close the better-sqlite3 handle so the WAL + sqlite-vec file descriptors
-    // release. Without this the Node event loop keeps running on the open DB
-    // connection and the process never exits after SIGINT/SIGTERM.
-    try { this.db.close(); } catch { /* idempotent */ }
   }
 
   // ── Trigger plumbing ──────────────────────────────────────────────────────
@@ -173,20 +193,43 @@ export class Scheduler {
     }
   }
 
-  private onInsertEvent(event: { ids: string[]; typeNames: string[] }): void {
+  private onNodeEvent(event: NodeEvent): void {
     if (event.typeNames.length === 0) return;
-    const matched = new Set<string>();
-    for (const job of this.jobs.values()) {
-      for (const trig of job.triggers) {
-        if (trig.kind !== 'onTypeInsert') continue;
-        if (trig.typeNames.some(t => event.typeNames.includes(t))) {
-          matched.add(job.name);
-          break;
+    if (event.kind === 'insert') {
+      const matched = new Set<string>();
+      for (const job of this.jobs.values()) {
+        for (const trig of job.triggers) {
+          if (trig.kind !== 'onTypeInsert') continue;
+          if (trig.typeNames.some(t => event.typeNames.includes(t))) {
+            matched.add(job.name);
+            break;
+          }
         }
       }
+      for (const name of matched) {
+        this.enqueueDebounced(name, { kind: 'onTypeInsert' });
+      }
+      return;
     }
-    for (const name of matched) {
-      this.enqueueDebounced(name, { kind: 'onTypeInsert' });
+
+    // state-change: match `onNodeState` triggers whose typeNames overlap the
+    // event's type AND whose target state equals the event's state.
+    if (event.kind === 'state-change') {
+      if (!event.state) return;
+      const matched = new Set<string>();
+      for (const job of this.jobs.values()) {
+        for (const trig of job.triggers) {
+          if (trig.kind !== 'onNodeState') continue;
+          if (trig.state !== event.state) continue;
+          if (trig.typeNames.some(t => event.typeNames.includes(t))) {
+            matched.add(job.name);
+            break;
+          }
+        }
+      }
+      for (const name of matched) {
+        this.enqueueDebounced(name, { kind: 'onNodeState' });
+      }
     }
   }
 

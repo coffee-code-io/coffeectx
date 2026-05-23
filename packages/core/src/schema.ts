@@ -9,7 +9,11 @@ CREATE TABLE IF NOT EXISTS nodes (
   kind        TEXT    NOT NULL CHECK(kind IN ('symbol', 'meaning', 'list', 'map')),
   symbol_value TEXT,           -- set when kind='symbol'
   meaning_text TEXT,           -- set when kind='meaning'
-  type_id     TEXT REFERENCES types(id)  -- set when kind='map'
+  type_id     TEXT REFERENCES types(id),  -- set when kind='map'
+  -- Per-node state, valid only for named-type maps. NULL means the type has
+  -- no declared state machine (default [ready]) and the node is at its
+  -- single, final state.
+  state       TEXT
 );
 
 -- List contents (ordered)
@@ -62,6 +66,17 @@ CREATE TABLE IF NOT EXISTS type_map_entries (
   value_type_id TEXT NOT NULL REFERENCES types(id),
   PRIMARY KEY (type_id, key)
 );
+
+-- Ordered state machine per named type. Types without rows here behave as
+-- [ready] (single, final). The final state is the row with the highest
+-- position; upserts on a node in its final state are rejected.
+CREATE TABLE IF NOT EXISTS named_type_states (
+  type_name TEXT    NOT NULL,
+  position  INTEGER NOT NULL,
+  state     TEXT    NOT NULL,
+  PRIMARY KEY (type_name, position)
+);
+CREATE INDEX IF NOT EXISTS idx_named_type_states_name ON named_type_states(type_name);
 
 -- Named types: human-readable names → type_id.
 -- source distinguishes 'builtin' (shipped YAML) from 'user' (custom).

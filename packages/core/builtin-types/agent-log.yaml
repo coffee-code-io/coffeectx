@@ -13,6 +13,7 @@ types:
   UserInput:
     description: A message typed by the user to the coding agent — the user's intent or feedback.
     hidden: true
+    states: [extracted, linked]   # extracted by the agent-log indexer; bumped to `linked` after LSP enrichment
     kind: Map
     fields:
       sessionId: Symbol
@@ -31,6 +32,7 @@ types:
   FileOperation:
     description: A file creation or edit performed by the coding agent — captures what changed and where.
     hidden: true
+    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
@@ -48,6 +50,7 @@ types:
   ShellExecution:
     description: A shell command executed by the coding agent — build steps, test runs, git ops, etc.
     hidden: true
+    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
@@ -61,6 +64,7 @@ types:
   AgentQuestion:
     description: A clarifying question asked by the coding agent to the user before proceeding.
     hidden: true
+    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
@@ -76,6 +80,7 @@ types:
   AgentMessage:
     description: A plain-text reply from the coding agent to the user — status updates, explanations, summaries of what was done.
     hidden: true
+    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
@@ -91,6 +96,7 @@ types:
   AgentSummary:
     description: A wrap-up message the agent emits at the end of a turn — explains what was done after tool calls completed.
     hidden: true
+    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
