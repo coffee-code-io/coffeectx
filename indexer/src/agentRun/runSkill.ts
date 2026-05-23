@@ -64,6 +64,20 @@ export interface RunSkillInteractiveOptions {
   onBatchComplete?: (batchIndex: number) => Promise<void>;
 }
 
+/**
+ * Thrown by the skill runner when the LLM provider returns a terminal error
+ * (e.g. 402 credits exhausted, 429 after retries, 5xx). The scheduler treats
+ * this as a job failure and records the message in `last_error`. Batches that
+ * completed BEFORE the failing one stay in `processedEventIds`, so the next
+ * run resumes from the failing batch.
+ */
+export class ProviderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderError';
+  }
+}
+
 export interface RunSkillResult {
   sessionFile: string | undefined;
   batches: number;
@@ -127,31 +141,59 @@ export async function runSkillInteractive(
     noTools: 'builtin',
   });
 
-  // Surface willRetry signals for easier debugging.
+  // Track the last `agent_end` event so we can detect provider errors after
+  // each `prompt()` call. pi-coding-agent doesn't throw on retry-exhausted
+  // 402 / 429 / 5xx — it resolves the prompt() Promise with the error
+  // surfaced as the assistant's final text and `willRetry: false` on
+  // `agent_end`. Without explicit detection the indexer would happily mark
+  // the batch as processed and continue, hiding the failure.
+  let lastAgentEnd: { willRetry?: boolean; error?: unknown } | null = null;
   session.subscribe(ev => {
-    if (ev.type === 'agent_end' && (ev as { willRetry?: boolean }).willRetry) {
-      console.warn(`[runSkill:${skillName}] agent_end with retry pending`);
+    if (ev.type === 'agent_end') {
+      lastAgentEnd = ev as { willRetry?: boolean; error?: unknown };
+      if ((ev as { willRetry?: boolean }).willRetry) {
+        console.warn(`[runSkill:${skillName}] agent_end with retry pending`);
+      }
     }
   });
+
+  const checkProviderError = (batchIndex: number) => {
+    if (!lastAgentEnd) return;
+    const willRetry = lastAgentEnd.willRetry;
+    const err = lastAgentEnd.error;
+    // Provider error surfaced as `agent_end.error` and the agent has given
+    // up (`willRetry === false`). Throw so the caller fails the run cleanly
+    // and the batches that already completed stay in processedEventIds.
+    if (err && willRetry === false) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new ProviderError(
+        `[runSkill:${skillName}] provider error on batch ${batchIndex + 1}/${eventBatches.length}: ${msg}`,
+      );
+    }
+  };
 
   // ── 4. On a fresh session, plant the system+skill prompt as the first turn.
   // `session.prompt(text)` already awaits the full agent loop (the agent
   // emits `agent_end` to subscribed listeners before this Promise resolves)
   // — no separate "wait for end" step is needed.
   if (!isResuming) {
+    lastAgentEnd = null;
     await session.prompt(buildInstructionsMessage(skillPrompt));
+    checkProviderError(-1);
   }
 
   // ── 5. Per-batch loop ─────────────────────────────────────────────────────
   let batchesRun = 0;
   for (let i = 0; i < eventBatches.length; i++) {
     const text = renderBatch(eventBatches[i]!, i, eventBatches.length);
+    lastAgentEnd = null;
     try {
       await session.prompt(text);
     } catch (err) {
       console.error(`[runSkill:${skillName}] batch ${i + 1} prompt failed: ${(err as Error).message}`);
       throw err;
     }
+    checkProviderError(i);
 
     batchesRun = i + 1;
     if (onBatchComplete) {

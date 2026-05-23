@@ -82,6 +82,19 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
     const createdAt = stat.birthtimeMs ? new Date(stat.birthtimeMs).toISOString() : updatedAt;
     const title = extractTitle(content);
 
+    // Orphan filter: `~/.claude/plans/` is GLOBAL across all projects, so we
+    // need an explicit signal that *some session in this project's DB* used
+    // this plan via ExitPlanMode. Without that signal we'd index plans from
+    // unrelated projects. Source of truth: the plan_acceptances table the
+    // agent-log indexer populated.
+    const acceptances = db.getAcceptingSessions(name);
+    if (acceptances.length === 0) {
+      console.log(`[indexPlans] skipping orphan plan "${name}" (no accepting session in this project)`);
+      result.skipped++;
+      continue;
+    }
+    const acceptedBy = acceptances.map(a => a.sessionId);
+
     // Forward-pass link resolution (used for both new and existing plans).
     const { filePaths, symbolRefs } = await resolvePlanLinks(content, db);
 
@@ -98,6 +111,7 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
           ...(title ? { title } : {}),
           relatedFiles: filePaths,    // plain path strings (List<Symbol>)
           relatedSymbols: symbolRefs,
+          acceptedBy,                 // namespaced sessionIds
         },
       };
       try {
@@ -113,8 +127,9 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
       continue;
     }
 
-    // Existing plan — reverse-pass append any newly-resolvable refs.
-    const added = appendLinksToExistingPlan(db, prior.id, filePaths, symbolRefs);
+    // Existing plan — reverse-pass append any newly-resolvable refs AND new
+    // acceptances (sessions accepted after the plan was first indexed).
+    const added = appendLinksToExistingPlan(db, prior.id, filePaths, symbolRefs, acceptedBy);
     if (added > 0) {
       result.patched++;
       result.linksAdded += added;
@@ -209,23 +224,38 @@ function appendLinksToExistingPlan(
   planId: string,
   filePaths: string[],
   symbolRefs: { $id: string }[],
+  acceptedBy: string[],
 ): number {
   let added = 0;
-  if (filePaths.length > 0) {
-    const listId = db.getMapFieldId(planId, 'relatedFiles');
-    if (listId) {
-      // relatedFiles holds plain Symbol strings, not node references. We need
-      // to materialise each path as a Symbol atom node, then append the new
-      // node ids to the list. appendListItemsUnique drops duplicates.
-      const newSymbolIds = filePaths.map(p => db.insertSymbolNode(p));
-      added += db.appendListItemsUnique(listId, newSymbolIds);
-    }
-  }
+  added += appendValueListUnique(db, planId, 'relatedFiles', filePaths);
   if (symbolRefs.length > 0) {
     const listId = db.getMapFieldId(planId, 'relatedSymbols');
     if (listId) added += db.appendListItemsUnique(listId, symbolRefs.map(r => r.$id));
   }
+  added += appendValueListUnique(db, planId, 'acceptedBy', acceptedBy);
   return added;
+}
+
+/**
+ * Append plain Symbol VALUES to a list field, deduping by value rather than
+ * by node id. `appendListItemsUnique` alone dedups item-ids, but every call
+ * to `db.insertSymbolNode` creates a fresh node, so naive code would grow
+ * the list with duplicate "claude:<uuid>" entries on every run.
+ */
+function appendValueListUnique(db: Db, planId: string, fieldKey: string, values: string[]): number {
+  if (values.length === 0) return 0;
+  const listId = db.getMapFieldId(planId, fieldKey);
+  if (!listId) return 0;
+  // Inspect what's already in the list.
+  const existing = new Set<string>();
+  for (const itemId of db.getListItems(listId)) {
+    const node = db.loadNode(itemId);
+    if (node.kind === 'atom' && node.atom.kind === 'symbol') existing.add(node.atom.value);
+  }
+  const toAdd = [...new Set(values)].filter(v => !existing.has(v));
+  if (toAdd.length === 0) return 0;
+  const newIds = toAdd.map(v => db.insertSymbolNode(v));
+  return db.appendListItemsUnique(listId, newIds);
 }
 
 /** Pull every `[label](target)` target whose path looks like a file. */

@@ -140,8 +140,23 @@ export async function indexAgentSessions(
     existingSessionIds.add(meta.sessionId);
   }
 
+  // plan_accepted events don't get their own node — they're written to the
+  // hidden `plan_acceptances` table. Collect them now, write after the
+  // session inserts (the table doesn't depend on node ids).
+  const planAcceptances: Array<{ planSlug: string; sessionId: string; timestamp: string }> = [];
+
   for (const event of enriched) {
     if (existingUuids.has(event.uuid)) continue;
+    if (event.kind === 'plan_accepted') {
+      if (event.planSlug) {
+        planAcceptances.push({
+          planSlug: event.planSlug,
+          sessionId: event.sessionId,
+          timestamp: event.timestamp,
+        });
+      }
+      continue;
+    }
     const entry = eventToInsertEntry(event);
     if (entry) {
       entries.push(entry);
@@ -197,6 +212,15 @@ export async function indexAgentSessions(
     console.log(`[${provider.name}] wrote ${contextRows.length} event_file_context rows`);
   }
 
+  if (planAcceptances.length > 0) {
+    for (const pa of planAcceptances) {
+      db.writePlanAcceptance(pa.planSlug, pa.sessionId, pa.timestamp);
+    }
+    console.log(
+      `[${provider.name}] wrote ${planAcceptances.length} plan_acceptances rows`,
+    );
+  }
+
   return result;
 }
 
@@ -225,7 +249,7 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           timestamp: event.timestamp,
           operation: event.kind === 'file_create' ? 'create' : 'edit',
           path: event.path ?? '',
-          preview: event.preview ?? '',
+          content: event.content ?? '',
           touchedSymbols: [],
         },
       };

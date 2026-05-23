@@ -153,6 +153,10 @@ export class Scheduler {
       this.log(`job "${this.currentJob}" still running after ${SHUTDOWN_GRACE_MS / 1000}s — exiting anyway`);
     }
     this.abortController.abort();
+    // Close the better-sqlite3 handle so the WAL + sqlite-vec file descriptors
+    // release. Without this the Node event loop keeps running on the open DB
+    // connection and the process never exits after SIGINT/SIGTERM.
+    try { this.db.close(); } catch { /* idempotent */ }
   }
 
   // ── Trigger plumbing ──────────────────────────────────────────────────────

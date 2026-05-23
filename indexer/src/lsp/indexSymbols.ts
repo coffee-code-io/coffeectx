@@ -11,7 +11,7 @@
 
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import type { Db, InsertEntry } from '@coffeectx/core';
+import type { Db, DeepNode, InsertEntry } from '@coffeectx/core';
 import { LspClient, SymbolKind, type DocumentSymbol, type SymbolInformation } from './client.js';
 import {
   type FileHashStore,
@@ -20,7 +20,6 @@ import {
   saveFileHashes,
 } from '../fileHashes.js';
 import {
-  extractFilePathCandidates,
   extractIdentifierCandidates,
 } from '../plans/indexPlans.js';
 import { Progress } from '../jobs/progress.js';
@@ -264,72 +263,24 @@ interface LogEventInfo {
 }
 
 /**
- * Build a map from file path → event info, with **exact path matching only**.
+ * Build a map from code identifier → event info. The single source of truth
+ * for the LSP reverse-pass linking; the old file-path-keyed bulk index is
+ * gone — every event-type now goes through "identifier name appears in the
+ * event's text AND the LSP symbol lives in a file from the event's
+ * file-context."
  *
- * Sources:
- *   - FileOperation.path: the path is keyed twice — once as stored (often an
- *     absolute path from Claude/Codex), and once stripped to repo-relative
- *     when it starts with `repoPath + '/'` (so it matches the LSP indexer's
- *     `relPath` for files inside the repo).
- *   - Plan.content: every file path candidate parsed out of markdown links.
- *     Same dual-keying (raw + repo-relative if applicable).
+ * Event sources and their per-event file-context:
+ *   UserInput.text          / context: event_file_context table (filled by
+ *   AgentQuestion.question    sessionContext from the surrounding Edits)
+ *   AgentMessage.text
+ *   AgentSummary.text
+ *   FileOperation.content   / context: the FileOp's own `path` (single file)
+ *   Plan.content            / context: union of FileOp paths from accepting
+ *                                       sessions (plan_acceptances table)
  *
- * No more basename / last-two-segment fallback — those caused `db.ts` in one
- * package to cross-link with `db.ts` in another.
- */
-function buildFileEventIndex(db: Db, repoPath: string): Map<string, LogEventInfo[]> {
-  const index = new Map<string, LogEventInfo[]>();
-  const repoPrefix = repoPath.endsWith('/') ? repoPath : `${repoPath}/`;
-
-  const push = (key: string, info: LogEventInfo) => {
-    const arr = index.get(key) ?? [];
-    arr.push(info);
-    index.set(key, arr);
-  };
-  const pushKeys = (raw: string, info: LogEventInfo) => {
-    if (!raw) return;
-    push(raw, info);
-    if (raw.startsWith(repoPrefix)) push(raw.slice(repoPrefix.length), info);
-  };
-
-  for (const eventId of db.queryByNamedType(['FileOperation'])) {
-    try {
-      const node = db.loadNodeDeep(eventId, 2);
-      if (node.kind !== 'map') continue;
-      const pathNode = node.entries['path'];
-      if (pathNode?.kind !== 'atom' || pathNode.atom.kind !== 'symbol') continue;
-      const info: LogEventInfo = { id: eventId, typeName: 'FileOperation', fieldName: 'touchedSymbols' };
-      pushKeys(pathNode.atom.value, info);
-    } catch { /* best-effort */ }
-  }
-
-  for (const planId of db.queryByNamedType(['Plan'])) {
-    try {
-      const node = db.loadNodeDeep(planId, 2);
-      if (node.kind !== 'map') continue;
-      const content = node.entries['content'];
-      if (content?.kind !== 'atom' || content.atom.kind !== 'meaning') continue;
-      const info: LogEventInfo = { id: planId, typeName: 'Plan', fieldName: 'relatedSymbols' };
-      for (const path of extractFilePathCandidates(content.atom.value.text)) {
-        pushKeys(path, info);
-      }
-    } catch { /* best-effort */ }
-  }
-
-  return index;
-}
-
-/**
- * Build a map from code identifier → event info. Indexes
- * UserInput.text, AgentQuestion.question, AgentMessage.text,
- * AgentSummary.text (PascalCase / camelCase / snake_case tokens), and
- * identifiers extracted from inline-code spans inside Plan.content.
- *
- * Per-event file-context (from `event_file_context`) is attached so the
- * append-time loop can restrict each name-match to symbols that live in
- * files the event is allowed to be about. Plans get their content's parsed
- * file-path candidates as their context (best available proxy — Plans aren't
- * tied to a session).
+ * For Plans the identifier source is `extractIdentifierCandidates` (parses
+ * fenced inline code from the markdown body); everything else uses the
+ * generic `extractIdentifiers` regex.
  */
 function buildNameEventIndex(db: Db, repoPath: string): {
   index: Map<string, LogEventInfo[]>;
@@ -351,37 +302,72 @@ function buildNameEventIndex(db: Db, repoPath: string): {
     if (raw.startsWith(repoPrefix)) s.add(raw.slice(repoPrefix.length));
     contextByEvent.set(eventId, s);
   };
+  /** Extract the value of an atom field regardless of symbol vs meaning. */
+  const atomText = (n: DeepNode | undefined): string | null => {
+    if (!n || n.kind !== 'atom') return null;
+    if (n.atom.kind === 'symbol') return n.atom.value;
+    if (n.atom.kind === 'meaning') return n.atom.value.text;
+    return null;
+  };
 
-  const eventSources: Array<{ typeName: string; fieldKey: string }> = [
-    { typeName: 'UserInput',     fieldKey: 'text' },
-    { typeName: 'AgentQuestion', fieldKey: 'question' },
-    { typeName: 'AgentMessage',  fieldKey: 'text' },
-    { typeName: 'AgentSummary',  fieldKey: 'text' },
+  // 1. Text-bearing event types (UserInput / AgentQuestion / AgentMessage /
+  //    AgentSummary). File-context comes from event_file_context.
+  const textSources: Array<{ typeName: string; fieldKey: string; fieldName: 'relatedSymbols' }> = [
+    { typeName: 'UserInput',     fieldKey: 'text',     fieldName: 'relatedSymbols' },
+    { typeName: 'AgentQuestion', fieldKey: 'question', fieldName: 'relatedSymbols' },
+    { typeName: 'AgentMessage',  fieldKey: 'text',     fieldName: 'relatedSymbols' },
+    { typeName: 'AgentSummary',  fieldKey: 'text',     fieldName: 'relatedSymbols' },
   ];
-  for (const { typeName, fieldKey } of eventSources) {
+  for (const { typeName, fieldKey, fieldName } of textSources) {
     for (const eventId of db.queryByNamedType([typeName])) {
       try {
         const node = db.loadNodeDeep(eventId, 2);
         if (node.kind !== 'map') continue;
-        const field = node.entries[fieldKey];
-        if (field?.kind !== 'atom' || field.atom.kind !== 'meaning') continue;
-        const info: LogEventInfo = { id: eventId, typeName, fieldName: 'relatedSymbols' };
-        for (const ident of extractIdentifiers(field.atom.value.text)) push(ident, info);
+        const text = atomText(node.entries[fieldKey]);
+        if (!text) continue;
+        const info: LogEventInfo = { id: eventId, typeName, fieldName };
+        for (const ident of extractIdentifiers(text)) push(ident, info);
         for (const path of db.getEventFileContext(eventId)) addContext(eventId, path);
       } catch { /* best-effort */ }
     }
   }
 
+  // 2. FileOperations. Identifiers come from `content` (full Write/Edit
+  //    payload). File-context is the FileOp's own `path` — same path as the
+  //    LSP loop is iterating, so a name match is a touchedSymbol iff the
+  //    symbol's `name` appears in the edit's content.
+  for (const eventId of db.queryByNamedType(['FileOperation'])) {
+    try {
+      const node = db.loadNodeDeep(eventId, 2);
+      if (node.kind !== 'map') continue;
+      const content = atomText(node.entries['content']);
+      const path = atomText(node.entries['path']);
+      if (!path) continue;
+      const info: LogEventInfo = { id: eventId, typeName: 'FileOperation', fieldName: 'touchedSymbols' };
+      if (content) for (const ident of extractIdentifiers(content)) push(ident, info);
+      addContext(eventId, path);
+    } catch { /* best-effort */ }
+  }
+
+  // 3. Plans. Identifiers from inline-code spans in the markdown body.
+  //    File-context = union of FileOperation paths across all accepting
+  //    sessions (plan_acceptances). A plan with no acceptances should have
+  //    been skipped at index time; here it would just produce no context →
+  //    no symbol links.
   for (const planId of db.queryByNamedType(['Plan'])) {
     try {
       const node = db.loadNodeDeep(planId, 2);
       if (node.kind !== 'map') continue;
-      const content = node.entries['content'];
-      if (content?.kind !== 'atom' || content.atom.kind !== 'meaning') continue;
+      const content = atomText(node.entries['content']);
+      const slug = atomText(node.entries['name']);
+      if (!content || !slug) continue;
       const info: LogEventInfo = { id: planId, typeName: 'Plan', fieldName: 'relatedSymbols' };
-      for (const ident of extractIdentifierCandidates(content.atom.value.text)) push(ident, info);
-      // Plan's "context" is the set of file paths it explicitly references.
-      for (const path of extractFilePathCandidates(content.atom.value.text)) addContext(planId, path);
+      for (const ident of extractIdentifierCandidates(content)) push(ident, info);
+      // File-context derives from the accepting sessions' FileOperations
+      // (plan_acceptances → AgentSession → FileOperation.path). This is the
+      // narrower, project-scoped alternative to parsing paths out of the
+      // plan markdown directly.
+      for (const path of db.getPlanFilePaths(slug)) addContext(planId, path);
     } catch { /* best-effort */ }
   }
 
@@ -489,8 +475,10 @@ export async function indexWithLsp(
     return result;
   }
 
-  // Build event indexes upfront so both agentEvents and reverse links can be populated.
-  const fileEventIndex = buildFileEventIndex(db, repoPath);
+  // Build event indexes upfront so both agentEvents and reverse links can be
+  // populated. Everything goes through the name-keyed index now — the old
+  // file-keyed bulk index was the source of FileOperation over-linking and
+  // is gone.
   const { index: nameEventIndex, contextByEvent: nameEventFileCtx } = buildNameEventIndex(db, repoPath);
 
   // Pre-load existing symbol keys so re-runs don't create duplicate nodes.
@@ -523,24 +511,19 @@ export async function indexWithLsp(
 
       if (records.length === 0) continue;
 
-      // Collect file-level event IDs — exact path match only (no basename).
-      const fileEvents: LogEventInfo[] = fileEventIndex.get(relPath) ?? [];
-      const fileEventIds = fileEvents.map(e => e.id);
-
-      // Build per-record agentEvents (file events + name-matched events),
-      // skipping symbols already present in the DB (idempotent re-runs).
+      // Build per-record agentEvents (name-matched events filtered by the
+      // event's file_context), skipping symbols already present in the DB
+      // (idempotent re-runs).
       const entries = records
         .filter(rec => {
           const lineStr = String(rec.line + 1);
           return !existingSymbolKeys.has(`${rec.typeName}:${relPath}:${rec.name}:${lineStr}`);
         })
         .map(rec => {
-          // Name-matched events are only relevant when the event's file context
-          // includes THIS file — otherwise we'd reintroduce the over-linking.
           const nameEvents = (nameEventIndex.get(rec.name) ?? []).filter(info =>
             nameEventFileCtx.get(info.id)?.has(relPath),
           );
-          const allEventIds = [...new Set([...fileEventIds, ...nameEvents.map(e => e.id)])];
+          const allEventIds = [...new Set(nameEvents.map(e => e.id))];
           return symbolEntry(rec, relPath, allEventIds);
         });
 
@@ -552,17 +535,10 @@ export async function indexWithLsp(
         result.errors.push({ file: relPath, error: `[${err.path}] ${err.message}` });
       }
 
-      // Accumulate reverse links for file-level events (touchedSymbols)
-      const insertedIds = insertResult.ids.filter((id): id is string => id !== null);
-      for (const info of fileEvents) {
-        const entry = reverseLinks.get(info.id) ?? { info, symbolIds: [] };
-        entry.symbolIds.push(...insertedIds);
-        reverseLinks.set(info.id, entry);
-      }
-
-      // Accumulate reverse links for name-matched events — same file-context
-      // filter applies here. An event only gets linked to a symbol with this
-      // name if its file context includes the symbol's file path.
+      // Accumulate reverse links for name-matched events — only when the
+      // event's file_context includes the LSP symbol's file path. This is
+      // what gives FileOperation.touchedSymbols (event = FileOp, context =
+      // its own path) the same narrow shape that text events get.
       for (let i = 0; i < records.length; i++) {
         const symbolId = insertResult.ids[i];
         if (!symbolId) continue;

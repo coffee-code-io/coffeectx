@@ -1343,6 +1343,14 @@ export class Db implements QueryDb {
     txn();
   }
 
+  /** Return the item node IDs in a list, in position order. */
+  getListItems(listId: string): string[] {
+    const rows = this.raw
+      .prepare(`SELECT item_id FROM list_items WHERE list_id=? ORDER BY position`)
+      .all(listId) as Array<{ item_id: string }>;
+    return rows.map(r => r.item_id);
+  }
+
   /**
    * Append item node IDs to a list, skipping IDs already present. Returns the
    * number of items actually appended. Also refreshes node_refs for any
@@ -1502,6 +1510,51 @@ export class Db implements QueryDb {
       out.set(r.file_path, arr);
     }
     return out;
+  }
+
+  // ── Plan acceptance (hidden from MCP/UI) ───────────────────────────────────
+  //
+  // `plan_acceptances(plan_slug, session_id)` links Claude / Codex / pi.dev
+  // sessions to the Plan markdown they accepted via ExitPlanMode. Plans
+  // indexed without at least one accepting session are treated as orphans
+  // (likely produced by a different project, since `~/.claude/plans/` is a
+  // global directory) and skipped.
+
+  /** Record one ExitPlanMode acceptance. Idempotent. */
+  writePlanAcceptance(planSlug: string, sessionId: string, timestamp: string): void {
+    this.raw.prepare(
+      `INSERT OR IGNORE INTO plan_acceptances(plan_slug, session_id, timestamp) VALUES(?,?,?)`,
+    ).run(planSlug, sessionId, timestamp);
+  }
+
+  /** Sessions that accepted a plan, newest first. */
+  getAcceptingSessions(planSlug: string): Array<{ sessionId: string; timestamp: string }> {
+    const rows = this.raw.prepare(
+      `SELECT session_id, timestamp FROM plan_acceptances WHERE plan_slug = ? ORDER BY timestamp DESC`,
+    ).all(planSlug) as Array<{ session_id: string; timestamp: string }>;
+    return rows.map(r => ({ sessionId: r.session_id, timestamp: r.timestamp }));
+  }
+
+  /**
+   * Union of `FileOperation.path` values across every session that accepted
+   * the plan. Used by the LSP reverse pass to constrain symbol linking to
+   * the files the accepting sessions actually touched.
+   */
+  getPlanFilePaths(planSlug: string): string[] {
+    const rows = this.raw.prepare(`
+      SELECT DISTINCT path_node.symbol_value AS file_path
+      FROM plan_acceptances pa
+      JOIN map_entries me_sid ON me_sid.key = 'sessionId'
+      JOIN nodes sid_atom    ON sid_atom.id = me_sid.value_id
+                              AND sid_atom.kind = 'symbol'
+                              AND sid_atom.symbol_value = pa.session_id
+      JOIN nodes fileop_node ON fileop_node.id = me_sid.map_id
+      JOIN named_types nt    ON nt.type_id = fileop_node.type_id AND nt.name = 'FileOperation'
+      JOIN map_entries me_path ON me_path.map_id = fileop_node.id AND me_path.key = 'path'
+      JOIN nodes path_node     ON path_node.id = me_path.value_id AND path_node.kind = 'symbol'
+      WHERE pa.plan_slug = ?
+    `).all(planSlug) as Array<{ file_path: string }>;
+    return rows.map(r => r.file_path);
   }
 
   // ── Scheduler heartbeat ────────────────────────────────────────────────────

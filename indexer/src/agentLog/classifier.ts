@@ -7,7 +7,8 @@ export type EventKind =
   | 'shell_exec'
   | 'agent_question'
   | 'agent_message'
-  | 'agent_summary';
+  | 'agent_summary'
+  | 'plan_accepted';
 
 export interface ClassifiedEvent {
   kind: EventKind;
@@ -16,19 +17,22 @@ export interface ClassifiedEvent {
   timestamp: string;
   text?: string;         // user_input | agent_message | agent_summary
   path?: string;         // file_create | file_edit
-  preview?: string;      // file_create | file_edit
+  content?: string;      // file_create | file_edit — full text (no longer truncated)
   command?: string;      // shell_exec
   description?: string;  // shell_exec
   question?: string;     // agent_question
+  planSlug?: string;     // plan_accepted — filename slug (no extension)
+  planPath?: string;     // plan_accepted — absolute path the agent passed
 }
 
 /** Tool names whose uses are never interesting enough to index. */
 const SKIP_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'ToolSearch',
   'TaskOutput', 'TodoWrite',
-  'NotebookEdit', 'EnterPlanMode', 'ExitPlanMode',
+  'NotebookEdit', 'EnterPlanMode',
   'EnterWorktree', 'CronCreate', 'CronDelete', 'CronList',
   'WebSearch', 'WebFetch', 'Skill',
+  // ExitPlanMode is handled separately — it becomes a `plan_accepted` event.
 ]);
 
 const TRIVIAL_BASH_FIRST_TOKENS = new Set([
@@ -38,6 +42,13 @@ const TRIVIAL_BASH_FIRST_TOKENS = new Set([
 ]);
 
 const INTERESTING_BASH_RE = /\b(test|spec|jest|vitest|mocha|jasmine|karma|pytest|rspec|build|compile|tsc|webpack|rollup|vite|esbuild|lint|eslint|prettier|typecheck|type-check|check|deploy|publish|run\s+(?:test|build|lint|check|dev)|cargo\s+(?:test|build|check)|go\s+(?:test|build|vet)|make|cmake|bazel|buck)\b/i;
+
+/** Return the filename without extension, e.g. `/a/b/foo.md` → `foo`. */
+function basenameNoExt(p: string): string {
+  const base = p.split('/').pop() ?? p;
+  const dot = base.lastIndexOf('.');
+  return dot > 0 ? base.slice(0, dot) : base;
+}
 
 function isTrivialBash(command: string, description: string): boolean {
   if (INTERESTING_BASH_RE.test(command) || INTERESTING_BASH_RE.test(description)) return false;
@@ -154,11 +165,14 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
       if (name === 'Write') {
         const path = (input.file_path as string | undefined) ?? '';
         const rawContent = (input.content as string | undefined) ?? '';
-        events.push({ kind: 'file_create', sessionId, uuid, timestamp, path, preview: rawContent.slice(0, 300) });
+        // Full content (not truncated) — the LSP reverse pass uses it for
+        // name-match enrichment, and Symbol storage doesn't embed it so the
+        // cost is purely the row's TEXT bytes.
+        events.push({ kind: 'file_create', sessionId, uuid, timestamp, path, content: rawContent });
       } else if (name === 'Edit') {
         const path = (input.file_path as string | undefined) ?? '';
         const newStr = (input.new_string as string | undefined) ?? '';
-        events.push({ kind: 'file_edit', sessionId, uuid, timestamp, path, preview: newStr.slice(0, 300) });
+        events.push({ kind: 'file_edit', sessionId, uuid, timestamp, path, content: newStr });
       } else if (name === 'Bash') {
         const command = (input.command as string | undefined) ?? '';
         const description = (input.description as string | undefined) ?? '';
@@ -168,6 +182,18 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
         const question = (input.question as string | undefined) ?? '';
         if (!question.trim()) continue;
         events.push({ kind: 'agent_question', sessionId, uuid, timestamp, question });
+      } else if (name === 'ExitPlanMode') {
+        // Claude Plan Mode tool — the agent presents a plan and the user
+        // accepts/rejects. The `input` carries the full plan markdown and
+        // the path it was saved to. We turn this into a `plan_accepted`
+        // event so the plans indexer can link the Plan node back to the
+        // session and the LSP reverse pass can scope plan symbol-links to
+        // the session's actual edits.
+        const planPath = (input.planFilePath as string | undefined) ?? '';
+        if (!planPath) continue;
+        const planSlug = basenameNoExt(planPath);
+        if (!planSlug) continue;
+        events.push({ kind: 'plan_accepted', sessionId, uuid, timestamp, planSlug, planPath });
       }
       // All other tool names (Agent, custom MCP tools, etc.) are skipped.
     }
