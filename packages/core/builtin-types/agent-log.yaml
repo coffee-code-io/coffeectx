@@ -1,13 +1,14 @@
 types:
   AgentSession:
-    description: A Claude Code agent working session — a single conversation from start to finish.
+    description: One coding-agent working session (Claude Code / Codex / pi.dev) — a single conversation from start to finish. SessionId is namespaced by provider (e.g. "claude:<uuid>", "codex:<thread-id>", "pi:<uuid>").
     hidden: true
     kind: Map
     fields:
-      sessionId: Symbol    # unique session UUID
+      sessionId: Symbol    # provider-namespaced session id
       projectPath: Symbol  # cwd at session start
       startTime: Symbol    # ISO timestamp of first message
-      model: Symbol        # e.g. "claude-sonnet-4-6"
+      model: Symbol        # e.g. "claude-sonnet-4-6", "gpt-5-codex", "qwen/qwen3-32b"
+      provider: Symbol     # "claude" | "codex" | "pi"
 
   UserInput:
     description: A message typed by the user to the coding agent — the user's intent or feedback.

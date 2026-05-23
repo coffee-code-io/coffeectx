@@ -190,6 +190,98 @@ export class Db implements QueryDb {
     } catch (err) {
       log(`db.migrate: node_refs backfill failed: ${(err as Error).message}`);
     }
+
+    // Drop the renamed `logs` job row — the registry now exposes it as
+    // `claude` instead, and a stale row would keep showing up in `job list`.
+    try {
+      const info = this.raw.prepare(`DELETE FROM jobs WHERE name='logs'`).run();
+      if (info.changes > 0) log(`db.migrate: dropped orphan 'logs' job row`);
+    } catch { /* table may not exist yet */ }
+
+    // Backfill `provider`/`sessionId` on pre-multi-provider AgentSession rows.
+    // Originally only Claude sessions existed; their ids were raw UUIDs and the
+    // schema didn't carry `provider`. Now we namespace as `claude:<uuid>` and
+    // store the provider explicitly. We rewrite ONLY rows whose sessionId
+    // doesn't already carry a `<provider>:` prefix — anything namespaced is
+    // assumed correct.
+    try {
+      const sessions = this.raw.prepare(
+        `SELECT n.id FROM nodes n JOIN named_types nt ON nt.type_id=n.type_id WHERE nt.name='AgentSession'`,
+      ).all() as Array<{ id: string }>;
+      let patched = 0;
+      const PROVIDER_PREFIX_RE = /^(claude|codex|pi):/;
+      const upsertField = this.raw.transaction((mapId: string, key: string, valueId: string) => {
+        const existing = this.raw.prepare(
+          `SELECT value_id FROM map_entries WHERE map_id=? AND key=?`,
+        ).get(mapId, key) as { value_id: string } | undefined;
+        if (existing) {
+          this.raw.prepare(`UPDATE map_entries SET value_id=? WHERE map_id=? AND key=?`).run(valueId, mapId, key);
+        } else {
+          this.raw.prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`).run(mapId, key, valueId);
+        }
+      });
+      const newSymbol = (value: string): string => {
+        const id = uuidv4();
+        this.raw.prepare(`INSERT INTO nodes(id, kind, symbol_value) VALUES(?,?,?)`).run(id, 'symbol', value);
+        return id;
+      };
+      for (const { id } of sessions) {
+        const provRow = this.raw.prepare(
+          `SELECT n.symbol_value AS v FROM map_entries me JOIN nodes n ON n.id=me.value_id WHERE me.map_id=? AND me.key='provider'`,
+        ).get(id) as { v: string | null } | undefined;
+        if (provRow && provRow.v) continue;
+
+        const sidRow = this.raw.prepare(
+          `SELECT n.id AS nid, n.symbol_value AS v FROM map_entries me JOIN nodes n ON n.id=me.value_id WHERE me.map_id=? AND me.key='sessionId'`,
+        ).get(id) as { nid: string; v: string | null } | undefined;
+
+        if (sidRow && sidRow.v && !PROVIDER_PREFIX_RE.test(sidRow.v)) {
+          // Rewrite the existing sessionId symbol value in-place.
+          this.raw.prepare(`UPDATE nodes SET symbol_value=? WHERE id=?`).run(`claude:${sidRow.v}`, sidRow.nid);
+        }
+
+        upsertField(id, 'provider', newSymbol('claude'));
+        patched++;
+      }
+      if (patched > 0) {
+        log(`db.migrate: patched ${patched} AgentSession nodes with provider='claude'`);
+        // node_refs may reference the rewritten sessionId symbol nodes; the
+        // edge index keys on node ids, not symbol values, so it stays valid.
+      }
+    } catch (err) {
+      log(`db.migrate: AgentSession provider backfill failed: ${(err as Error).message}`);
+    }
+
+    // Existing log-event nodes (UserInput/FileOperation/etc.) carry a
+    // `sessionId` field whose value is the pre-namespace Claude UUID. Patch
+    // those to `claude:<uuid>` so they continue to link to their parent
+    // AgentSession via that string. Only events whose sessionId lacks a
+    // provider prefix are touched.
+    try {
+      const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentMessage', 'AgentSummary'];
+      const placeholders = EVENT_TYPES.map(() => '?').join(',');
+      const rows = this.raw.prepare(
+        `SELECT n.id AS sym_id, n.symbol_value AS v
+         FROM nodes n
+         JOIN map_entries me ON me.value_id = n.id
+         JOIN nodes parent ON parent.id = me.map_id
+         JOIN named_types nt ON nt.type_id = parent.type_id
+         WHERE nt.name IN (${placeholders})
+           AND me.key = 'sessionId'
+           AND n.kind = 'symbol'
+           AND n.symbol_value NOT LIKE 'claude:%'
+           AND n.symbol_value NOT LIKE 'codex:%'
+           AND n.symbol_value NOT LIKE 'pi:%'`,
+      ).all(...EVENT_TYPES) as Array<{ sym_id: string; v: string }>;
+      const txn = this.raw.transaction(() => {
+        const stmt = this.raw.prepare(`UPDATE nodes SET symbol_value=? WHERE id=?`);
+        for (const r of rows) stmt.run(`claude:${r.v}`, r.sym_id);
+      });
+      txn();
+      if (rows.length > 0) log(`db.migrate: namespaced ${rows.length} event sessionId symbols as claude:*`);
+    } catch (err) {
+      log(`db.migrate: event sessionId namespacing failed: ${(err as Error).message}`);
+    }
   }
 
   // ── Type upsert ────────────────────────────────────────────────────────────

@@ -6,7 +6,13 @@
  *                      its own `parameters.{repoPath, lspCommand, intervalMs}`.
  *                      If no lsp* entry exists in config, a single default `lsp`
  *                      job is registered (defaultEnabled=false).
- *   - logs           : reads `parameters.{logsPath, logsNewerThan?, intervalMs?}`.
+ *   - claude         : index Claude Code session JSONLs.
+ *                      `parameters.{path, newerThan?, intervalMs?}`
+ *   - codex          : index OpenAI Codex CLI sessions from ~/.codex/.
+ *                      `parameters.{statePath?, newerThan?, intervalMs?}`
+ *   - pi             : index pi.dev session JSONLs from a configured dir.
+ *                      `parameters.{sessionsPath, newerThan?, intervalMs?}`
+ *   - plans          : ingest Claude plan-mode markdown files.
  *   - skill:<dir>    : one per skill directory under indexer/skills/. Triggered by
  *                      onTypeInsert on the agent-log event types, with a fallback
  *                      timer. Reads `parameters.{auth, batchStep?, intervalMs?}`.
@@ -14,20 +20,25 @@
 
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
 import type { Db, CoffeectxConfig, AuthSettings } from '@coffeectx/core';
 import type { Job, JobTrigger } from './types.js';
 import { indexWithLsp } from '../lsp/indexSymbols.js';
-import { indexLogs } from '../agentLog/indexLogs.js';
+import { indexAgentSessions } from '../agentLog/indexLogs.js';
+import { ClaudeProvider } from '../agentLog/providers/claude.js';
+import { CodexProvider } from '../agentLog/providers/codex.js';
+import { PiProvider } from '../agentLog/providers/pi.js';
 import { runOneSkill, listAvailableSkills, loadSkillDef } from '../agentRun/indexAgent.js';
 import { loadFileHashes } from '../fileHashes.js';
 import { indexPlans } from '../plans/indexPlans.js';
 
 const DEFAULT_LSP_INTERVAL_MS = 10 * 60_000;
-const DEFAULT_LOGS_INTERVAL_MS = 30_000;
+const DEFAULT_AGENTLOG_INTERVAL_MS = 30_000;
 const DEFAULT_PLANS_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_SKILL_FALLBACK_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
 const DEFAULT_PLANS_DIR = join(homedir(), '.claude', 'plans');
+const DEFAULT_CODEX_STATE_PATH = join(homedir(), '.codex', 'state_5.sqlite');
 
 /**
  * Event types whose insertion should trigger agent skill jobs.
@@ -60,7 +71,14 @@ function readIntervalMs(params: Record<string, unknown>, fallback: number): numb
 
 function readString(params: Record<string, unknown>, key: string): string | undefined {
   const v = params[key];
-  return typeof v === 'string' && v.length > 0 ? v : undefined;
+  if (typeof v !== 'string' || v.length === 0) return undefined;
+  return expandTilde(v);
+}
+
+function expandTilde(p: string): string {
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  return p;
 }
 
 /** Names of project.jobs keys that represent an LSP job instance. */
@@ -102,29 +120,95 @@ function buildLspJob(jobName: string, config: CoffeectxConfig, projectName: stri
   };
 }
 
-function buildLogsJob(config: CoffeectxConfig, projectName: string): Job {
-  const params = projectJobParams(config, projectName, 'logs');
+function readNewerThan(params: Record<string, unknown>): Date | undefined {
+  const v = readString(params, 'newerThan');
+  return v ? new Date(v) : undefined;
+}
+
+function buildClaudeJob(config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, 'claude');
   return {
-    name: 'logs',
+    name: 'claude',
     description: 'Index Claude Code JSONL session logs.',
     defaultEnabled: true,
-    triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_LOGS_INTERVAL_MS) }],
+    triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_AGENTLOG_INTERVAL_MS) }],
     async run(ctx) {
-      const logsPath = readString(ctx.parameters, 'logsPath');
-      if (!logsPath) return { message: 'no logsPath configured — skipped' };
+      const path = readString(ctx.parameters, 'path');
+      if (!path) return { message: 'no path configured — skipped' };
 
-      const newerThanStr = readString(ctx.parameters, 'logsNewerThan');
-      const newerThan = newerThanStr ? new Date(newerThanStr) : undefined;
       const hashes = loadFileHashes();
-      const r = await indexLogs(ctx.db, [resolve(logsPath)], { newerThan, hashes });
+      const provider = new ClaudeProvider({ paths: [resolve(path)] });
+      const r = await indexAgentSessions(ctx.db, provider, {
+        newerThan: readNewerThan(ctx.parameters),
+        hashes,
+      });
 
       if (r.errors.length > 0) {
         const first = r.errors[0]!;
-        throw new Error(`${r.errors.length} file error(s); first: ${first.file}: ${first.error}`);
+        throw new Error(`${r.errors.length} error(s); first: ${first.file}: ${first.error}`);
       }
       return {
-        message: `${r.files} files (${r.skipped} skipped), ${r.sessions} sessions, ${r.inserted} inserted`,
-        metrics: { files: r.files, skipped: r.skipped, sessions: r.sessions, events: r.events, inserted: r.inserted },
+        message: `${r.sessions} sessions, ${r.events} events, ${r.inserted} inserted`,
+        metrics: { sessions: r.sessions, events: r.events, inserted: r.inserted },
+      };
+    },
+  };
+}
+
+function buildCodexJob(config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, 'codex');
+  const statePath = readString(params, 'statePath') ?? DEFAULT_CODEX_STATE_PATH;
+  // Default-enable iff codex appears to be installed for this user.
+  const defaultEnabled = existsSync(statePath);
+  return {
+    name: 'codex',
+    description: 'Index OpenAI Codex CLI sessions from ~/.codex/.',
+    defaultEnabled,
+    triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_AGENTLOG_INTERVAL_MS) }],
+    async run(ctx) {
+      const sp = readString(ctx.parameters, 'statePath') ?? DEFAULT_CODEX_STATE_PATH;
+      if (!existsSync(sp)) return { message: `no codex state at ${sp} — skipped` };
+
+      const provider = new CodexProvider({ statePath: sp });
+      const r = await indexAgentSessions(ctx.db, provider, {
+        newerThan: readNewerThan(ctx.parameters),
+      });
+
+      if (r.errors.length > 0) {
+        const first = r.errors[0]!;
+        throw new Error(`${r.errors.length} error(s); first: ${first.file}: ${first.error}`);
+      }
+      return {
+        message: `${r.sessions} sessions, ${r.events} events, ${r.inserted} inserted`,
+        metrics: { sessions: r.sessions, events: r.events, inserted: r.inserted },
+      };
+    },
+  };
+}
+
+function buildPiJob(config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, 'pi');
+  return {
+    name: 'pi',
+    description: 'Index pi.dev session JSONL files from a configured directory.',
+    defaultEnabled: false,
+    triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_AGENTLOG_INTERVAL_MS) }],
+    async run(ctx) {
+      const sessionsPath = readString(ctx.parameters, 'sessionsPath');
+      if (!sessionsPath) return { message: 'no sessionsPath configured — skipped' };
+
+      const provider = new PiProvider({ sessionsPath: resolve(sessionsPath) });
+      const r = await indexAgentSessions(ctx.db, provider, {
+        newerThan: readNewerThan(ctx.parameters),
+      });
+
+      if (r.errors.length > 0) {
+        const first = r.errors[0]!;
+        throw new Error(`${r.errors.length} error(s); first: ${first.file}: ${first.error}`);
+      }
+      return {
+        message: `${r.sessions} sessions, ${r.events} events, ${r.inserted} inserted`,
+        metrics: { sessions: r.sessions, events: r.events, inserted: r.inserted },
       };
     },
   };
@@ -221,7 +305,9 @@ export function buildJobs(_db: Db, config: CoffeectxConfig, projectName: string)
     jobs.push(buildLspJob(name, config, projectName));
   }
 
-  jobs.push(buildLogsJob(config, projectName));
+  jobs.push(buildClaudeJob(config, projectName));
+  jobs.push(buildCodexJob(config, projectName));
+  jobs.push(buildPiJob(config, projectName));
   jobs.push(buildPlansJob(config, projectName));
 
   for (const dirName of listAvailableSkills()) {
