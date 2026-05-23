@@ -14,8 +14,19 @@ import { classifyMessages } from './classifier.js';
 import { enrichEvents } from './enricher.js';
 import type { EnrichedEvent } from './enricher.js';
 import type { AgentLogProvider, ProviderScanOptions } from './provider.js';
+import { Progress } from '../jobs/progress.js';
+import { computeFileContext } from './sessionContext.js';
 
-export interface IndexLogsOptions extends ProviderScanOptions {}
+export interface IndexLogsOptions extends ProviderScanOptions {
+  /**
+   * Project's repo root. When supplied, every file path written to
+   * `event_file_context` is also recorded in its repo-relative form (when it
+   * lives under repoPath) so the enricher's `lspSymbolsByFilePaths` lookup
+   * matches LSP nodes regardless of whether the source provider used an
+   * absolute or relative path.
+   */
+  repoPath?: string;
+}
 
 export interface IndexLogsResult {
   files: number;       // kept for back-compat with run-log messages
@@ -59,8 +70,47 @@ export async function indexAgentSessions(
   const events = options.newerThan
     ? allEvents.filter(e => new Date(e.timestamp) >= options.newerThan!)
     : allEvents;
+  console.log(
+    `[${provider.name}] classified ${events.length} events ` +
+    `from ${scanned.messages.length} messages (${scanned.sessions.size} sessions)`,
+  );
 
-  const enriched = await enrichEvents(events, db);
+  // Compute per-event file context (which file each text event is "about" in
+  // its session, based on nearby Edit/Write tool calls). Drives the enricher's
+  // filter and gets persisted to event_file_context after insert.
+  //
+  // The raw paths come from FileOperation.path which is often absolute (Claude
+  // and Codex both use absolute paths). LSP symbols are indexed by repo-relative
+  // path. So we expand each context to include BOTH forms when the path lives
+  // under the project's repoPath — that way the enricher's
+  // `lspSymbolsByFilePaths` lookup matches either side.
+  const rawContext = computeFileContext(events);
+  const repoPrefix = options.repoPath
+    ? (options.repoPath.endsWith('/') ? options.repoPath : `${options.repoPath}/`)
+    : null;
+  const fileContextByUuid = new Map<string, string[]>();
+  for (const [uuid, paths] of rawContext) {
+    const expanded = new Set<string>();
+    for (const p of paths) {
+      expanded.add(p);
+      if (repoPrefix && p.startsWith(repoPrefix)) expanded.add(p.slice(repoPrefix.length));
+    }
+    fileContextByUuid.set(uuid, [...expanded]);
+  }
+  console.log(
+    `[${provider.name}] file-context: ${fileContextByUuid.size} text events scoped to a file ` +
+    `(${events.length - fileContextByUuid.size} unscoped — will get no relatedSymbols)`,
+  );
+
+  // Enrichment is the slow phase — does one findNamedParent per identifier per
+  // event. Driving the Progress reporter from inside the loop is the only way
+  // to tell whether the job is running or hung.
+  const enrichProgress = new Progress(`${provider.name}:enrich`, events.length);
+  const enriched = await enrichEvents(events, db, {
+    onTick: (i) => enrichProgress.tick(i),
+    fileContextByUuid,
+  });
+  enrichProgress.done();
   result.events = enriched.length;
 
   if (enriched.length === 0 && scanned.sessions.size === 0) return result;
@@ -70,6 +120,9 @@ export async function indexAgentSessions(
   const existingSessionIds = loadExistingSessionIds(db);
 
   const entries: InsertEntry[] = [];
+  // Track the source-uuid of each event entry by its position in `entries` so
+  // we can map the inserted node id back to its file-context after the insert.
+  const eventUuidByEntryIdx: Array<string | null> = [];
 
   for (const meta of scanned.sessions.values()) {
     if (existingSessionIds.has(meta.sessionId)) continue;
@@ -83,6 +136,7 @@ export async function indexAgentSessions(
         provider: meta.provider,
       },
     });
+    eventUuidByEntryIdx.push(null);
     existingSessionIds.add(meta.sessionId);
   }
 
@@ -91,22 +145,56 @@ export async function indexAgentSessions(
     const entry = eventToInsertEntry(event);
     if (entry) {
       entries.push(entry);
+      eventUuidByEntryIdx.push(event.uuid);
       existingUuids.add(event.uuid);
     }
   }
 
-  if (entries.length === 0) return result;
+  if (entries.length === 0) {
+    console.log(`[${provider.name}] no new entries to insert`);
+    return result;
+  }
 
   // Insert in batches of 200 to keep transactions bounded.
   const BATCH = 200;
+  const totalBatches = Math.ceil(entries.length / BATCH);
+  const insertProgress = new Progress(`${provider.name}:insert`, entries.length);
+  const contextRows: Array<{ eventId: string; filePath: string }> = [];
   for (let i = 0; i < entries.length; i += BATCH) {
     const batch = entries.slice(i, i + BATCH);
+    insertProgress.tick(i, `batch ${i / BATCH + 1}/${totalBatches}`);
     const insertResult = await db.insertEntries(batch);
     result.inserted += insertResult.ids.filter(id => id !== null).length;
     for (const err of insertResult.errors) {
       const errorMsg = `Batch ${i / BATCH + 1}, entry ${err.index}${err.path ? `.${err.path}` : ''}: ${err.message}`;
-      console.error(`[indexAgentSessions:${provider.name}] ${errorMsg}`);
+      console.error(`[${provider.name}] ${errorMsg}`);
     }
+    // Map inserted node ids back to their source event uuids so we can write
+    // the file-context rows once the node ids are known. Each path is also
+    // recorded in its repo-relative form (when applicable) so the enricher's
+    // file_path lookup matches LSP nodes' relative paths.
+    const repoPrefix = options.repoPath
+      ? (options.repoPath.endsWith('/') ? options.repoPath : `${options.repoPath}/`)
+      : null;
+    for (let k = 0; k < insertResult.ids.length; k++) {
+      const nodeId = insertResult.ids[k];
+      const uuid = eventUuidByEntryIdx[i + k];
+      if (!nodeId || !uuid) continue;
+      const paths = fileContextByUuid.get(uuid);
+      if (!paths) continue;
+      for (const p of paths) {
+        contextRows.push({ eventId: nodeId, filePath: p });
+        if (repoPrefix && p.startsWith(repoPrefix)) {
+          contextRows.push({ eventId: nodeId, filePath: p.slice(repoPrefix.length) });
+        }
+      }
+    }
+  }
+  insertProgress.done(`${result.inserted} inserted`);
+
+  if (contextRows.length > 0) {
+    db.writeEventFileContext(contextRows);
+    console.log(`[${provider.name}] wrote ${contextRows.length} event_file_context rows`);
   }
 
   return result;

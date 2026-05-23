@@ -141,6 +141,7 @@ function buildClaudeJob(config: CoffeectxConfig, projectName: string): Job {
       const r = await indexAgentSessions(ctx.db, provider, {
         newerThan: readNewerThan(ctx.parameters),
         hashes,
+        repoPath: ctx.project.repoPath ?? undefined,
       });
 
       if (r.errors.length > 0) {
@@ -172,6 +173,7 @@ function buildCodexJob(config: CoffeectxConfig, projectName: string): Job {
       const provider = new CodexProvider({ statePath: sp });
       const r = await indexAgentSessions(ctx.db, provider, {
         newerThan: readNewerThan(ctx.parameters),
+        repoPath: ctx.project.repoPath ?? undefined,
       });
 
       if (r.errors.length > 0) {
@@ -200,6 +202,7 @@ function buildPiJob(config: CoffeectxConfig, projectName: string): Job {
       const provider = new PiProvider({ sessionsPath: resolve(sessionsPath) });
       const r = await indexAgentSessions(ctx.db, provider, {
         newerThan: readNewerThan(ctx.parameters),
+        repoPath: ctx.project.repoPath ?? undefined,
       });
 
       if (r.errors.length > 0) {

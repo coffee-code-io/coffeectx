@@ -4,8 +4,13 @@ types:
   #   name: Symbol          — the short identifier (e.g. "createUser")
   #   containerName: Symbol — fully qualified parent (e.g. "UserService"), empty if top-level
   #   detail: Symbol        — type signature or other detail string from the server
-  #   location: Location    — source position (from directory.yaml)
+  #   file_path: Symbol     — repo-relative path of the source file (one indexed lookup)
+  #   line: Symbol          — 1-based line number, stored as a string for symbol-key uniformity
+  #   column: Symbol        — 1-based column
   #   comment: Meaning?     — optional analyst/agent annotation
+  #
+  # `location` / `file` / `folder` are gone: deeply-nested map joins for what is
+  # really a primary-key lookup. `file_path` is now the single column we index on.
   # ─────────────────────────────────────────────────────────────────────────────
 
   LspModule:
@@ -15,7 +20,9 @@ types:
       name: Symbol
       containerName: Symbol
       detail: Symbol
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
   LspNamespace:
@@ -25,17 +32,24 @@ types:
       name: Symbol
       containerName: Symbol
       detail: Symbol
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
   LspClass:
-    description: A class declaration (SymbolKind 5) — a named type with fields and methods.
+    description: A class declaration (SymbolKind 5) — a named type with fields and methods. Property/field names are flattened into `members` rather than emitted as separate nodes; methods stay as standalone LspMethod entries.
     kind: Map
     fields:
       name: Symbol
       containerName: Symbol
       detail: Symbol        # e.g. "extends Base implements IFoo"
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
+      members:              # property/field names owned by this class (plain strings, not node refs)
+        kind: List
+        item: Symbol
       comment: Meaning?
 
   LspMethod:
@@ -45,28 +59,15 @@ types:
       name: Symbol
       containerName: Symbol  # owning class name
       detail: Symbol         # signature, e.g. "(id: string): Promise<User>"
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
-  LspProperty:
-    description: An object or class property (SymbolKind 7) — an accessor or computed member.
-    kind: Map
-    fields:
-      name: Symbol
-      containerName: Symbol
-      detail: Symbol         # declared type
-      location: Location
-      comment: Meaning?
-
-  LspField:
-    description: A class field or struct member (SymbolKind 8) — a stored data member.
-    kind: Map
-    fields:
-      name: Symbol
-      containerName: Symbol
-      detail: Symbol         # declared type
-      location: Location
-      comment: Meaning?
+  # LspProperty and LspField are intentionally not indexed as standalone nodes:
+  # their names live in the parent class/interface's `members` symbol list. This
+  # cuts thousands of low-value leaf rows out of the graph without losing the
+  # "what fields does class X have" question.
 
   LspConstructor:
     description: A constructor function (SymbolKind 9) — the initializer for a class.
@@ -75,7 +76,9 @@ types:
       name: Symbol           # usually the class name
       containerName: Symbol
       detail: Symbol         # parameter list
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
   LspEnum:
@@ -85,17 +88,24 @@ types:
       name: Symbol
       containerName: Symbol
       detail: Symbol
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
   LspInterface:
-    description: An interface declaration (SymbolKind 11) — a structural type contract without implementation.
+    description: An interface declaration (SymbolKind 11) — a structural type contract without implementation. Property/field names are flattened into `members` rather than emitted as separate nodes.
     kind: Map
     fields:
       name: Symbol
       containerName: Symbol
       detail: Symbol
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
+      members:              # property/field names owned by this interface (plain strings, not node refs)
+        kind: List
+        item: Symbol
       comment: Meaning?
 
   LspFunction:
@@ -105,18 +115,15 @@ types:
       name: Symbol
       containerName: Symbol
       detail: Symbol         # signature
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
-  LspVariable:
-    description: A mutable variable declaration (SymbolKind 13) — let or var binding.
-    kind: Map
-    fields:
-      name: Symbol
-      containerName: Symbol
-      detail: Symbol         # inferred or declared type
-      location: Location
-      comment: Meaning?
+  # LspVariable is intentionally not indexed: nearly all such symbols are
+  # local-scope bindings (already filtered by the LSP indexer's anonymous /
+  # local-scope rules) or low-value module-level mutables. If a module-level
+  # binding matters, it'll usually appear as LspConstant or LspFunction.
 
   LspConstant:
     description: An immutable constant binding (SymbolKind 14) — const declaration or enum-like value.
@@ -125,7 +132,9 @@ types:
       name: Symbol
       containerName: Symbol
       detail: Symbol
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
   LspEnumMember:
@@ -135,7 +144,9 @@ types:
       name: Symbol
       containerName: Symbol  # parent LspEnum name
       detail: Symbol         # numeric or string value
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
   LspTypeParameter:
@@ -145,7 +156,9 @@ types:
       name: Symbol
       containerName: Symbol  # owning class/function name
       detail: Symbol         # constraint, e.g. "extends object"
-      location: Location
+      file_path: Symbol
+      line: Symbol
+      column: Symbol
       comment: Meaning?
 
   # ── Union type covering every LSP symbol kind ────────────────────────────────
@@ -162,10 +175,7 @@ types:
       - LspEnum
       - LspFunction
       - LspMethod
-      - LspProperty
-      - LspField
       - LspConstructor
-      - LspVariable
       - LspConstant
       - LspEnumMember
       - LspTypeParameter

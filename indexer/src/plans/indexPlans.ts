@@ -83,7 +83,7 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
     const title = extractTitle(content);
 
     // Forward-pass link resolution (used for both new and existing plans).
-    const { fileRefs, symbolRefs } = await resolvePlanLinks(content, db);
+    const { filePaths, symbolRefs } = await resolvePlanLinks(content, db);
 
     const prior = existing.get(name);
     if (!prior) {
@@ -96,7 +96,7 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
           updatedAt,
           content,
           ...(title ? { title } : {}),
-          relatedFiles: fileRefs,
+          relatedFiles: filePaths,    // plain path strings (List<Symbol>)
           relatedSymbols: symbolRefs,
         },
       };
@@ -114,7 +114,7 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
     }
 
     // Existing plan — reverse-pass append any newly-resolvable refs.
-    const added = appendLinksToExistingPlan(db, prior.id, fileRefs, symbolRefs);
+    const added = appendLinksToExistingPlan(db, prior.id, filePaths, symbolRefs);
     if (added > 0) {
       result.patched++;
       result.linksAdded += added;
@@ -169,21 +169,20 @@ function extractTitle(content: string): string | null {
 }
 
 /**
- * Parse a plan's markdown body and resolve any references to existing DB
- * nodes. Conservative: only single-match resolutions are kept.
+ * Parse a plan's markdown body and resolve any references that the graph can
+ * actually represent.
+ *
+ * - File paths now land as **plain strings** in `Plan.relatedFiles` — File is
+ *   no longer a node type. The resolver doesn't need DB lookups for these.
+ * - Identifier candidates (inline-code tokens) resolve to LSP symbol UUIDs
+ *   the same way as before — single non-excluded ancestor or drop.
  */
 async function resolvePlanLinks(content: string, db: Db): Promise<{
-  fileRefs: { $id: string }[];
+  filePaths: string[];
   symbolRefs: { $id: string }[];
 }> {
   const filePaths = extractFilePathCandidates(content);
   const identifiers = extractIdentifierCandidates(content);
-
-  const fileOwners = new Set<string>();
-  for (const path of filePaths) {
-    const owner = await resolveSingleNamedOwnerOfType(path, db, 'File');
-    if (owner) fileOwners.add(owner);
-  }
 
   const symbolOwners = new Set<string>();
   for (const ident of identifiers) {
@@ -192,28 +191,35 @@ async function resolvePlanLinks(content: string, db: Db): Promise<{
   }
 
   return {
-    fileRefs: [...fileOwners].map($id => ({ $id })),
+    filePaths,
     symbolRefs: [...symbolOwners].map($id => ({ $id })),
   };
 }
 
-const EXCLUDED_TYPES = new Set(['Location', 'Span', 'Folder', 'File', 'Plan']);
+// After the directory-schema flatten: File/Folder/Location/Span are gone, so
+// the only thing to exclude is Plan itself (don't link a Plan to other Plans).
+const EXCLUDED_TYPES = new Set(['Plan']);
 
 /**
- * Append `fileRefs` / `symbolRefs` to an existing Plan node's
- * `relatedFiles` / `relatedSymbols` lists, skipping duplicates.
- * Returns total items appended across both fields.
+ * Append new file-path strings + symbol refs to an existing Plan's lists,
+ * skipping duplicates. Returns the total items appended.
  */
 function appendLinksToExistingPlan(
   db: Db,
   planId: string,
-  fileRefs: { $id: string }[],
+  filePaths: string[],
   symbolRefs: { $id: string }[],
 ): number {
   let added = 0;
-  if (fileRefs.length > 0) {
+  if (filePaths.length > 0) {
     const listId = db.getMapFieldId(planId, 'relatedFiles');
-    if (listId) added += db.appendListItemsUnique(listId, fileRefs.map(r => r.$id));
+    if (listId) {
+      // relatedFiles holds plain Symbol strings, not node references. We need
+      // to materialise each path as a Symbol atom node, then append the new
+      // node ids to the list. appendListItemsUnique drops duplicates.
+      const newSymbolIds = filePaths.map(p => db.insertSymbolNode(p));
+      added += db.appendListItemsUnique(listId, newSymbolIds);
+    }
   }
   if (symbolRefs.length > 0) {
     const listId = db.getMapFieldId(planId, 'relatedSymbols');
@@ -254,32 +260,6 @@ export function extractIdentifierCandidates(content: string): string[] {
 }
 
 /**
- * Resolve a file-path candidate (often relative) to a single File node, even
- * when the stored path is absolute. Tries exact match first, then a
- * suffix-anchored regex.
- */
-async function resolveSingleNamedOwnerOfType(
-  value: string, db: Db, typeName: string,
-): Promise<string | null> {
-  // Exact match first
-  let symbolIds = await querySymbolExact(value, db);
-  if (symbolIds.length === 0 && typeName === 'File') {
-    // Try suffix match: absolute paths in DB ending with the candidate.
-    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    try { symbolIds = db.querySymbolRegex(`(^|/)${escaped}$`); }
-    catch { symbolIds = []; }
-  }
-  if (symbolIds.length === 0) return null;
-  const owners = new Set<string>();
-  for (const sid of symbolIds) {
-    const p = db.findNamedParent(sid);
-    if (!p || p.typeName !== typeName) continue;
-    owners.add(p.id);
-    if (owners.size > 1) return null;
-  }
-  return owners.size === 1 ? [...owners][0]! : null;
-}
-
 /** Resolve `value` to its single named-type ancestor, skipping `excluded` types. */
 async function resolveSingleNamedOwnerExcluding(
   value: string, db: Db, excluded: Set<string>,

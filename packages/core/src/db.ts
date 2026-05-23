@@ -198,6 +198,18 @@ export class Db implements QueryDb {
       if (info.changes > 0) log(`db.migrate: dropped orphan 'logs' job row`);
     } catch { /* table may not exist yet */ }
 
+    // Remove obsolete named_types after the directory-schema flatten. The
+    // type definitions are gone from code.yaml/directory.yaml; their nodes
+    // (if any) are wiped by the manual purge script that accompanies the
+    // refactor — here we just clear the named_types index entry so
+    // sync-types doesn't trip over them.
+    try {
+      const info = this.raw
+        .prepare(`DELETE FROM named_types WHERE name IN ('File','Folder','Location','Span')`)
+        .run();
+      if (info.changes > 0) log(`db.migrate: dropped ${info.changes} obsolete named_types (File/Folder/Location/Span)`);
+    } catch { /* ok */ }
+
     // Backfill `provider`/`sessionId` on pre-multi-provider AgentSession rows.
     // Originally only Claude sessions existed; their ids were raw UUIDs and the
     // schema didn't carry `provider`. Now we namespace as `claude:<uuid>` and
@@ -443,23 +455,37 @@ export class Db implements QueryDb {
    * data on a routine type-sync.
    */
   gcOrphanedTypes(): number {
-    const info = this.raw.prepare(`
-      WITH RECURSIVE reachable(id) AS (
-        SELECT type_id FROM named_types
-        UNION ALL
-        SELECT tc.child_type_id
-          FROM type_children tc
-          INNER JOIN reachable r ON r.id = tc.type_id
-        UNION ALL
-        SELECT tme.value_type_id
-          FROM type_map_entries tme
-          INNER JOIN reachable r ON r.id = tme.type_id
-      )
-      DELETE FROM types
-       WHERE id NOT IN (SELECT id FROM reachable)
-         AND id NOT IN (SELECT DISTINCT type_id FROM nodes WHERE type_id IS NOT NULL)
-    `).run();
-    return info.changes;
+    // FK constraints on type_children.child_type_id / type_map_entries.value_type_id
+    // are non-cascading, so when a big disconnected chunk of orphan types
+    // needs to go (e.g. after a named-type rename or directory-schema flatten)
+    // the bulk-delete temporarily violates them mid-statement. Disable FKs
+    // for the cleanup — at the end of the operation the surviving types form
+    // a consistent graph again because anything left behind is still
+    // node-referenced or reachable from named_types.
+    this.raw.pragma('foreign_keys = OFF');
+    let changes = 0;
+    try {
+      const info = this.raw.prepare(`
+        WITH RECURSIVE reachable(id) AS (
+          SELECT type_id FROM named_types
+          UNION ALL
+          SELECT tc.child_type_id
+            FROM type_children tc
+            INNER JOIN reachable r ON r.id = tc.type_id
+          UNION ALL
+          SELECT tme.value_type_id
+            FROM type_map_entries tme
+            INNER JOIN reachable r ON r.id = tme.type_id
+        )
+        DELETE FROM types
+         WHERE id NOT IN (SELECT id FROM reachable)
+           AND id NOT IN (SELECT DISTINCT type_id FROM nodes WHERE type_id IS NOT NULL)
+      `).run();
+      changes = info.changes;
+    } finally {
+      this.raw.pragma('foreign_keys = ON');
+    }
+    return changes;
   }
 
   /**
@@ -1233,6 +1259,17 @@ export class Db implements QueryDb {
   }
 
   /**
+   * Insert a fresh Symbol atom node with the given value and return its id.
+   * Useful for callers that need to append plain symbol strings into an
+   * existing list field (e.g. Plan.relatedFiles).
+   */
+  insertSymbolNode(value: string): string {
+    const id = uuidv4();
+    this.raw.prepare(`INSERT INTO nodes(id, kind, symbol_value) VALUES(?,?,?)`).run(id, 'symbol', value);
+    return id;
+  }
+
+  /**
    * Append item node IDs to an existing list node.
    * Items are added after any existing items, preserving their original positions.
    * No-op if itemIds is empty.
@@ -1344,6 +1381,74 @@ export class Db implements QueryDb {
   hasNodeRefs(): boolean {
     const row = this.raw.prepare(`SELECT 1 AS x FROM node_refs LIMIT 1`).get() as { x: number } | undefined;
     return !!row;
+  }
+
+  // ── Event file-context (hidden from MCP/UI) ────────────────────────────────
+  //
+  // `event_file_context(event_id, file_path)` is a per-text-event allowlist of
+  // file paths the event is "about" in its containing session. It's populated
+  // by the agent-log indexer from Write/Edit tool-call boundaries and consumed
+  // by the enricher + LSP reverse pass to gate which LSP symbols a given event
+  // can possibly link to. Not exposed via MCP tools or the graph API.
+
+  /** Replace the file-context rows for the given event ids in one transaction. */
+  writeEventFileContext(rows: Array<{ eventId: string; filePath: string }>): void {
+    if (rows.length === 0) return;
+    const ids = new Set(rows.map(r => r.eventId));
+    const placeholders = [...ids].map(() => '?').join(',');
+    const del = this.raw.prepare(`DELETE FROM event_file_context WHERE event_id IN (${placeholders})`);
+    const ins = this.raw.prepare(`INSERT OR IGNORE INTO event_file_context(event_id, file_path) VALUES(?,?)`);
+    const txn = this.raw.transaction(() => {
+      del.run(...ids);
+      for (const r of rows) ins.run(r.eventId, r.filePath);
+    });
+    txn();
+  }
+
+  /** Read the file-context allowlist for one event id. */
+  getEventFileContext(eventId: string): string[] {
+    const rows = this.raw
+      .prepare(`SELECT file_path FROM event_file_context WHERE event_id = ?`)
+      .all(eventId) as Array<{ file_path: string }>;
+    return rows.map(r => r.file_path);
+  }
+
+  /**
+   * Find every LSP* node whose `file_path` field is in `paths`. Used by the
+   * enricher to narrow candidate ancestors to "files this event is about".
+   * Single indexed scan over `map_entries` + `nodes` — that's the whole reason
+   * we flattened the Location subtree.
+   */
+  lspSymbolsByFilePaths(paths: string[]): string[] {
+    if (paths.length === 0) return [];
+    const placeholders = paths.map(() => '?').join(',');
+    const rows = this.raw.prepare(`
+      SELECT DISTINCT pn.id FROM nodes pn
+      JOIN named_types nt ON nt.type_id = pn.type_id
+      JOIN map_entries me ON me.map_id = pn.id AND me.key = 'file_path'
+      JOIN nodes child ON child.id = me.value_id
+      WHERE nt.name LIKE 'Lsp%'
+        AND child.kind = 'symbol'
+        AND child.symbol_value IN (${placeholders})
+    `).all(...paths) as Array<{ id: string }>;
+    return rows.map(r => r.id);
+  }
+
+  /**
+   * Group `event_file_context` rows by file path. Used by the LSP reverse
+   * pass to look up "which events are about file F?" in one query.
+   */
+  eventsByFilePath(): Map<string, string[]> {
+    const out = new Map<string, string[]>();
+    const rows = this.raw
+      .prepare(`SELECT file_path, event_id FROM event_file_context`)
+      .all() as Array<{ file_path: string; event_id: string }>;
+    for (const r of rows) {
+      const arr = out.get(r.file_path) ?? [];
+      arr.push(r.event_id);
+      out.set(r.file_path, arr);
+    }
+    return out;
   }
 
   // ── Scheduler heartbeat ────────────────────────────────────────────────────

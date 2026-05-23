@@ -10,7 +10,7 @@
  */
 
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
-import { join, relative, basename } from 'node:path';
+import { join, relative } from 'node:path';
 import type { Db, InsertEntry } from '@coffeectx/core';
 import { LspClient, SymbolKind, type DocumentSymbol, type SymbolInformation } from './client.js';
 import {
@@ -23,6 +23,7 @@ import {
   extractFilePathCandidates,
   extractIdentifierCandidates,
 } from '../plans/indexPlans.js';
+import { Progress } from '../jobs/progress.js';
 
 // Extensions the indexer will process
 const SOURCE_EXTENSIONS = new Set([
@@ -49,25 +50,43 @@ export interface IndexWithLspOptions {
 
 // ── LSP kind mapping ──────────────────────────────────────────────────────────
 
-/** Map LSP SymbolKind to our named type names from code.yaml. */
+/**
+ * Map LSP SymbolKind to our named type names from code.yaml.
+ *
+ * Property / Field / Variable are intentionally not given their own node type:
+ *   - Property + Field names are folded into the parent class/interface's
+ *     `members` symbol list (see `collectMemberNames` below) — that gives us
+ *     the "what fields does X have" question without one node per leaf.
+ *   - Variable bindings are almost always either local-scope (already
+ *     filtered) or low-value module-level mutables; if it matters, it usually
+ *     surfaces as an LspConstant or LspFunction.
+ */
 function kindToTypeName(kind: SymbolKind): string | null {
   switch (kind) {
     case SymbolKind.Module:        return 'LspModule';
     case SymbolKind.Namespace:     return 'LspNamespace';
     case SymbolKind.Class:         return 'LspClass';
     case SymbolKind.Method:        return 'LspMethod';
-    case SymbolKind.Property:      return 'LspProperty';
-    case SymbolKind.Field:         return 'LspField';
     case SymbolKind.Constructor:   return 'LspConstructor';
     case SymbolKind.Enum:          return 'LspEnum';
     case SymbolKind.Interface:     return 'LspInterface';
     case SymbolKind.Function:      return 'LspFunction';
-    case SymbolKind.Variable:      return 'LspVariable';
     case SymbolKind.Constant:      return 'LspConstant';
     case SymbolKind.EnumMember:    return 'LspEnumMember';
     case SymbolKind.TypeParameter: return 'LspTypeParameter';
+    // SymbolKind.Property, SymbolKind.Field, SymbolKind.Variable — see note above.
     default:                       return null;
   }
+}
+
+/** True iff this symbol kind is a class/interface that owns a `members` list. */
+function isMemberContainer(kind: SymbolKind): boolean {
+  return kind === SymbolKind.Class || kind === SymbolKind.Interface;
+}
+
+/** True iff this child symbol is a leaf field/property we want to roll up. */
+function isMemberLeaf(kind: SymbolKind): boolean {
+  return kind === SymbolKind.Property || kind === SymbolKind.Field;
 }
 
 // ── File collection ───────────────────────────────────────────────────────────
@@ -112,6 +131,8 @@ interface SymbolRecord {
   detail: string;
   line: number;
   column: number;
+  /** Populated for LspClass / LspInterface — names of owned property/field leaves. */
+  members?: string[];
 }
 
 /**
@@ -140,8 +161,18 @@ const LOCAL_SCOPE_NOISE_KINDS = new Set<SymbolKind>([
  */
 const ANONYMOUS_NAME_RE = /^<[^>]*>$|^\(\)$|^$/;
 
+/**
+ * TypeScript LSP names inline callbacks passed to `.map`/`.filter`/`.find`/
+ * `.catch`/`.then`/etc. as e.g. `arr.map() callback`, `reg('exact') callback`.
+ * They aren't independently referenceable, and the trailing ` callback` form
+ * (preceded by `)` or whitespace) doesn't collide with real symbol names like
+ * `useCallback` or `registerCallback`.
+ */
+const SYNTHETIC_CALLBACK_RE = /(?:\)|\s)callback$/i;
+
 function isAnonymous(name: string): boolean {
-  return ANONYMOUS_NAME_RE.test(name.trim());
+  const t = name.trim();
+  return ANONYMOUS_NAME_RE.test(t) || SYNTHETIC_CALLBACK_RE.test(t);
 }
 
 function flattenDocumentSymbols(
@@ -157,20 +188,44 @@ function flattenDocumentSymbols(
       isAnonymous(s.name) ||
       (insideFunction && LOCAL_SCOPE_NOISE_KINDS.has(s.kind));
     if (!drop) {
-      out.push({
+      const record: SymbolRecord = {
         typeName: typeName!,
         name: s.name,
         containerName,
         detail: s.detail ?? '',
         line: s.selectionRange.start.line,
         column: s.selectionRange.start.character,
-      });
+      };
+      // For classes / interfaces, fold direct Property/Field children into a
+      // `members` symbol list so we don't emit one node per leaf field.
+      if (isMemberContainer(s.kind) && s.children?.length) {
+        const members = collectMemberNames(s.children);
+        if (members.length > 0) record.members = members;
+      }
+      out.push(record);
     }
     if (s.children?.length) {
       const childInside = insideFunction || FUNCTION_LIKE_KINDS.has(s.kind);
       flattenDocumentSymbols(s.children, s.name, out, childInside);
     }
   }
+}
+
+/**
+ * Pick up the names of direct Property/Field children. Anonymous and
+ * computed-name leaves are dropped so the list stays semantically clean.
+ */
+function collectMemberNames(children: DocumentSymbol[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const c of children) {
+    if (!isMemberLeaf(c.kind)) continue;
+    if (isAnonymous(c.name)) continue;
+    if (seen.has(c.name)) continue;
+    seen.add(c.name);
+    out.push(c.name);
+  }
+  return out;
 }
 
 function flattenSymbolInformation(symbols: SymbolInformation[], out: SymbolRecord[]): void {
@@ -209,21 +264,32 @@ interface LogEventInfo {
 }
 
 /**
- * Build a map from file path variants → event info. Indexes both
- * FileOperation.path (variants of full path / basename / last-two-segments)
- * and any file-path tokens parsed out of Plan.content's markdown links.
+ * Build a map from file path → event info, with **exact path matching only**.
  *
- * The resulting field that will be patched:
- *   FileOperation → touchedSymbols (LSP symbols inside that file)
- *   Plan          → relatedSymbols (LSP symbols inside the referenced file)
+ * Sources:
+ *   - FileOperation.path: the path is keyed twice — once as stored (often an
+ *     absolute path from Claude/Codex), and once stripped to repo-relative
+ *     when it starts with `repoPath + '/'` (so it matches the LSP indexer's
+ *     `relPath` for files inside the repo).
+ *   - Plan.content: every file path candidate parsed out of markdown links.
+ *     Same dual-keying (raw + repo-relative if applicable).
+ *
+ * No more basename / last-two-segment fallback — those caused `db.ts` in one
+ * package to cross-link with `db.ts` in another.
  */
-function buildFileEventIndex(db: Db): Map<string, LogEventInfo[]> {
+function buildFileEventIndex(db: Db, repoPath: string): Map<string, LogEventInfo[]> {
   const index = new Map<string, LogEventInfo[]>();
+  const repoPrefix = repoPath.endsWith('/') ? repoPath : `${repoPath}/`;
 
   const push = (key: string, info: LogEventInfo) => {
     const arr = index.get(key) ?? [];
     arr.push(info);
     index.set(key, arr);
+  };
+  const pushKeys = (raw: string, info: LogEventInfo) => {
+    if (!raw) return;
+    push(raw, info);
+    if (raw.startsWith(repoPrefix)) push(raw.slice(repoPrefix.length), info);
   };
 
   for (const eventId of db.queryByNamedType(['FileOperation'])) {
@@ -233,7 +299,7 @@ function buildFileEventIndex(db: Db): Map<string, LogEventInfo[]> {
       const pathNode = node.entries['path'];
       if (pathNode?.kind !== 'atom' || pathNode.atom.kind !== 'symbol') continue;
       const info: LogEventInfo = { id: eventId, typeName: 'FileOperation', fieldName: 'touchedSymbols' };
-      for (const key of pathVariants(pathNode.atom.value)) push(key, info);
+      pushKeys(pathNode.atom.value, info);
     } catch { /* best-effort */ }
   }
 
@@ -245,7 +311,7 @@ function buildFileEventIndex(db: Db): Map<string, LogEventInfo[]> {
       if (content?.kind !== 'atom' || content.atom.kind !== 'meaning') continue;
       const info: LogEventInfo = { id: planId, typeName: 'Plan', fieldName: 'relatedSymbols' };
       for (const path of extractFilePathCandidates(content.atom.value.text)) {
-        for (const key of pathVariants(path)) push(key, info);
+        pushKeys(path, info);
       }
     } catch { /* best-effort */ }
   }
@@ -258,13 +324,32 @@ function buildFileEventIndex(db: Db): Map<string, LogEventInfo[]> {
  * UserInput.text, AgentQuestion.question, AgentMessage.text,
  * AgentSummary.text (PascalCase / camelCase / snake_case tokens), and
  * identifiers extracted from inline-code spans inside Plan.content.
+ *
+ * Per-event file-context (from `event_file_context`) is attached so the
+ * append-time loop can restrict each name-match to symbols that live in
+ * files the event is allowed to be about. Plans get their content's parsed
+ * file-path candidates as their context (best available proxy — Plans aren't
+ * tied to a session).
  */
-function buildNameEventIndex(db: Db): Map<string, LogEventInfo[]> {
+function buildNameEventIndex(db: Db, repoPath: string): {
+  index: Map<string, LogEventInfo[]>;
+  contextByEvent: Map<string, Set<string>>;
+} {
   const index = new Map<string, LogEventInfo[]>();
+  const contextByEvent = new Map<string, Set<string>>();
+  const repoPrefix = repoPath.endsWith('/') ? repoPath : `${repoPath}/`;
+
   const push = (key: string, info: LogEventInfo) => {
     const arr = index.get(key) ?? [];
     arr.push(info);
     index.set(key, arr);
+  };
+  const addContext = (eventId: string, raw: string) => {
+    if (!raw) return;
+    const s = contextByEvent.get(eventId) ?? new Set<string>();
+    s.add(raw);
+    if (raw.startsWith(repoPrefix)) s.add(raw.slice(repoPrefix.length));
+    contextByEvent.set(eventId, s);
   };
 
   const eventSources: Array<{ typeName: string; fieldKey: string }> = [
@@ -282,6 +367,7 @@ function buildNameEventIndex(db: Db): Map<string, LogEventInfo[]> {
         if (field?.kind !== 'atom' || field.atom.kind !== 'meaning') continue;
         const info: LogEventInfo = { id: eventId, typeName, fieldName: 'relatedSymbols' };
         for (const ident of extractIdentifiers(field.atom.value.text)) push(ident, info);
+        for (const path of db.getEventFileContext(eventId)) addContext(eventId, path);
       } catch { /* best-effort */ }
     }
   }
@@ -294,10 +380,12 @@ function buildNameEventIndex(db: Db): Map<string, LogEventInfo[]> {
       if (content?.kind !== 'atom' || content.atom.kind !== 'meaning') continue;
       const info: LogEventInfo = { id: planId, typeName: 'Plan', fieldName: 'relatedSymbols' };
       for (const ident of extractIdentifierCandidates(content.atom.value.text)) push(ident, info);
+      // Plan's "context" is the set of file paths it explicitly references.
+      for (const path of extractFilePathCandidates(content.atom.value.text)) addContext(planId, path);
     } catch { /* best-effort */ }
   }
 
-  return index;
+  return { index, contextByEvent };
 }
 
 /** Heuristic: extract PascalCase, camelCase, and long snake_case words from free text. */
@@ -315,43 +403,33 @@ function extractIdentifiers(text: string): string[] {
   return Array.from(found);
 }
 
-function pathVariants(p: string): string[] {
-  const parts = p.replace(/\\/g, '/').split('/').filter(Boolean);
-  const variants: string[] = [p];
-  if (parts.length >= 1) variants.push(parts[parts.length - 1]!);
-  if (parts.length >= 2) variants.push(parts.slice(-2).join('/'));
-  return [...new Set(variants)];
-}
 
 // ── Symbol entry builder ───────────────────────────────────────────────────────
 
 function symbolEntry(rec: SymbolRecord, relPath: string, agentEventIds: string[]): InsertEntry {
-  return {
-    type: rec.typeName,
-    data: {
-      name: rec.name,
-      containerName: rec.containerName,
-      detail: rec.detail,
-      location: {
-        file: {
-          path: relPath,
-          name: basename(relPath),
-          description: '',
-        },
-        line: String(rec.line + 1),   // LSP is 0-based
-        column: String(rec.column + 1),
-      },
-      agentEvents: agentEventIds,
-    },
+  const data: Record<string, unknown> = {
+    name: rec.name,
+    containerName: rec.containerName,
+    detail: rec.detail,
+    file_path: relPath,
+    line: String(rec.line + 1),    // LSP is 0-based; stored as a Symbol string
+    column: String(rec.column + 1),
+    agentEvents: agentEventIds,
   };
+  // LspClass / LspInterface always carry a `members` list (possibly empty);
+  // other types omit it — the YAML schema doesn't declare it for them.
+  if (rec.typeName === 'LspClass' || rec.typeName === 'LspInterface') {
+    data['members'] = rec.members ?? [];
+  }
+  return { type: rec.typeName, data };
 }
 
 // ── Existing-symbol deduplication ────────────────────────────────────────────
 
 const LSP_TYPES = [
-  'LspModule', 'LspNamespace', 'LspClass', 'LspMethod', 'LspProperty',
-  'LspField', 'LspConstructor', 'LspEnum', 'LspInterface', 'LspFunction',
-  'LspVariable', 'LspConstant', 'LspEnumMember', 'LspStruct', 'LspTypeParameter',
+  'LspModule', 'LspNamespace', 'LspClass', 'LspMethod',
+  'LspConstructor', 'LspEnum', 'LspInterface', 'LspFunction',
+  'LspConstant', 'LspEnumMember', 'LspTypeParameter',
 ];
 
 /**
@@ -372,18 +450,13 @@ function buildExistingSymbolKeys(db: Db): Set<string> {
       const typeName = db.getNodeTypeName(id);
       if (!typeName) continue;
       const nameFieldId = db.getMapFieldId(id, 'name');
-      const locationId = db.getMapFieldId(id, 'location');
-      if (!nameFieldId || !locationId) continue;
+      const pathFieldId = db.getMapFieldId(id, 'file_path');
+      const lineFieldId = db.getMapFieldId(id, 'line');
+      if (!nameFieldId || !pathFieldId || !lineFieldId) continue;
       const name = symValue(db, nameFieldId);
-      if (!name) continue;
-      const fileId = db.getMapFieldId(locationId, 'file');
-      const lineId = db.getMapFieldId(locationId, 'line');
-      if (!fileId || !lineId) continue;
-      const pathId = db.getMapFieldId(fileId, 'path');
-      if (!pathId) continue;
-      const path = symValue(db, pathId);
-      const line = symValue(db, lineId);
-      if (!path || !line) continue;
+      const path = symValue(db, pathFieldId);
+      const line = symValue(db, lineFieldId);
+      if (!name || !path || !line) continue;
       keys.add(`${typeName}:${path}:${name}:${line}`);
     } catch {
       // skip unloadable nodes
@@ -417,8 +490,8 @@ export async function indexWithLsp(
   }
 
   // Build event indexes upfront so both agentEvents and reverse links can be populated.
-  const fileEventIndex = buildFileEventIndex(db);
-  const nameEventIndex = buildNameEventIndex(db);
+  const fileEventIndex = buildFileEventIndex(db, repoPath);
+  const { index: nameEventIndex, contextByEvent: nameEventFileCtx } = buildNameEventIndex(db, repoPath);
 
   // Pre-load existing symbol keys so re-runs don't create duplicate nodes.
   const existingSymbolKeys = buildExistingSymbolKeys(db);
@@ -431,8 +504,12 @@ export async function indexWithLsp(
   // Accumulate reverse links: log event node ID → LSP symbol node IDs to append
   const reverseLinks = new Map<string, { info: LogEventInfo; symbolIds: string[] }>();
 
-  for (const filePath of files) {
+  const progress = new Progress('lsp', files.length);
+
+  for (let idx = 0; idx < files.length; idx++) {
+    const filePath = files[idx]!;
     const relPath = relative(repoPath, filePath);
+    progress.tick(idx, relPath);
     try {
       const rawSymbols = await client.documentSymbols(filePath);
       if (!rawSymbols.length) continue;
@@ -446,11 +523,8 @@ export async function indexWithLsp(
 
       if (records.length === 0) continue;
 
-      // Collect file-level event IDs
-      const fileEvents: LogEventInfo[] = [...new Map([
-        ...[...(fileEventIndex.get(relPath) ?? [])].map(e => [e.id, e] as const),
-        ...[...(fileEventIndex.get(basename(relPath)) ?? [])].map(e => [e.id, e] as const),
-      ]).values()];
+      // Collect file-level event IDs — exact path match only (no basename).
+      const fileEvents: LogEventInfo[] = fileEventIndex.get(relPath) ?? [];
       const fileEventIds = fileEvents.map(e => e.id);
 
       // Build per-record agentEvents (file events + name-matched events),
@@ -461,7 +535,11 @@ export async function indexWithLsp(
           return !existingSymbolKeys.has(`${rec.typeName}:${relPath}:${rec.name}:${lineStr}`);
         })
         .map(rec => {
-          const nameEvents = nameEventIndex.get(rec.name) ?? [];
+          // Name-matched events are only relevant when the event's file context
+          // includes THIS file — otherwise we'd reintroduce the over-linking.
+          const nameEvents = (nameEventIndex.get(rec.name) ?? []).filter(info =>
+            nameEventFileCtx.get(info.id)?.has(relPath),
+          );
           const allEventIds = [...new Set([...fileEventIds, ...nameEvents.map(e => e.id)])];
           return symbolEntry(rec, relPath, allEventIds);
         });
@@ -482,12 +560,15 @@ export async function indexWithLsp(
         reverseLinks.set(info.id, entry);
       }
 
-      // Accumulate reverse links for name-matched events (relatedSymbols)
+      // Accumulate reverse links for name-matched events — same file-context
+      // filter applies here. An event only gets linked to a symbol with this
+      // name if its file context includes the symbol's file path.
       for (let i = 0; i < records.length; i++) {
         const symbolId = insertResult.ids[i];
         if (!symbolId) continue;
         const nameEvents = nameEventIndex.get(records[i]!.name) ?? [];
         for (const info of nameEvents) {
+          if (!nameEventFileCtx.get(info.id)?.has(relPath)) continue;
           const entry = reverseLinks.get(info.id) ?? { info, symbolIds: [] };
           entry.symbolIds.push(symbolId);
           reverseLinks.set(info.id, entry);
@@ -498,15 +579,22 @@ export async function indexWithLsp(
     }
   }
 
+  progress.done(`${result.nodes} nodes inserted`);
   await client.shutdown();
 
   // ── Enrich log events with symbol links ─────────────────────────────────────
-  for (const { info, symbolIds } of reverseLinks.values()) {
-    if (symbolIds.length === 0) continue;
-    try {
-      const listId = db.getMapFieldId(info.id, info.fieldName);
-      if (listId) db.appendListItemsUnique(listId, symbolIds);
-    } catch { /* best-effort */ }
+  const linkTargets = [...reverseLinks.values()].filter(v => v.symbolIds.length > 0);
+  if (linkTargets.length > 0) {
+    const linkProgress = new Progress('lsp:reverse-links', linkTargets.length);
+    for (let i = 0; i < linkTargets.length; i++) {
+      const { info, symbolIds } = linkTargets[i]!;
+      linkProgress.tick(i, `${info.typeName} ${info.id.slice(0, 8)} (+${symbolIds.length})`);
+      try {
+        const listId = db.getMapFieldId(info.id, info.fieldName);
+        if (listId) db.appendListItemsUnique(listId, symbolIds);
+      } catch { /* best-effort */ }
+    }
+    linkProgress.done();
   }
 
   if (hashes) {

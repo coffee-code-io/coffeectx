@@ -22,6 +22,7 @@ import type {
   ProviderScanResult,
   ScannedSession,
 } from '../provider.js';
+import { Progress } from '../../jobs/progress.js';
 
 export interface ClaudeProviderOptions {
   /** Single file or directory of `.jsonl` logs. */
@@ -37,8 +38,22 @@ export class ClaudeProvider implements AgentLogProvider {
     const sessions = new Map<string, ScannedSession>();
     const allMessages: RawLogMessage[] = [];
 
-    for (const filePath of resolveLogFiles(this.opts.paths)) {
-      if (options.hashes && !hasLogFileChanged(filePath, options.hashes)) continue;
+    const allFiles = resolveLogFiles(this.opts.paths);
+    const toProcess = options.hashes
+      ? allFiles.filter(f => hasLogFileChanged(f, options.hashes!))
+      : allFiles;
+
+    if (toProcess.length === 0) {
+      console.log(`[claude] no changed files (${allFiles.length} total) — skipping read`);
+      return { sessions, messages: allMessages };
+    }
+    const skipped = allFiles.length - toProcess.length;
+    if (skipped > 0) console.log(`[claude] ${skipped} unchanged files skipped via hash`);
+
+    const progress = new Progress('claude:scan', toProcess.length);
+    for (let idx = 0; idx < toProcess.length; idx++) {
+      const filePath = toProcess[idx]!;
+      progress.tick(idx, filePath.split('/').slice(-1)[0]);
 
       let raw: RawLogMessage[];
       try {
@@ -74,6 +89,7 @@ export class ClaudeProvider implements AgentLogProvider {
         saveFileHashes(options.hashes);
       }
     }
+    progress.done(`${sessions.size} sessions, ${allMessages.length} messages`);
 
     return { sessions, messages: allMessages };
   }
