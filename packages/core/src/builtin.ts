@@ -44,7 +44,6 @@ export type YamlTypeSpec =
   | { kind: 'Map'; fields: Record<string, YamlTypeSpec> }
   | { kind: 'List'; item: YamlTypeSpec }
   | { kind: 'Or'; types: YamlTypeSpec[] }
-  | { kind: 'And'; types: YamlTypeSpec[] }
   | { kind: 'Optional'; item: YamlTypeSpec };
 
 /** A named type entry — spec plus optional human-readable description. */
@@ -166,12 +165,20 @@ export function resolveYamlType(
     // "?" suffix — Optional wrapper shorthand: "Meaning?" | "Symbol?" | "TypeName?"
     if (spec.endsWith('?')) {
       const inner = resolveYamlType(spec.slice(0, -1) as YamlTypeSpec, registry);
+      assertNotOrOrOptional(inner, `Optional<${spec.slice(0, -1)}>`);
       return { kind: 'OptionalType', inner };
     }
     if (spec === 'Symbol') return { kind: 'SymbolType' };
     if (spec === 'Meaning') return { kind: 'MeaningType' };
     if (!registry.has(spec)) throw new Error(`Unknown type reference: "${spec}"`);
-    // Lightweight reference — the DB deduplicates RefType rows by name.
+    // Named Or / Optional types are SUGAR — they don't get their own type-graph
+    // row. Inline by recursively resolving the inner spec wherever the name
+    // appears. Concrete named types (Map, List, atoms) remain RefType refs so
+    // the type graph stays small and supports circular definitions.
+    const namedSpec = registry.get(spec)!;
+    if (isInlineableNamedSpec(namedSpec)) {
+      return resolveYamlType(namedSpec, registry);
+    }
     return { kind: 'RefType', name: spec };
   }
 
@@ -189,27 +196,39 @@ export function resolveYamlType(
 
   if (spec.kind === 'Or') {
     if (spec.types.length < 2) throw new Error('Or requires at least 2 types');
-    let result = resolveYamlType(spec.types[0]!, registry);
-    for (let i = 1; i < spec.types.length; i++) {
-      result = { kind: 'OrType', left: result, right: resolveYamlType(spec.types[i]!, registry) };
+    const variants = spec.types.map(t => resolveYamlType(t, registry));
+    for (const v of variants) {
+      assertNotOrOrOptional(v, 'Or');
     }
-    return result;
-  }
-
-  if (spec.kind === 'And') {
-    if (spec.types.length < 2) throw new Error('And requires at least 2 types');
-    let result = resolveYamlType(spec.types[0]!, registry);
-    for (let i = 1; i < spec.types.length; i++) {
-      result = { kind: 'AndType', left: result, right: resolveYamlType(spec.types[i]!, registry) };
-    }
-    return result;
+    return { kind: 'OrType', variants };
   }
 
   if (spec.kind === 'Optional') {
-    return { kind: 'OptionalType', inner: resolveYamlType(spec.item, registry) };
+    const inner = resolveYamlType(spec.item, registry);
+    assertNotOrOrOptional(inner, 'Optional');
+    return { kind: 'OptionalType', inner };
   }
 
   throw new Error(`Unknown YAML type spec kind: ${JSON.stringify(spec)}`);
+}
+
+/** A named type spec qualifies as inline-only iff its top-level kind is Or or Optional. */
+function isInlineableNamedSpec(spec: YamlTypeSpec): boolean {
+  if (typeof spec === 'string') return spec.endsWith('?');
+  return spec.kind === 'Or' || spec.kind === 'Optional';
+}
+
+/**
+ * Reject direct nesting of Or↔Or, Or↔Optional, Optional↔Or, Optional↔Optional.
+ * These shapes are ill-formed because Or and Optional are validation-only
+ * constructs — chaining them adds no information and complicates the validator.
+ */
+function assertNotOrOrOptional(t: Type, context: string): void {
+  if (t.kind === 'OrType' || t.kind === 'OptionalType') {
+    throw new Error(
+      `${context} cannot directly contain ${t.kind === 'OrType' ? 'Or' : 'Optional'} — flatten the variants.`,
+    );
+  }
 }
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
@@ -240,6 +259,14 @@ export function syncFromDir(
 
   for (const [name, entry] of typeRegistry) {
     try {
+      // Named Or / Optional types are sugar — they get inlined at every use
+      // site by `resolveYamlType`, so there's no `named_types` row to create.
+      // Other consumers (skill `types: [Name]` lists, raw_query `IsType`) refer
+      // to concrete named types only.
+      if (isInlineableNamedSpec(entry.spec)) {
+        typesSynced.push(name);
+        continue;
+      }
       const type = resolveYamlType(entry.spec, specRegistry);
       const typeId = db.upsertType(type, typeIdCache, name);
       db.upsertNamedType(name, typeId, source, entry.description, entry.hidden);

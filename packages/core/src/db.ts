@@ -113,7 +113,7 @@ export class Db implements QueryDb {
         CREATE TABLE types_new (
           id          TEXT PRIMARY KEY,
           kind        TEXT NOT NULL CHECK(kind IN (
-            'SymbolType','MeaningType','ListType','OrType','AndType','MapType','RefType','OptionalType'
+            'SymbolType','MeaningType','ListType','OrType','MapType','RefType','OptionalType'
           )),
           ref_name    TEXT,
           content_key TEXT
@@ -138,7 +138,7 @@ export class Db implements QueryDb {
         CREATE TABLE types_new (
           id          TEXT PRIMARY KEY,
           kind        TEXT NOT NULL CHECK(kind IN (
-            'SymbolType','MeaningType','ListType','OrType','AndType','MapType','RefType','OptionalType'
+            'SymbolType','MeaningType','ListType','OrType','MapType','RefType','OptionalType'
           )),
           ref_name    TEXT,
           content_key TEXT
@@ -298,7 +298,7 @@ export class Db implements QueryDb {
 
   // ── Type upsert ────────────────────────────────────────────────────────────
   //
-  // Structural types (ListType, OrType, AndType, MapType) are deduplicated by a
+  // Structural types (ListType, OrType, MapType) are deduplicated by a
   // content_key — a deterministic fingerprint built from the child type IDs.
   // This prevents duplicate rows from accumulating across repeated sync runs.
   //
@@ -346,17 +346,18 @@ export class Db implements QueryDb {
       });
     }
 
-    if (type.kind === 'OrType' || type.kind === 'AndType') {
-      const leftId = this.upsertType(type.left, cache);
-      const rightId = this.upsertType(type.right, cache);
-      const contentKey = `${type.kind}:{${leftId}}:{${rightId}}`;
-      return this.upsertStructural(type.kind, contentKey, cache, type, id => {
-        this.raw
-          .prepare(`INSERT INTO type_children(type_id, position, child_type_id) VALUES(?,0,?)`)
-          .run(id, leftId);
-        this.raw
-          .prepare(`INSERT INTO type_children(type_id, position, child_type_id) VALUES(?,1,?)`)
-          .run(id, rightId);
+    if (type.kind === 'OrType') {
+      // OrType is N-ary and flat (no nested Or — enforced at YAML resolve).
+      // Variant ids are sorted for the content_key so dedup is stable
+      // regardless of YAML listing order; storage preserves declared order
+      // via type_children.position.
+      const variantIds = type.variants.map(v => this.upsertType(v, cache));
+      const contentKey = 'OR:{' + [...variantIds].sort().join('|') + '}';
+      return this.upsertStructural('OrType', contentKey, cache, type, id => {
+        const stmt = this.raw.prepare(
+          `INSERT INTO type_children(type_id, position, child_type_id) VALUES(?,?,?)`,
+        );
+        for (let i = 0; i < variantIds.length; i++) stmt.run(id, i, variantIds[i]!);
       });
     }
 
@@ -562,24 +563,13 @@ export class Db implements QueryDb {
       return result;
     }
 
-    if (kind === 'OrType' || kind === 'AndType') {
-      const result: Type =
-        kind === 'OrType'
-          ? { kind: 'OrType', left: { kind: 'SymbolType' }, right: { kind: 'SymbolType' } }
-          : { kind: 'AndType', left: { kind: 'SymbolType' }, right: { kind: 'SymbolType' } };
+    if (kind === 'OrType') {
+      const result: Extract<Type, { kind: 'OrType' }> = { kind: 'OrType', variants: [] };
       cache.set(id, result);
       const children = this.raw
         .prepare(`SELECT child_type_id FROM type_children WHERE type_id=? ORDER BY position`)
         .all(id) as { child_type_id: string }[];
-      const left = this.loadTypeImpl(children[0]!.child_type_id, cache, resolveRefs);
-      const right = this.loadTypeImpl(children[1]!.child_type_id, cache, resolveRefs);
-      if (kind === 'OrType') {
-        (result as Extract<Type, { kind: 'OrType' }>).left = left;
-        (result as Extract<Type, { kind: 'OrType' }>).right = right;
-      } else {
-        (result as Extract<Type, { kind: 'AndType' }>).left = left;
-        (result as Extract<Type, { kind: 'AndType' }>).right = right;
-      }
+      result.variants = children.map(c => this.loadTypeImpl(c.child_type_id, cache, resolveRefs));
       return result;
     }
 
@@ -967,6 +957,46 @@ export class Db implements QueryDb {
   }
 
   /**
+   * Collect the set of named-type names this field's TYPE may legitimately
+   * reference via `$id` / `$ref`. Walks Optional / Or / Ref to gather them.
+   * For atom / list / anonymous map types returns an empty set, meaning
+   * "$id refs aren't valid here" — the existing type branches handle that
+   * via their own shape checks.
+   */
+  private collectAllowedNamedTypes(type: Type, out = new Set<string>()): Set<string> {
+    if (type.kind === 'RefType') out.add(type.name);
+    else if (type.kind === 'OptionalType') this.collectAllowedNamedTypes(type.inner, out);
+    else if (type.kind === 'OrType') {
+      for (const v of type.variants) this.collectAllowedNamedTypes(v, out);
+    }
+    // SymbolType / MeaningType / ListType / MapType contribute nothing.
+    return out;
+  }
+
+  /**
+   * After resolving a `$id` / `$ref` to a node id, verify the referenced
+   * node's named type is in the field's allowed set. Throws on mismatch.
+   * No-op when the field type doesn't accept refs at all (e.g. SymbolType).
+   */
+  private assertRefTypeCompatible(nodeId: string, type: Type, path: string): void {
+    const allowed = this.collectAllowedNamedTypes(type);
+    if (allowed.size === 0) return;
+    const row = this.raw.prepare(
+      `SELECT nt.name AS name
+         FROM nodes n
+         LEFT JOIN named_types nt ON nt.type_id = n.type_id
+        WHERE n.id = ?`,
+    ).get(nodeId) as { name: string | null } | undefined;
+    const actual = row?.name ?? null;
+    if (!actual || !allowed.has(actual)) {
+      throw new Error(
+        `${path} "${nodeId}": referenced node has type "${actual ?? '<none>'}"; ` +
+        `field accepts ${[...allowed].sort().join(' | ')}`,
+      );
+    }
+  }
+
+  /**
    * Build (insert) a node for a single field value given its shallow schema type.
    * Called inside the transaction; must be synchronous.
    *
@@ -986,6 +1016,7 @@ export class Db implements QueryDb {
       const id = allocatedIds[idx];
       if (id == null)
         throw new Error(`$ref[${idx}]: entry does not exist or failed type validation`);
+      this.assertRefTypeCompatible(id, type, `${path}.$ref[${idx}]`);
       return id;
     }
 
@@ -997,6 +1028,7 @@ export class Db implements QueryDb {
       const row = this.raw.prepare(`SELECT id FROM nodes WHERE id=?`).get(nodeId) as { id: string } | undefined;
       if (!row)
         throw new Error(`${path}.$id "${nodeId}": node does not exist in the database`);
+      this.assertRefTypeCompatible(nodeId, type, `${path}.$id`);
       return nodeId;
     }
 
@@ -1010,6 +1042,19 @@ export class Db implements QueryDb {
       const named = this.loadNamedType(type.name);
       if (!named) throw new Error(`${path}: RefType target "${type.name}" not found`);
       return this.buildEntryNode(value, this.loadTypeShallow(named.typeId), allocatedIds, embedMap, path);
+    }
+
+    // OrType — try each variant; the first that doesn't throw wins. Empty
+    // values (null/undefined) are filtered out before we get here, so this
+    // is for legitimate values whose shape happens to match ONE of the
+    // declared union arms.
+    if (type.kind === 'OrType') {
+      const errs: string[] = [];
+      for (const v of type.variants) {
+        try { return this.buildEntryNode(value, v, allocatedIds, embedMap, path); }
+        catch (e) { errs.push(`${typeKindLabel(v)}: ${(e as Error).message}`); }
+      }
+      throw new Error(`${path}: no Or variant matched. Tried:\n  ${errs.join('\n  ')}`);
     }
 
     if (type.kind === 'SymbolType') {
@@ -1061,7 +1106,8 @@ export class Db implements QueryDb {
       return id;
     }
 
-    throw new Error(`${path}: unsupported type kind "${type.kind}"`);
+    // Exhaustiveness — every Type variant should be handled above.
+    throw new Error(`${path}: unsupported type kind "${(type as { kind: string }).kind}"`);
   }
 
   // ── Node loading ───────────────────────────────────────────────────────────
@@ -1148,33 +1194,40 @@ export class Db implements QueryDb {
       return { kind: 'atom', atom: { kind: 'meaning', value: { text: row.meaningText!, vec } } };
     }
 
-    // Containers respect the depth limit.
-    if (depth === 0) return { kind: 'ref', id };
-
     const childAncestors = new Set(ancestors);
     childAncestors.add(id);
 
     if (row.kind === 'list') {
+      // Lists are transparent — they're collections, not entities. They don't
+      // consume depth budget. Items inherit the parent's depth and hit the
+      // named-map-truncation rule normally.
       const items = this.raw
         .prepare(`SELECT item_id FROM list_items WHERE list_id=? ORDER BY position`)
         .all(id) as { item_id: string }[];
       return {
         kind: 'list',
-        items: items.map(r => this.loadNodeDeep(r.item_id, depth - 1, childAncestors)),
+        items: items.map(r => this.loadNodeDeep(r.item_id, depth, childAncestors)),
       };
     }
 
     if (row.kind === 'map') {
+      const namedRow = this.raw
+        .prepare(`SELECT name FROM named_types WHERE type_id=?`)
+        .get(row.typeId!) as { name: string } | undefined;
+      const isNamed = !!namedRow;
+
+      // Only NAMED maps consume depth. Anonymous structural maps (rare in
+      // current YAMLs) are transparent like lists.
+      if (isNamed && depth === 0) return { kind: 'ref', id };
+      const childDepth = isNamed ? depth - 1 : depth;
+
       const entries = this.raw
         .prepare(`SELECT key, value_id FROM map_entries WHERE map_id=?`)
         .all(id) as { key: string; value_id: string }[];
       const type = this.loadType(row.typeId!);
-      const namedRow = this.raw
-        .prepare(`SELECT name FROM named_types WHERE type_id=?`)
-        .get(row.typeId!) as { name: string } | undefined;
       const result: Record<Sym, DeepNode> = {};
       for (const { key, value_id } of entries) {
-        result[key] = this.loadNodeDeep(value_id, depth - 1, childAncestors);
+        result[key] = this.loadNodeDeep(value_id, childDepth, childAncestors);
       }
       return { kind: 'map', id, entries: result, type, typeName: namedRow?.name };
     }
@@ -1927,4 +1980,20 @@ function toJobRunRow(r: RawJobRunRow): JobRunRow {
     error: r.error,
     metrics,
   };
+}
+
+/**
+ * Short human-readable name for a Type variant — used in error messages
+ * when listing the union arms an OrType tried.
+ */
+function typeKindLabel(t: Type): string {
+  switch (t.kind) {
+    case 'SymbolType':   return 'Symbol';
+    case 'MeaningType':  return 'Meaning';
+    case 'ListType':     return `List<${typeKindLabel(t.itemType)}>`;
+    case 'MapType':      return 'Map';
+    case 'RefType':      return t.name;
+    case 'OrType':       return `Or<${t.variants.map(typeKindLabel).join(' | ')}>`;
+    case 'OptionalType': return `Optional<${typeKindLabel(t.inner)}>`;
+  }
 }

@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS map_entries (
 CREATE TABLE IF NOT EXISTS types (
   id          TEXT PRIMARY KEY,
   kind        TEXT NOT NULL CHECK(kind IN (
-    'SymbolType', 'MeaningType', 'ListType', 'OrType', 'AndType', 'MapType', 'RefType', 'OptionalType'
+    'SymbolType', 'MeaningType', 'ListType', 'OrType', 'MapType', 'RefType', 'OptionalType'
   )),
   ref_name    TEXT,
   content_key TEXT
@@ -44,7 +44,10 @@ CREATE TABLE IF NOT EXISTS types (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_types_content_key
   ON types(content_key) WHERE content_key IS NOT NULL;
 
--- Composite type children (ListType: pos=0 is itemType; OrType/AndType: pos=0=left, pos=1=right)
+-- Composite type children:
+--   ListType:     pos=0 is itemType
+--   OrType:       pos=0..N-1 are the N flat variants (no nested Or)
+--   OptionalType: pos=0 is the inner type
 CREATE TABLE IF NOT EXISTS type_children (
   type_id       TEXT    NOT NULL REFERENCES types(id) ON DELETE CASCADE,
   position      INTEGER NOT NULL,

@@ -34,19 +34,29 @@ export type Type =
   | { kind: 'SymbolType' }
   | { kind: 'MeaningType' }
   | { kind: 'ListType'; itemType: Type }
-  | { kind: 'OrType'; left: Type; right: Type }
-  | { kind: 'AndType'; left: Type; right: Type }
+  /**
+   * A union of types — the field's value must satisfy at least one variant.
+   * Stored as N rows in `type_children` (positions 0..N-1). Direct nesting
+   * `Or<Or<...>>` and `Or<Optional<...>>` is rejected at YAML resolve time,
+   * so the variants are guaranteed flat at the data layer.
+   */
+  | { kind: 'OrType'; variants: Type[] }
   | { kind: 'MapType'; entries: Record<Sym, Type> }
   /**
    * A named type reference — points to a type registered in named_types by name.
    * Stored as a single lightweight row in the types table; resolved at load time.
    * Enables graph (not tree) storage and supports circular type definitions.
+   *
+   * Named **Or** and **Optional** types are NOT stored as RefType — they're
+   * inlined at YAML resolve time, so a `RefType` always resolves to a concrete
+   * named map / list / atom shape.
    */
   | { kind: 'RefType'; name: string }
   /**
    * Marks a map field as optional — the field may be absent when inserting or
    * loading. Wraps any inner type. YAML shorthand: append `?` to the type name
    * (e.g. `Meaning?`, `Symbol?`, `Location?`) or use `kind: Optional`.
+   * Optional cannot wrap an Or or another Optional directly.
    */
   | { kind: 'OptionalType'; inner: Type };
 
@@ -64,7 +74,7 @@ export interface StoredNode {
 
 export interface StoredType {
   id: string;
-  kind: 'SymbolType' | 'MeaningType' | 'ListType' | 'OrType' | 'AndType' | 'MapType' | 'RefType' | 'OptionalType';
+  kind: 'SymbolType' | 'MeaningType' | 'ListType' | 'OrType' | 'MapType' | 'RefType' | 'OptionalType';
   refName?: string; // set when kind='RefType'
 }
 
