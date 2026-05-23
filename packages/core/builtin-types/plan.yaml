@@ -17,3 +17,6 @@ types:
       relatedSymbols:      # LSP symbol nodes whose name appears in fenced inline code in the plan
         kind: List
         item: AnyLspSymbol
+      acceptedBy:          # Namespaced sessionIds (e.g. "claude:<uuid>") of agent sessions that ran ExitPlanMode against this plan
+        kind: List
+        item: Symbol

@@ -18,7 +18,7 @@ types:
       sessionId: Symbol
       uuid: Symbol         # message UUID
       timestamp: Symbol
-      text: Meaning        # semantic content of the user's message
+      text: Symbol         # verbatim user message — Symbol (not Meaning) so it doesn't go into the vector store; UI renders markdown via length/markdown heuristic
       comment: Meaning?    # optional analyst annotation
       agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedFiles:        # file paths mentioned or implied by the user (empty = none)
@@ -38,10 +38,10 @@ types:
       timestamp: Symbol
       operation: Symbol    # "create" | "edit"
       path: Symbol         # absolute file path
-      preview: Meaning     # first lines of new content, or the changed fragment
+      content: Symbol      # FULL content (Write) or new_string (Edit) — Symbol so it doesn't embed; used for name-match enrichment
       comment: Meaning?    # optional analyst annotation
       agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
-      touchedSymbols:      # LSP symbol nodes in this file — populated during LSP indexing
+      touchedSymbols:      # LSP symbol nodes whose name appears in `content` and whose file_path == `path` — populated during LSP indexing
         kind: List
         item: AnyLspSymbol
 
@@ -54,7 +54,7 @@ types:
       uuid: Symbol
       timestamp: Symbol
       command: Symbol
-      description: Meaning # agent-supplied description of what the command does
+      description: Symbol  # agent-supplied description of what the command does
       comment: Meaning?    # optional analyst annotation
       agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
 
@@ -66,7 +66,7 @@ types:
       sessionId: Symbol
       uuid: Symbol
       timestamp: Symbol
-      question: Meaning    # the question text
+      question: Symbol     # verbatim agent question — Symbol so it doesn't embed
       comment: Meaning?    # optional analyst annotation
       agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedSymbols:      # LSP symbol nodes mentioned in the question — populated during LSP indexing
@@ -74,14 +74,14 @@ types:
         item: AnyLspSymbol
 
   AgentMessage:
-    description: A plain-text reply from the coding agent to the user — status updates, explanations, summaries of what was done. Replaces AgentThought (modern LLM providers no longer expose chain-of-thought, so the user-facing message is now the primary signal of agent intent).
+    description: A plain-text reply from the coding agent to the user — status updates, explanations, summaries of what was done.
     hidden: true
     kind: Map
     fields:
       sessionId: Symbol
       uuid: Symbol
       timestamp: Symbol
-      text: Meaning        # the assistant message body (markdown)
+      text: Symbol         # assistant in-progress narration — Symbol so it doesn't embed (UI still renders markdown)
       comment: Meaning?    # optional analyst annotation
       agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedSymbols:      # LSP symbol nodes mentioned in the message — populated during LSP indexing
@@ -89,14 +89,14 @@ types:
         item: AnyLspSymbol
 
   AgentSummary:
-    description: A wrap-up message the agent emits at the end of a turn — explains what was done after tool calls completed. Distinct from in-progress narration (AgentMessage) which lives in assistant turns that ALSO contain tool calls; AgentSummary turns contain only text.
+    description: A wrap-up message the agent emits at the end of a turn — explains what was done after tool calls completed.
     hidden: true
     kind: Map
     fields:
       sessionId: Symbol
       uuid: Symbol
       timestamp: Symbol
-      text: Meaning        # the wrap-up text body (markdown)
+      text: Symbol         # wrap-up narrative — Symbol so it doesn't embed
       comment: Meaning?    # optional analyst annotation
       agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedSymbols:      # LSP symbol nodes mentioned in the summary — populated during LSP indexing
