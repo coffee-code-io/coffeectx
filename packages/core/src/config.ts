@@ -97,6 +97,12 @@ export interface ProjectEntry {
   core?: { embed?: EmbedSettings };
   mcp?: { tools?: Partial<ToolsSettings> };
   jobs?: Record<string, JobConfig>;
+  /**
+   * Interactive UI agent — the right-sidebar chat in the webui. Same auth
+   * shape as job auth (provider/model/apiKey). When unset, the UI shows a
+   * "not configured" hint instead of attempting to spawn a session.
+   */
+  agent?: { auth?: AuthSettings };
 }
 
 export interface CoffeectxConfig {
@@ -206,6 +212,11 @@ export function resolveProjectTools(cfg: CoffeectxConfig, projectName: string): 
 /** Effective auth for a particular (project, job): only project.jobs[name].parameters.auth. */
 export function resolveJobAuth(cfg: CoffeectxConfig, projectName: string, jobName: string): AuthSettings {
   return (cfg.projects[projectName]?.jobs?.[jobName]?.parameters?.['auth'] as AuthSettings | undefined) ?? {};
+}
+
+/** Effective auth for the UI agent: project.agent.auth. */
+export function resolveAgentAuth(cfg: CoffeectxConfig, projectName: string): AuthSettings {
+  return cfg.projects[projectName]?.agent?.auth ?? {};
 }
 
 /** Per-job parameters (whole bag) with empty fallback. */

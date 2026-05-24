@@ -11,7 +11,9 @@ import fastifyStatic from '@fastify/static';
 import { registerProjectsRoutes } from './routes/projects.js';
 import { registerNodesRoutes } from './routes/nodes.js';
 import { registerJobsRoutes } from './routes/jobs.js';
+import { registerAgentRoutes } from './routes/agent.js';
 import { closeAll } from './dbPool.js';
+import { disposeAll as disposeAllAgents } from './agentSessions.js';
 
 export interface ServerOptions {
   host: string;
@@ -30,6 +32,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   await registerProjectsRoutes(app);
   await registerNodesRoutes(app);
   await registerJobsRoutes(app);
+  await registerAgentRoutes(app);
 
   // ── Static SPA serving ────────────────────────────────────────────────────
   const staticDir = resolveStaticDir();
@@ -59,18 +62,42 @@ export async function startServer(opts: ServerOptions): Promise<void> {
     });
   }
 
-  app.addHook('onClose', async () => closeAll());
+  app.addHook('onClose', async () => {
+    // Abort any in-flight pi sessions before yanking the DB handles, so
+    // late writes from a provider response don't error against a closed db.
+    await disposeAllAgents();
+    closeAll();
+  });
 
   await app.listen({ host: opts.host, port: opts.port });
   console.log(`[ui] listening on http://${opts.host}:${opts.port}`);
 
-  const shutdown = async (sig: string) => {
+  // Same pattern as the scheduler: first signal kicks off a graceful close
+  // under a hard deadline, second signal force-exits. Without the watchdog,
+  // pi-coding-agent's in-flight LLM request can keep the event loop alive
+  // for the full provider timeout (often 60s+) after the user hit Ctrl-C.
+  const SHUTDOWN_DEADLINE_MS = 10_000;
+  let stopping = false;
+  const shutdown = (sig: string) => {
+    if (stopping) {
+      console.log(`[ui] second ${sig} — force exit`);
+      process.exit(1);
+    }
+    stopping = true;
     console.log(`\n[ui] received ${sig}, shutting down`);
-    try { await app.close(); } catch { /* ignore */ }
-    process.exit(0);
+    const hardKill = setTimeout(() => {
+      console.error('[ui] shutdown timeout — force exit');
+      process.exit(1);
+    }, SHUTDOWN_DEADLINE_MS);
+    hardKill.unref();
+    void (async () => {
+      try { await app.close(); } catch { /* ignore */ }
+      clearTimeout(hardKill);
+      process.exit(0);
+    })();
   };
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 /**

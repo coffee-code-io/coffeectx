@@ -8,6 +8,7 @@ export {
   resolveProjectEmbed,
   resolveProjectTools,
   resolveJobAuth,
+  resolveAgentAuth,
   resolveJobParameters,
   resolveProjectByCwd,
   listEnabledProjects,

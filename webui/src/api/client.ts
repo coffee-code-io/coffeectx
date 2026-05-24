@@ -180,4 +180,43 @@ export const api = {
 
   getRun: (project: string, runId: number) =>
     http<RunDetailResponse>(`/api/p/${encodeURIComponent(project)}/runs/${runId}`),
+
+  // ── Interactive UI agent ──────────────────────────────────────────────────
+  sendAgentMessage: (project: string, text: string) =>
+    http<{ ok: true }>(`/api/p/${encodeURIComponent(project)}/agent/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }),
+  listAgentSessions: (project: string) =>
+    http<{ sessions: UiAgentSessionInfo[] }>(`/api/p/${encodeURIComponent(project)}/agent/sessions`),
+  newAgentSession: (project: string) =>
+    http<{ ok: true; activeSessionPath?: string }>(`/api/p/${encodeURIComponent(project)}/agent/sessions/new`, {
+      method: 'POST',
+    }),
+  activateAgentSession: (project: string, path: string) =>
+    http<{ ok: true; activeSessionPath?: string }>(`/api/p/${encodeURIComponent(project)}/agent/sessions/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
+  deleteAgentSession: (project: string, path: string) =>
+    http<{ ok: true; activeSessionPath?: string }>(`/api/p/${encodeURIComponent(project)}/agent/sessions/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
+  /** URL for the SSE stream — pass to EventSource. */
+  agentStreamUrl: (project: string) => `/api/p/${encodeURIComponent(project)}/agent/stream`,
 };
+
+export interface UiAgentSessionInfo {
+  path: string;
+  id: string;
+  name?: string;
+  created: string;
+  modified: string;
+  messageCount: number;
+  firstMessage: string;
+  isActive: boolean;
+}

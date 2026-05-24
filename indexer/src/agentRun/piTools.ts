@@ -95,6 +95,36 @@ const UpsertEntriesParams = Type.Object({
   ),
 });
 
+const NavigateToNodeParams = Type.Object({
+  nodeId: Type.String({ description: 'UUID of the node to open in the UI.' }),
+  reason: Type.Optional(Type.String({ description: 'Short rationale shown next to the navigation event (e.g. "this is the function the user asked about").' })),
+});
+
+/**
+ * Build a `navigate_to_node` tool that, when called by the agent, fires a
+ * side-effect via `onNavigate` so the UI can switch focus to the node. The
+ * tool returns a small confirmation payload to the agent.
+ */
+export function buildNavigateTool(onNavigate: (nodeId: string, reason?: string) => void) {
+  return defineTool({
+    name: 'navigate_to_node',
+    label: 'Navigate UI to node',
+    description:
+      'Open the given graph node in the right-hand detail pane of the UI. ' +
+      'Use this to direct the user\'s attention to a specific node after locating it. ' +
+      'Only call when you are confident the node is what the user is asking about.',
+    parameters: NavigateToNodeParams,
+    execute: async (_id, raw: Static<typeof NavigateToNodeParams>) => {
+      try {
+        onNavigate(raw.nodeId, raw.reason);
+        return textResult({ ok: true, nodeId: raw.nodeId });
+      } catch (err) {
+        return errorResult((err as Error).message);
+      }
+    },
+  });
+}
+
 // ── Build the tool list (closing db over each tool's execute()) ─────────────
 
 export function buildGraphTools(db: Db, allowInsert: boolean) {
