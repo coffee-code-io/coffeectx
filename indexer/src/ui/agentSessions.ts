@@ -40,7 +40,6 @@ import { buildGraphTools, buildNavigateTool } from '../agentRun/piTools.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SESSION_ROOT = join(homedir(), '.coffeecode', 'sessions');
-const SYSTEM_PROMPT_PATH = resolve(__dirname, '../../prompts/system.md');
 const UI_AGENT_PROMPT_PATH = resolve(__dirname, '../../prompts/ui-agent.md');
 /** The agent's cwd. Matches what `runSkillInteractive` uses. */
 const PROJECT_ROOT = resolve(__dirname, '../../..');
@@ -133,10 +132,10 @@ export async function getOrCreateSession(
   const sessionDir = sessionDirFor(projectName);
   mkdirSync(sessionDir, { recursive: true });
   const sessionManager = SessionManager.continueRecent(PROJECT_ROOT, sessionDir);
-  const isResuming = hasAnySessionFile(sessionDir);
+  const needsPriming = !hasAnySessionFile(sessionDir);
 
   const state = await buildState({
-    projectName, db, auth: authOrErr.auth, sessionManager, isResuming,
+    projectName, db, auth: authOrErr.auth, sessionManager, needsPriming,
   });
   PROJECT_STATE.set(projectName, state);
   return state;
@@ -172,7 +171,7 @@ export async function newSession(
   const sessionManager = SessionManager.create(PROJECT_ROOT, sessionDir);
 
   const state = await buildState({
-    projectName, db, auth: authOrErr.auth, sessionManager, isResuming: false,
+    projectName, db, auth: authOrErr.auth, sessionManager, needsPriming: true,
   });
   for (const l of carriedListeners) state.listeners.add(l);
   PROJECT_STATE.set(projectName, state);
@@ -204,7 +203,7 @@ export async function activateSession(
   const carriedListeners = await tearDown(projectName);
   const sessionManager = SessionManager.open(absPath, sessionDir);
   const state = await buildState({
-    projectName, db, auth: authOrErr.auth, sessionManager, isResuming: true,
+    projectName, db, auth: authOrErr.auth, sessionManager, needsPriming: false,
   });
   for (const l of carriedListeners) state.listeners.add(l);
   PROJECT_STATE.set(projectName, state);
@@ -255,7 +254,7 @@ export async function deleteSession(
         try {
           const sm = SessionManager.continueRecent(PROJECT_ROOT, sessionDir);
           const state = await buildState({
-            projectName, db, auth: authOrErr.auth, sessionManager: sm, isResuming: true,
+            projectName, db, auth: authOrErr.auth, sessionManager: sm, needsPriming: false,
           });
           for (const l of carriedListeners) state.listeners.add(l);
           PROJECT_STATE.set(projectName, state);
@@ -281,7 +280,7 @@ export async function deleteSession(
     : SessionManager.create(PROJECT_ROOT, sessionDir);
 
   const state = await buildState({
-    projectName, db, auth: authOrErr.auth, sessionManager, isResuming: hasSurvivors,
+    projectName, db, auth: authOrErr.auth, sessionManager, needsPriming: !hasSurvivors,
   });
   for (const l of carriedListeners) state.listeners.add(l);
   PROJECT_STATE.set(projectName, state);
@@ -341,7 +340,12 @@ interface BuildArgs {
   db: Db;
   auth: AuthSettings;
   sessionManager: SessionManager;
-  isResuming: boolean;
+  /**
+   * False for fresh sessions (we'll prepend the UI agent prompt to the
+   * user's first message), true for resumed sessions that already carry
+   * their priming turn in the JSONL.
+   */
+  needsPriming: boolean;
 }
 
 async function buildState(args: BuildArgs): Promise<PerProjectState> {
@@ -354,7 +358,7 @@ async function buildState(args: BuildArgs): Promise<PerProjectState> {
     auth: args.auth,
     session: null as unknown as AgentSession,
     activeSessionPath: undefined,
-    isResuming: args.isResuming,
+    needsPriming: args.needsPriming,
     listeners: new Set(),
     busy: false,
     abort: new AbortController(),
@@ -386,31 +390,39 @@ async function buildState(args: BuildArgs): Promise<PerProjectState> {
     broadcast(state, { kind: 'agent', event });
   });
 
-  if (!args.isResuming) {
-    void primeSession(state);
-  }
-
+  // Intentionally NO `prompt()` call here for fresh sessions — that would
+  // hit the LLM provider before the user has typed anything. We defer the
+  // prime to the first real user turn (see runPrompt).
   return state;
 }
 
-async function primeSession(state: PerProjectState): Promise<void> {
-  const uiPrompt = readFileSync(UI_AGENT_PROMPT_PATH, 'utf-8');
-  state.busy = true;
-  try {
-    await state.session.prompt(uiPrompt);
-  } catch (err) {
-    broadcast(state, {
-      kind: 'agent',
-      event: { type: 'error', message: `system-prompt prime failed: ${(err as Error).message}` },
-    });
-  } finally {
-    state.busy = false;
-  }
-}
-
 async function runPrompt(state: PerProjectState, text: string): Promise<void> {
+  // On the first user turn of a fresh session, prepend the UI agent
+  // prompt. We embed it as the same prompt() so pi sees a single user
+  // message — that keeps `SessionInfo.firstMessage` aligned with what the
+  // user actually typed (renderHistory drops the priming preamble by
+  // length heuristic; the session-list preview uses pi's own truncation
+  // and only shows the first ~80 chars, so as long as the user's text
+  // comes FIRST the preview reads right).
+  let payload = text;
+  if (state.needsPriming) {
+    try {
+      const uiPrompt = readFileSync(UI_AGENT_PROMPT_PATH, 'utf-8');
+      // User text first, then the system instructions tucked behind a
+      // separator. Pi's first-message extractor reads the literal head of
+      // the first user message, so leading with the real query keeps the
+      // session-switcher preview meaningful.
+      payload = `${text}\n\n---\n\n<system-instructions>\n${uiPrompt}\n</system-instructions>`;
+    } catch (err) {
+      broadcast(state, {
+        kind: 'agent',
+        event: { type: 'error', message: `failed to load ui-agent prompt: ${(err as Error).message}` },
+      });
+    }
+    state.needsPriming = false;
+  }
   try {
-    await state.session.prompt(text);
+    await state.session.prompt(payload);
   } catch (err) {
     broadcast(state, {
       kind: 'agent',
@@ -451,17 +463,24 @@ function renderHistory(session: AgentSession): HistoryItem[] {
     // are skipped (history replay shows the conversation, not the work).
     const m = msg as { role?: string; content?: unknown };
     if (m.role !== 'user' && m.role !== 'assistant') continue;
-    const text = extractText(m.content);
+    let text = extractText(m.content);
+    if (!text) continue;
+    // The first user turn of any fresh session has the UI agent prompt
+    // appended behind a `---\n<system-instructions>…</system-instructions>`
+    // delimiter (see runPrompt). Strip it from history so the user only
+    // sees what they actually typed.
+    text = stripSystemInstructions(text);
     if (!text) continue;
     out.push({ role: m.role === 'user' ? 'user' : 'agent', text });
   }
-  // Drop the seed system-prompt user turn (the priming `prompt()` call we
-  // send on a fresh session). It's always the first user message and it's
-  // a giant blob the user shouldn't see.
-  if (out.length > 0 && out[0]!.role === 'user' && out[0]!.text.length > 800) {
-    out.shift();
-  }
   return out;
+}
+
+function stripSystemInstructions(text: string): string {
+  const idx = text.indexOf('<system-instructions>');
+  if (idx === -1) return text;
+  // Also peel off the preceding "\n\n---\n\n" separator we wrote alongside.
+  return text.slice(0, idx).replace(/\n+---\n*$/, '').trimEnd();
 }
 
 function extractText(content: unknown): string {

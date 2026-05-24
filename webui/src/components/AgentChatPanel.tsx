@@ -25,6 +25,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { api, type UiAgentSessionInfo } from '../api/client';
 import { useUi } from '../state/store';
 
@@ -73,6 +75,7 @@ interface ChatItem {
 export function AgentChatPanel() {
   const project = useUi(s => s.project);
   const setSelected = useUi(s => s.setSelected);
+  const rememberAgentSession = useUi(s => s.rememberAgentSession);
   const queryClient = useQueryClient();
   const [items, setItems] = useState<ChatItem[]>([]);
   const [draft, setDraft] = useState('');
@@ -82,6 +85,10 @@ export function AgentChatPanel() {
   const [activeSessionPath, setActiveSessionPath] = useState<string | undefined>(undefined);
   const [showSessions, setShowSessions] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Restore-on-mount guard: we only auto-activate the stored session ONCE
+  // per project mount, after the SSE `ready` envelope tells us which one
+  // the server picked by default.
+  const restoreAttempted = useRef<string | null>(null);
 
   // Session list — refetched when the active session changes so the
   // dropdown reflects newly-created sessions immediately.
@@ -98,6 +105,8 @@ export function AgentChatPanel() {
     setItems([]);
     setConnError(null);
     setAuthError(null);
+    // New project = new restore window.
+    restoreAttempted.current = null;
 
     const es = new EventSource(api.agentStreamUrl(project));
     es.onmessage = (ev) => {
@@ -117,6 +126,30 @@ export function AgentChatPanel() {
         case 'ready':
           setConnError(null);
           setActiveSessionPath(env.activeSessionPath);
+          if (project) {
+            // First-mount restore: if localStorage remembers a DIFFERENT
+            // session than the server defaulted to, switch to it. Guarded
+            // by `restoreAttempted` so EventSource auto-reconnects don't
+            // re-trigger the swap after the user has already navigated.
+            // Read store directly so we use the persisted value rather
+            // than a stale closure capture.
+            const remembered = useUi.getState().activeAgentSessionByProject[project];
+            if (
+              restoreAttempted.current !== project &&
+              remembered &&
+              remembered !== env.activeSessionPath
+            ) {
+              restoreAttempted.current = project;
+              api.activateAgentSession(project, remembered).catch(() => {
+                // Stale path — clear the remembered entry so we don't
+                // keep trying on every reconnect.
+                rememberAgentSession(project, undefined);
+              });
+            } else {
+              restoreAttempted.current = project;
+              rememberAgentSession(project, env.activeSessionPath);
+            }
+          }
           return;
         case 'error':
           setAuthError(env.message);
@@ -127,6 +160,7 @@ export function AgentChatPanel() {
           // the new session, so subsequent agent events flow into the same
           // EventSource.
           setActiveSessionPath(env.activeSessionPath);
+          if (project) rememberAgentSession(project, env.activeSessionPath);
           setItems(env.history.map((h, i) => ({
             key: `h:${i}`,
             role: h.role,
@@ -435,8 +469,8 @@ function Bubble({ item, project }: { item: ChatItem; project: string | null }) {
   }
   if (item.role === 'agent') {
     return (
-      <div className="rounded-lg p-2 text-sm animate-fade-up bg-cream-50 border border-cream-200 text-roast-dark whitespace-pre-wrap leading-snug">
-        <CitedText text={item.text} project={project} />
+      <div className="rounded-lg p-2 text-sm animate-fade-up bg-cream-50 border border-cream-200 text-roast-dark leading-snug">
+        <AgentMarkdown text={item.text} project={project} />
       </div>
     );
   }
@@ -478,29 +512,55 @@ function BusyDots() {
  * a bare uuid (e.g. inside a tool-name string) into a chip.
  */
 const CITATION_RE = /\^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+const CITATION_CODE_PREFIX = 'coffee-cite:';
 
-function CitedText({ text, project }: { text: string; project: string | null }) {
-  // Split into alternating text segments + citation tokens, preserving
-  // surrounding whitespace. Using matchAll keeps it simple.
-  const parts: Array<{ kind: 'text'; value: string } | { kind: 'cite'; id: string }> = [];
-  let cursor = 0;
-  for (const m of text.matchAll(CITATION_RE)) {
-    const idx = m.index ?? 0;
-    if (idx > cursor) parts.push({ kind: 'text', value: text.slice(cursor, idx) });
-    parts.push({ kind: 'cite', id: m[1]! });
-    cursor = idx + m[0].length;
-  }
-  if (cursor < text.length) parts.push({ kind: 'text', value: text.slice(cursor) });
-
+/**
+ * Render assistant text as GFM markdown, with `^<uuid>` citations swapped
+ * to clickable chips.
+ *
+ * Mechanism: we pre-rewrite each `^<uuid>` to backtick-wrapped
+ * `coffee-cite:<uuid>` so the markdown parser sees it as inline code, then
+ * intercept `<code>` elements in the rendered tree and turn the prefixed
+ * ones into chips. This sidesteps writing a remark plugin and survives
+ * being embedded inside bold/italic/links because markdown inline-code is
+ * itself an inline node.
+ */
+function AgentMarkdown({ text, project }: { text: string; project: string | null }) {
+  const rewritten = text.replace(CITATION_RE, (_m, uuid) => `\`${CITATION_CODE_PREFIX}${uuid}\``);
   return (
-    <>
-      {parts.map((p, i) =>
-        p.kind === 'text'
-          ? <span key={i}>{p.value}</span>
-          : <CitationChip key={i} nodeId={p.id} project={project} />,
-      )}
-    </>
+    <div className="prose prose-sm max-w-none prose-roast prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 prose-headings:my-2">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          code(props) {
+            const { children, className } = props as { children?: React.ReactNode; className?: string };
+            const text = childrenToString(children);
+            if (text.startsWith(CITATION_CODE_PREFIX)) {
+              return <CitationChip nodeId={text.slice(CITATION_CODE_PREFIX.length)} project={project} />;
+            }
+            // Plain inline / fenced code: fall back to default-ish styling.
+            // Fenced code gets a className like `language-ts` from the parser.
+            const isFenced = !!className;
+            return isFenced
+              ? <code className={className}>{children}</code>
+              : <code className="px-1 py-0.5 rounded bg-cream-100 border border-cream-200 text-[12px] font-mono">{children}</code>;
+          },
+          a({ children, href }) {
+            // External links: open in a new tab so we don't blow away the UI.
+            return <a href={href} target="_blank" rel="noreferrer" className="text-roast-medium underline">{children}</a>;
+          },
+        }}
+      >
+        {rewritten}
+      </ReactMarkdown>
+    </div>
   );
+}
+
+function childrenToString(children: React.ReactNode): string {
+  if (typeof children === 'string') return children;
+  if (Array.isArray(children)) return children.map(c => (typeof c === 'string' ? c : '')).join('');
+  return '';
 }
 
 function CitationChip({ nodeId, project }: { nodeId: string; project: string | null }) {
