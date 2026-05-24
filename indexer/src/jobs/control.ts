@@ -9,6 +9,7 @@ import {
   type Db,
   type CoffeectxConfig,
   type ProjectEntry,
+  type AuthSettings,
 } from '@coffeectx/core';
 import type { Job, JobContext } from './types.js';
 import { buildJobs } from './registry.js';
@@ -44,6 +45,110 @@ export function setProjectJobEnabled(projectName: string, jobName: string, enabl
     if (!project) throw new Error(`project "${projectName}" not in config`);
     if (!project.jobs) project.jobs = {};
     project.jobs[jobName] = { ...(project.jobs[jobName] ?? {}), enabled };
+  });
+}
+
+/**
+ * Persist a complete skill-job config block atomically.
+ *
+ * Writes `projects.<p>.jobs[<job>]` with any provided fields, leaving keys
+ * the caller didn't set untouched. Used by the UI's "Configure skill"
+ * dialog so a single click can wire auth + env + enable for a freshly
+ * installed skill. Does NOT register the job in the scheduler's DB — the
+ * caller pairs this with `setJobEnabled(...)` (which also runs
+ * `upsertJob`) when flipping `enabled: true`, so the new row shows up in
+ * `job list` and the scheduler picks it up on the next config-poll tick.
+ */
+export function setProjectJobConfig(
+  projectName: string,
+  jobName: string,
+  patch: {
+    enabled?: boolean;
+    env?: Record<string, string>;
+    auth?: AuthSettings;
+    /**
+     * Trigger override. `null` clears the override (re-enabling the
+     * SKILL.md `coffeecode.job.triggers` default); `[]` makes the job
+     * manual-only; otherwise the array replaces the SKILL.md triggers
+     * wholesale. Loosely typed because the indexer's `JobTrigger` and the
+     * core's `SkillTrigger` are kept in lockstep but live in different
+     * packages.
+     */
+    triggers?: unknown[] | null;
+  },
+): void {
+  updateConfig(cfg => {
+    const project = cfg.projects[projectName];
+    if (!project) throw new Error(`project "${projectName}" not in config`);
+    if (!project.jobs) project.jobs = {};
+    const prior = project.jobs[jobName] ?? {};
+    const next = { ...prior };
+
+    if (patch.enabled !== undefined) next.enabled = patch.enabled;
+
+    if (patch.env !== undefined) {
+      // Drop empty-string values — leaving a key with empty string in the
+      // config would otherwise mask the env's "unset" state. If the user
+      // wants to literally clear a var they can do it by editing the YAML.
+      const filtered: Record<string, string> = {};
+      for (const [k, v] of Object.entries(patch.env)) {
+        if (typeof v === 'string' && v.length > 0) filtered[k] = v;
+      }
+      next.env = filtered;
+    }
+
+    if (patch.auth !== undefined) {
+      const params = { ...(next.parameters ?? {}) };
+      // Strip empty-string fields from the auth block; same reasoning as env.
+      const cleanedAuth: AuthSettings = {};
+      if (patch.auth.authType) cleanedAuth.authType = patch.auth.authType;
+      if (patch.auth.model)    cleanedAuth.model    = patch.auth.model;
+      if (patch.auth.apiKey)   cleanedAuth.apiKey   = patch.auth.apiKey;
+      if (patch.auth.baseUrl)  cleanedAuth.baseUrl  = patch.auth.baseUrl;
+      params['auth'] = cleanedAuth;
+      next.parameters = params;
+    }
+
+    if (patch.triggers !== undefined) {
+      if (patch.triggers === null) delete next.triggers;
+      else next.triggers = patch.triggers;
+    }
+
+    project.jobs[jobName] = next;
+  });
+}
+
+/**
+ * Write a per-target skill filter (`projects.<p>.skills.<target>`).
+ * `include`/`exclude` arrays replace whatever was there; pass `null` to
+ * remove that target's entry entirely (back to "all skills visible").
+ */
+export function setProjectSkillFilter(
+  projectName: string,
+  target: 'uiAgent' | 'indexingAgents' | 'jobs',
+  patch: { include?: string[] | null; exclude?: string[] | null } | null,
+): void {
+  updateConfig(cfg => {
+    const project = cfg.projects[projectName];
+    if (!project) throw new Error(`project "${projectName}" not in config`);
+    if (!project.skills) project.skills = {};
+
+    if (patch === null) {
+      delete project.skills[target];
+      return;
+    }
+
+    const next: { include?: string[]; exclude?: string[] } = { ...(project.skills[target] ?? {}) };
+    if (patch.include !== undefined) {
+      if (patch.include === null || patch.include.length === 0) delete next.include;
+      else next.include = patch.include;
+    }
+    if (patch.exclude !== undefined) {
+      if (patch.exclude === null || patch.exclude.length === 0) delete next.exclude;
+      else next.exclude = patch.exclude;
+    }
+    if (Object.keys(next).length === 0) delete project.skills[target];
+    else project.skills[target] = next;
   });
 }
 

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { FilterMode } from '../api/client';
 
-export type Tab = 'graph' | 'scheduler' | 'runs';
+export type Tab = 'graph' | 'scheduler' | 'skills' | 'runs';
 export type GraphViewMode = 'graph' | 'list';
 
 interface UiState {

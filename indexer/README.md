@@ -40,7 +40,7 @@ npx coffeectx-index daemonize
 
 The scheduler runs every enabled job by its trigger:
 - timer-based jobs (e.g. `logs`, `lsp`) on a configurable interval
-- DB-triggered jobs (e.g. `skill:local-decisions`) when a relevant node is inserted
+- DB-triggered jobs (e.g. `local-decisions`) when a relevant node is inserted
 
 ### Trigger one job manually
 
@@ -56,7 +56,7 @@ Each job has a config entry under `jobs:` in `~/.coffeecode/config.yaml`. The CL
 ```bash
 npx coffeectx-index job list
 npx coffeectx-index job on lsp
-npx coffeectx-index job off skill:lsp-enrichment
+npx coffeectx-index job off lsp-enrichment
 npx coffeectx-index job status              # all jobs
 npx coffeectx-index job status logs         # one job + recent runs
 ```

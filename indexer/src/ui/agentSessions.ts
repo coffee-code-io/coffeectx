@@ -32,12 +32,10 @@ import {
 import {
   loadConfig,
   resolveAgentAuth,
-  loadSkillsFromDir,
-  defaultUserSkillsDir,
   type AuthSettings,
   type Db,
-  type Skill,
 } from '@coffeectx/core';
+import { buildResourceLoader } from '../agentRun/skillResourceLoader.js';
 import { buildPiAuth } from '../agentRun/auth.js';
 import { buildGraphTools, buildNavigateTool } from '../agentRun/piTools.js';
 
@@ -99,20 +97,6 @@ interface PerProjectState {
 }
 
 const PROJECT_STATE = new Map<string, PerProjectState>();
-
-/**
- * Lazily-loaded skill registry. Shared across every UI session in this
- * process — skills don't change at runtime (re-scan on restart, like
- * types), so caching once is fine. Visibility is filtered per-call inside
- * `list_skills` / `get_skill`.
- */
-let CACHED_SKILL_REGISTRY: ReadonlyArray<Skill> | null = null;
-function getSkillRegistry(): ReadonlyArray<Skill> {
-  if (CACHED_SKILL_REGISTRY === null) {
-    CACHED_SKILL_REGISTRY = loadSkillsFromDir(defaultUserSkillsDir());
-  }
-  return CACHED_SKILL_REGISTRY;
-}
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -386,10 +370,19 @@ async function buildState(args: BuildArgs): Promise<PerProjectState> {
   });
 
   const customTools: ToolDefinition[] = [
-    ...buildGraphTools(args.db, /*allowInsert*/ false, getSkillRegistry(), 'uiAgent'),
+    ...buildGraphTools(args.db, { allowInsert: false }),
     navigateTool,
   ];
   const toolNames = customTools.map(t => t.name);
+
+  // Pi-native skill loader filtered by the project's `uiAgent` bucket —
+  // the agent's `/skill:<name>` slash commands and system-prompt entries
+  // only include skills the user explicitly opted in for the UI agent.
+  const resourceLoader = await buildResourceLoader({
+    projectName: args.projectName,
+    target: 'uiAgent',
+    cwd: PROJECT_ROOT,
+  });
 
   const { session } = await createAgentSession({
     cwd: PROJECT_ROOT,
@@ -399,6 +392,7 @@ async function buildState(args: BuildArgs): Promise<PerProjectState> {
     customTools,
     tools: toolNames,
     noTools: 'builtin',
+    resourceLoader,
   });
   state.session = session;
   state.activeSessionPath = session.sessionFile;

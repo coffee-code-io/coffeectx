@@ -5,6 +5,7 @@ import { GraphView } from './components/GraphView';
 import { ListView } from './components/ListView';
 import { NodeDetail } from './components/NodeDetail';
 import { SchedulerView } from './components/SchedulerView';
+import { SkillsView } from './components/SkillsView';
 import { RunsView } from './components/RunsView';
 import { SchedulerDot } from './components/SchedulerDot';
 import { AgentChatPanel } from './components/AgentChatPanel';
@@ -51,6 +52,8 @@ export function App() {
             </div>
           ) : tab === 'runs' ? (
             <RunsView />
+          ) : tab === 'skills' ? (
+            <SkillsView />
           ) : (
             <SchedulerView />
           )}
@@ -70,6 +73,7 @@ function Tabs({ current, onChange }: { current: Tab; onChange: (t: Tab) => void 
     { value: 'graph', label: 'Graph' },
     { value: 'runs', label: 'Runs' },
     { value: 'scheduler', label: 'Scheduler' },
+    { value: 'skills', label: 'Skills' },
   ];
   return (
     <nav className="flex bg-cream-50 border border-cream-200 rounded overflow-hidden">

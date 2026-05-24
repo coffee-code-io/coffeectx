@@ -11,6 +11,7 @@ import {
   queueJobTrigger,
 } from '../../jobs/control.js';
 import { readRunLog } from '../../jobs/runLog.js';
+import { getSkillRegistry } from '../skillRegistry.js';
 
 const ALIVE_WINDOW_MS = 5_000;
 
@@ -24,7 +25,20 @@ export async function registerJobsRoutes(app: FastifyInstance): Promise<void> {
     }
     const db = getDb(req.params.p, cfg);
     ensureJobsRegistered(db, cfg, req.params.p);
-    return db.listJobs();
+
+    // Tag each job with `category` (user-installed skill job vs hardcoded
+    // built-in) and `configured` (whether the project has any entry in
+    // `projects.<p>.jobs[<name>]` — drives the Scheduler tab's
+    // Configured/Available split).
+    const projectJobs = cfg.projects[req.params.p]?.jobs ?? {};
+    const userJobNames = new Set(
+      getSkillRegistry().filter(s => s.category === 'job').map(s => s.name),
+    );
+    return db.listJobs().map(j => ({
+      ...j,
+      category: userJobNames.has(j.name) ? 'user' as const : 'system' as const,
+      configured: Object.prototype.hasOwnProperty.call(projectJobs, j.name),
+    }));
   });
 
   // ── One job with recent runs ──────────────────────────────────────────────

@@ -70,6 +70,12 @@ export interface JobRow {
   lastMetrics: Record<string, number> | null;
   triggerPending: boolean;
   state: unknown | null;
+  /** 'user' = backed by a SKILL.md in ~/.coffeecode/jobs/; 'system' =
+   *  hardcoded built-in (claude / codex / lsp / etc). */
+  category: 'system' | 'user';
+  /** True iff the project has any entry in `projects.<p>.jobs[<name>]` in
+   *  config.yaml. Drives the Configured / Available split. */
+  configured: boolean;
 }
 
 export interface SchedulerStatus {
@@ -208,7 +214,82 @@ export const api = {
     }),
   /** URL for the SSE stream — pass to EventSource. */
   agentStreamUrl: (project: string) => `/api/p/${encodeURIComponent(project)}/agent/stream`,
+
+  // ── Skills registry / configure ───────────────────────────────────────────
+  listSkills: (project: string) =>
+    http<SkillsListResponse>(`/api/p/${encodeURIComponent(project)}/skills`),
+  configureSkill: (project: string, name: string, body: SkillConfigurePatch) =>
+    http<{ ok: true }>(`/api/p/${encodeURIComponent(project)}/skills/${encodeURIComponent(name)}/configure`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  setSkillFilter: (project: string, body: SkillFilterPatch) =>
+    http<{ ok: true }>(`/api/p/${encodeURIComponent(project)}/skills/filter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
 };
+
+export type SkillFilterTarget = 'uiAgent' | 'indexingAgents' | 'jobs';
+export type SkillCategory = 'skill' | 'job';
+
+export interface SkillFilter {
+  include?: string[];
+  exclude?: string[];
+}
+
+export interface SkillInfo {
+  name: string;
+  description: string | null;
+  category: SkillCategory;
+  hasJob: boolean;
+  hasTypes: boolean;
+  requiredEnv: string[];
+  configuredEnvKeys: string[];
+  /** Current env var values from config.yaml. Shown as plain text in the
+   *  Configure dialog — these are agent-visible and not treated as
+   *  secret. Keys without an entry are simply absent. */
+  env: Record<string, string>;
+  authConfigured: boolean;
+  auth: {
+    authType: string | null;
+    model: string | null;
+    hasApiKey: boolean;
+  };
+  /** Config-override triggers, if set. `null` means "use SKILL.md default". */
+  triggers: unknown[] | null;
+  enabled: boolean;
+  visibleTo: Record<SkillFilterTarget, boolean>;
+}
+
+export interface SkillsListResponse {
+  skills: SkillInfo[];
+  filters: Record<SkillFilterTarget, SkillFilter>;
+}
+
+export interface SkillAuthPatch {
+  authType?: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+}
+
+export interface SkillConfigurePatch {
+  enabled?: boolean;
+  env?: Record<string, string>;
+  auth?: SkillAuthPatch;
+  /** `null` clears the override (re-enables SKILL.md default). */
+  triggers?: unknown[] | null;
+}
+
+export interface SkillFilterPatch {
+  target: SkillFilterTarget;
+  /** `null` clears that side of the filter. Omit to leave untouched. */
+  include?: string[] | null;
+  exclude?: string[] | null;
+}
 
 export interface UiAgentSessionInfo {
   path: string;

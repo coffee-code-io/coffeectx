@@ -3,6 +3,7 @@
   "private": true,
   "workspaces": [
     "packages/*",
+    "secrets/packages/*",
     "mcp",
     "indexer",
     "webui"

@@ -9,6 +9,10 @@ export * as exact from './exact.js';
 export * as regex from './regex.js';
 export * as rawQuery from './rawQuery.js';
 export * as loadNode from './loadNode.js';
-export * as skills from './skills.js';
 export * as upsertEntries from './upsertEntries.js';
 export * as resolveSymbols from './resolveSymbols.js';
+
+// `skills` tool was removed in the v2 skill refactor: pi-coding-agent's
+// native ResourceLoader now handles skill discovery (slash commands +
+// system-prompt injection), so the custom list_skills/get_skill tools
+// became dead weight.

@@ -1,6 +1,6 @@
 import type { Db, DeepNode, AuthSettings } from '@coffeectx/core';
 import { formatDeepNode } from '@coffeectx/core';
-import { runSkillInteractive, type BatchPayload } from './runSkill.js';
+import { runSkillInteractive, type BatchPayload } from './runEventStreamSkill.js';
 
 /**
  * Named types that represent indexable agent-log events. Each row is a

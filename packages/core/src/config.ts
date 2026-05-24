@@ -10,7 +10,8 @@
  *       repoPath: <path>                    # for MCP cwd routing + default for LSP jobs
  *       created: <iso-date>
  *       core: { embed: { provider, model, apiKey, baseUrl, dimensions } }
- *       mcp:  { tools: { search, exact, regex, raw_query, skills, load_node, insert } }
+ *       mcp:  { tools: { search, exact, regex, raw_query, load_node, insert } }
+ *       skills: { uiAgent?: {include?,exclude?}, indexingAgents?: {...}, jobs?: {...} }
  *       jobs:
  *         logs:
  *           enabled: bool
@@ -18,9 +19,13 @@
  *         lsp[:<suffix>]:                   # one or more LSP jobs per project
  *           enabled: bool
  *           parameters: { repoPath?, lspCommand?, intervalMs? }
- *         skill:<dirName>:
+ *         local-decisions:                  # hardcoded skill jobs (agent loops over recent events)
  *           enabled: bool
  *           parameters: { auth, batchStep?, intervalMs? }
+ *         <user-skill-name>:                # one per ~/.coffeecode/jobs/<dir>/SKILL.md
+ *           enabled: bool
+ *           env: { VAR: value, ... }        # values for skill's coffeecode.requiredEnv
+ *           parameters: { auth, ... }
  *
  *   types: { include, exclude, userDir }    # global type-loading
  */
@@ -71,7 +76,6 @@ export interface ToolsSettings {
   exact: boolean;
   regex: boolean;
   raw_query: boolean;
-  skills: boolean;
   load_node: boolean;
   /** Write access — disabled by default. */
   insert: boolean;
@@ -90,7 +94,40 @@ export interface JobConfig {
    * scheduler warns at startup if a required var isn't set here.
    */
   env?: Record<string, string>;
+  /**
+   * Trigger override. When present, replaces the SKILL.md
+   * `coffeecode.job.triggers` defaults wholesale (no merging — keep the
+   * config the source of truth for cron-style jobs the user re-schedules).
+   * Shape mirrors `SkillTrigger`; we keep it loosely typed here (`unknown[]`)
+   * so the core config schema doesn't depend on the skills module.
+   */
+  triggers?: unknown[];
 }
+
+/**
+ * Per-project skill access. Three buckets share the same `{include?,exclude?}`
+ * shape; each scopes which skills the matching agent(s) load via pi's
+ * ResourceLoader:
+ *
+ *   - `uiAgent`         — the interactive UI chat agent
+ *   - `indexingAgents`  — hardcoded `local-decisions` + `lsp-enrichment`
+ *   - `jobs`            — user job-shaped skills (everything in `~/.coffeecode/jobs/`)
+ *
+ * Visibility rule per (agent, skill):
+ *   - if `include` non-empty → visible iff `skill.name ∈ include`
+ *   - else                   → visible unless `skill.name ∈ exclude`
+ *   - default (no entry)     → all skills visible to that agent
+ */
+export interface SkillFilter {
+  include?: string[];
+  exclude?: string[];
+}
+
+export type SkillFilterTarget = 'uiAgent' | 'indexingAgents' | 'jobs';
+
+export type ProjectSkillsConfig = {
+  [K in SkillFilterTarget]?: SkillFilter;
+};
 
 export interface ProjectEntry {
   db: string;
@@ -106,6 +143,11 @@ export interface ProjectEntry {
   core?: { embed?: EmbedSettings };
   mcp?: { tools?: Partial<ToolsSettings> };
   jobs?: Record<string, JobConfig>;
+  /**
+   * Per-agent skill visibility. See {@link ProjectSkillsConfig}. When this
+   * block is missing every agent in the project sees every loaded skill.
+   */
+  skills?: ProjectSkillsConfig;
   /**
    * Interactive UI agent — the right-sidebar chat in the webui. Same auth
    * shape as job auth (provider/model/apiKey). When unset, the UI shows a
@@ -132,7 +174,7 @@ const DEFAULT_EMBED: EmbedSettings = { provider: 'stub', dimensions: 128 };
 
 const DEFAULT_TOOLS: ToolsSettings = {
   search: true, exact: true, regex: true, raw_query: true,
-  skills: true, load_node: true, insert: false,
+  load_node: true, insert: false,
 };
 
 // ── Raw YAML shape ────────────────────────────────────────────────────────────
@@ -236,6 +278,32 @@ export function resolveJobParameters(cfg: CoffeectxConfig, projectName: string, 
 /** Per-job env-var map (whole bag) with empty fallback. */
 export function resolveJobEnv(cfg: CoffeectxConfig, projectName: string, jobName: string): Record<string, string> {
   return cfg.projects[projectName]?.jobs?.[jobName]?.env ?? {};
+}
+
+/** Per-target skill filter (empty {} when nothing is configured). */
+export function resolveSkillFilter(
+  cfg: CoffeectxConfig,
+  projectName: string,
+  target: SkillFilterTarget,
+): SkillFilter {
+  return cfg.projects[projectName]?.skills?.[target] ?? {};
+}
+
+/**
+ * Filter a list of skill names (or anything with a `.name`) against the
+ * configured include/exclude lists for one target.
+ */
+export function applySkillFilter<T extends { name: string }>(items: ReadonlyArray<T>, filter: SkillFilter): T[] {
+  const include = filter.include;
+  const exclude = filter.exclude;
+  return items.filter(item => {
+    if (include && include.length > 0) {
+      if (!include.includes(item.name)) return false;
+    } else if (exclude && exclude.length > 0) {
+      if (exclude.includes(item.name)) return false;
+    }
+    return true;
+  });
 }
 
 /** Names of projects with enabled !== false. */

@@ -29,8 +29,6 @@ import {
   resolveProjectByCwd,
   resolveProjectEmbed,
   resolveProjectTools,
-  loadSkillsFromDir,
-  defaultUserSkillsDir,
 } from '@coffeectx/core';
 import {
   search,
@@ -38,7 +36,6 @@ import {
   regex,
   rawQuery,
   loadNode,
-  skills,
   upsertEntries,
   resolveSymbols,
 } from '@coffeectx/tools';
@@ -111,12 +108,6 @@ const LoadNodeParams = Type.Object({
   verbose: Type.Optional(Type.Boolean({ default: false })),
 });
 
-const ListSkillsParams = Type.Object({});
-
-const GetSkillParams = Type.Object({
-  name: Type.String({ description: 'Skill name' }),
-});
-
 const ResolveSymbolsParams = Type.Object({
   names: Type.Array(Type.String(), { minItems: 1, description: 'Symbol values to resolve in batch.' }),
   typeNames: Type.Optional(Type.Array(Type.String(), { description: 'Restrict candidates to these typeNames.' })),
@@ -173,11 +164,10 @@ const factory = (pi: MinimalExtensionAPI): void => {
 
   const allowInsert = toolsCfg.insert === true;
 
-  // Skills are loaded from `~/.coffeecode/skills/` at registration time.
-  // pi-plugin runs as part of an external pi session (e.g. user's local
-  // pi CLI), so it has no agent-identity equivalent of indexerAgent /
-  // uiAgent — we expose every loaded skill, same policy as MCP.
-  const skillRegistry = loadSkillsFromDir(defaultUserSkillsDir());
+  // Skills are no longer registered as pi tools here — pi-coding-agent
+  // ships its own ResourceLoader that handles SKILL.md discovery natively.
+  // Point pi at `~/.coffeecode/skills/` and `~/.coffeecode/jobs/` via its
+  // own config to expose coffeectx skills to a pi CLI session.
 
   // ── Registrations ────────────────────────────────────────────────────────
 
@@ -274,27 +264,6 @@ const factory = (pi: MinimalExtensionAPI): void => {
         });
         return textResult(result);
       } catch (err) { return errorResult((err as Error).message); }
-    },
-  });
-
-  pi.registerTool({
-    name: 'list_skills',
-    label: 'List skills',
-    description: skills.listDescription,
-    parameters: ListSkillsParams,
-    execute: async () => textResult(skills.runList(skillRegistry, 'mcp')),
-  });
-
-  pi.registerTool({
-    name: 'get_skill',
-    label: 'Get skill',
-    description: skills.getDescription,
-    parameters: GetSkillParams,
-    execute: async (_id, raw) => {
-      const p = raw as Static<typeof GetSkillParams>;
-      const result = skills.runGet(skillRegistry, 'mcp', { name: p.name });
-      if (!result) return errorResult(`Skill "${p.name}" not found.`);
-      return textResult(result);
     },
   });
 

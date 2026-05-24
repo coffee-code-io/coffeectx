@@ -1,26 +1,33 @@
 /**
  * Skill registry.
  *
- * A "skill" is a directory whose `SKILL.md` carries YAML front-matter
- * (agentskills.io convention). The front-matter's optional `coffeecode:`
- * block declares any of three orthogonal capabilities:
+ * A "skill" is a directory whose `SKILL.md` follows the Anthropic Agent
+ * Skills convention (`<dir>/SKILL.md`, YAML front-matter + markdown body).
+ * Two directories are scanned at startup, each tagged with a different
+ * `category`:
  *
- *   - `job` — registers the skill as a scheduler job with the given triggers.
- *     The SKILL.md body becomes the agent's instructions when the job runs.
- *   - `loadInto` — names the agents (`indexerAgent` / `uiAgent`) whose
- *     `list_skills` / `get_skill` tools surface this skill. Omitting hides
- *     the skill from every agent.
- *   - `types` — relative path to a YAML file contributing additional named
- *     types (loaded into the same builtin/user type sync pipeline).
- *   - `requiredEnv` — list of env vars the skill's scripts need at runtime.
- *     Pure declaration; the scheduler warns when configured-env is missing.
+ *   ~/.coffeecode/skills/<name>/   → category 'skill'  — agent-callable; pi's
+ *                                     ResourceLoader injects these into every
+ *                                     project agent's system prompt and as
+ *                                     `/skill:<name>` slash commands.
+ *   ~/.coffeecode/jobs/<name>/     → category 'job'    — scheduler picks
+ *                                     these up. Job-shaped skills can also
+ *                                     be invoked by agents (same loader).
  *
- * The dir name is the canonical skill id (= job name, = config key, = the
- * filter key for `loadInto`). The body (everything after the front-matter
- * fence) is plain markdown — the agent reads it as instructions.
+ * Front-matter that pi already understands: `name`, `description`,
+ * `disable-model-invocation`. Anything under the optional `coffeecode:`
+ * block is coffeectx-specific extension data:
  *
- * Skills live in `~/.coffeecode/skills/<name>/` and are re-scanned at each
- * process startup. No DB persistence (mirrors how YAML types are loaded).
+ *   - `job.triggers` / `job.defaultEnabled` — scheduler defaults (only
+ *     meaningful for `category: 'job'`; overridable in config.yaml).
+ *   - `types` — relative path to a YAML contributing named types.
+ *   - `requiredEnv` — env vars the skill scripts read at runtime (doc +
+ *     startup warn; populated at run time from
+ *     `projects.<p>.jobs[<name>].env`).
+ *
+ * Per-agent visibility (`loadInto`) moved out of front-matter and into the
+ * per-project `projects.<p>.skills` config, so users decide which skills
+ * each agent sees without touching the skill files themselves.
  */
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
@@ -37,12 +44,14 @@ export type SkillTrigger =
   | { kind: 'onNodeState'; typeNames: string[]; state: string }
   | { kind: 'cron'; expression: string };
 
-export type SkillLoadTarget = 'indexerAgent' | 'uiAgent';
-
 export interface SkillJobSpec {
   triggers: SkillTrigger[];
   defaultEnabled?: boolean;
 }
+
+/** Which on-disk dir the skill came from. Drives whether the scheduler
+ *  registers a job for it and (eventually) where the UI groups it. */
+export type SkillCategory = 'skill' | 'job';
 
 export interface Skill {
   /** Directory name; canonical id. */
@@ -52,8 +61,10 @@ export interface Skill {
   body: string;
   /** Resolved absolute path of the skill dir. */
   sourceDir: string;
+  /** Which top-level dir this skill was found in. */
+  category: SkillCategory;
+  /** Parsed `coffeecode.job` defaults; only honoured for `category: 'job'`. */
   job?: SkillJobSpec;
-  loadInto: ReadonlyArray<SkillLoadTarget>;
   /** Resolved absolute path of the contributed types YAML, if any. */
   typesPath?: string;
   /** Names of env vars the skill scripts read. Documentation + startup warn. */
@@ -67,17 +78,61 @@ export function defaultUserSkillsDir(): string {
   return join(COFFEECODE_DIR, 'skills');
 }
 
+/** Default user jobs directory: `~/.coffeecode/jobs/`. */
+export function defaultUserJobsDir(): string {
+  return join(COFFEECODE_DIR, 'jobs');
+}
+
 // ── Loading ────────────────────────────────────────────────────────────────
 
+export interface LoadAllSkillsOptions {
+  /** Path to the skills dir. Defaults to `defaultUserSkillsDir()`. */
+  skillsDir?: string;
+  /** Path to the jobs dir. Defaults to `defaultUserJobsDir()`. */
+  jobsDir?: string;
+}
+
 /**
- * Load every skill under `dir`. Each immediate sub-directory containing a
- * `SKILL.md` is treated as one skill. Missing dir → empty list (not an
- * error: most users won't have any skills configured).
+ * Walk both `skills/` and `jobs/` dirs, returning every loadable skill
+ * tagged with its source category. Each entry's `sourceDir` resolves to
+ * the leaf skill directory (e.g. `~/.coffeecode/jobs/foo`).
+ *
+ * Name collisions across the two dirs are warned about; the first-seen
+ * entry wins (skills/ scanned first). Users hitting this should rename
+ * one of the duplicates.
+ */
+export function loadAllSkills(opts: LoadAllSkillsOptions = {}): Skill[] {
+  const skillsDir = opts.skillsDir ?? defaultUserSkillsDir();
+  const jobsDir = opts.jobsDir ?? defaultUserJobsDir();
+
+  const out: Skill[] = [];
+  const seen = new Set<string>();
+  for (const skill of loadSkillsFromDir(skillsDir, 'skill')) {
+    seen.add(skill.name);
+    out.push(skill);
+  }
+  for (const skill of loadSkillsFromDir(jobsDir, 'job')) {
+    if (seen.has(skill.name)) {
+      console.warn(
+        `[skills] name collision: "${skill.name}" exists in both skills/ and jobs/ — keeping the skills/ entry, ignoring jobs/`,
+      );
+      continue;
+    }
+    out.push(skill);
+  }
+  return out;
+}
+
+/**
+ * Load every skill under `dir` and tag it with `category`. Each immediate
+ * sub-directory containing a `SKILL.md` is treated as one skill. Missing
+ * dir → empty list (not an error: most users won't have either dir set up
+ * on day one).
  *
  * Parse failures are logged to stderr and the offending skill is skipped;
  * we don't want one malformed skill file to take down the indexer.
  */
-export function loadSkillsFromDir(dir: string): Skill[] {
+export function loadSkillsFromDir(dir: string, category: SkillCategory = 'skill'): Skill[] {
   if (!existsSync(dir)) return [];
   let entries: string[];
   try { entries = readdirSync(dir); }
@@ -97,7 +152,7 @@ export function loadSkillsFromDir(dir: string): Skill[] {
     if (!existsSync(skillPath)) continue;
 
     try {
-      const skill = loadOneSkill(entry, skillDir, skillPath);
+      const skill = loadOneSkill(entry, skillDir, skillPath, category);
       if (skill) skills.push(skill);
     } catch (err) {
       console.warn(`[skills] ${entry}: ${(err as Error).message}`);
@@ -108,7 +163,7 @@ export function loadSkillsFromDir(dir: string): Skill[] {
 
 const FRONT_MATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
-function loadOneSkill(dirName: string, skillDir: string, skillPath: string): Skill | null {
+function loadOneSkill(dirName: string, skillDir: string, skillPath: string, category: SkillCategory): Skill | null {
   const raw = readFileSync(skillPath, 'utf-8');
   const m = raw.match(FRONT_MATTER_RE);
   if (!m) throw new Error(`SKILL.md missing front-matter (expected \`---\` fenced block)`);
@@ -131,8 +186,8 @@ function loadOneSkill(dirName: string, skillDir: string, skillPath: string): Ski
     description: typeof front?.description === 'string' ? front.description : undefined,
     body,
     sourceDir: skillDir,
+    category,
     job: parseJobSpec(cc.job),
-    loadInto: parseLoadInto(cc.loadInto),
     typesPath: resolveTypesPath(skillDir, cc.types),
     requiredEnv: parseRequiredEnv(cc.requiredEnv),
   };
@@ -148,9 +203,10 @@ interface RawFrontMatter {
 
 interface RawCoffeecodeBlock {
   job?: RawJobSpec;
-  loadInto?: unknown;
   types?: unknown;
   requiredEnv?: unknown;
+  // Legacy `loadInto` is silently ignored; per-agent visibility moved to
+  // `projects.<p>.skills` config in the v2 refactor.
 }
 
 interface RawJobSpec {
@@ -161,20 +217,17 @@ interface RawJobSpec {
 function parseJobSpec(raw: RawJobSpec | undefined): SkillJobSpec | undefined {
   if (!raw) return undefined;
   const triggers = parseTriggers(raw.triggers);
-  if (triggers.length === 0) {
-    // A job block with no valid triggers is almost certainly a typo; surface
-    // it but don't crash — return undefined so the skill is still loadable
-    // as a non-job (just won't run on a schedule).
-    console.warn(`[skills] job block has no valid triggers; skipping job registration`);
-    return undefined;
-  }
+  // Empty triggers is fine here — the scheduler treats a job with no
+  // triggers as manual-only (visible in the Jobs UI; the trigger button
+  // fires it). The user can also override / add triggers in config.yaml.
   return {
     triggers,
     defaultEnabled: typeof raw.defaultEnabled === 'boolean' ? raw.defaultEnabled : undefined,
   };
 }
 
-function parseTriggers(raw: unknown): SkillTrigger[] {
+/** Exported so the indexer/config can reuse the same trigger validation. */
+export function parseTriggers(raw: unknown): SkillTrigger[] {
   if (!Array.isArray(raw)) return [];
   const out: SkillTrigger[] = [];
   for (const t of raw) {
@@ -196,15 +249,6 @@ function parseTriggers(raw: unknown): SkillTrigger[] {
     }
   }
   return out;
-}
-
-function parseLoadInto(raw: unknown): SkillLoadTarget[] {
-  if (!Array.isArray(raw)) return [];
-  const out = new Set<SkillLoadTarget>();
-  for (const v of raw) {
-    if (v === 'indexerAgent' || v === 'uiAgent') out.add(v);
-  }
-  return [...out];
 }
 
 function resolveTypesPath(skillDir: string, raw: unknown): string | undefined {

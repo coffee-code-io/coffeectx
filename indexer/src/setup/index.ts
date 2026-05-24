@@ -251,11 +251,11 @@ function buildConfig(
         enabled: true,
         ...(Object.keys(logsParameters).length > 0 ? { parameters: logsParameters } : {}),
       },
-      'skill:local-decisions': {
+      'local-decisions': {
         enabled: true,
         parameters: { auth: sharedAuthBlock },
       },
-      'skill:lsp-enrichment': {
+      'lsp-enrichment': {
         enabled: false,
         parameters: { auth: sharedAuthBlock },
       },

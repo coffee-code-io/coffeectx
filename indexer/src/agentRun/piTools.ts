@@ -6,22 +6,20 @@
  * the Db handle is captured at build time and lives for the session.
  */
 
+import { writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { dirname, isAbsolute } from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type, type Static } from 'typebox';
-import type { Db, Skill } from '@coffeectx/core';
+import type { Db } from '@coffeectx/core';
 import {
   search,
   exact,
   regex,
   rawQuery,
   loadNode,
-  skills,
   upsertEntries,
   resolveSymbols,
 } from '@coffeectx/tools';
-
-/** Caller identity for `list_skills`/`get_skill` visibility filtering. */
-export type GraphToolsCaller = 'indexerAgent' | 'uiAgent';
 
 /** Tool name → wraps a JSON-serialised body inside the pi content payload. */
 function textResult(value: unknown) {
@@ -77,12 +75,6 @@ const LoadNodeParams = Type.Object({
   verbose: Type.Optional(Type.Boolean({ default: false })),
 });
 
-const ListSkillsParams = Type.Object({});
-
-const GetSkillParams = Type.Object({
-  name: Type.String({ description: 'Skill name, e.g. "ArchitecturalDecisionIndexing"' }),
-});
-
 const ResolveSymbolsParams = Type.Object({
   names: Type.Array(Type.String(), { minItems: 1, description: 'Symbol values to look up — typically function/class/file names extracted from text.' }),
   typeNames: Type.Optional(Type.Array(Type.String(), { description: 'If set, only return candidates whose typeName is in this list (e.g. ["LspFunction","LspMethod"]).' })),
@@ -101,6 +93,23 @@ const UpsertEntriesParams = Type.Object({
 const NavigateToNodeParams = Type.Object({
   nodeId: Type.String({ description: 'UUID of the node to open in the UI.' }),
   reason: Type.Optional(Type.String({ description: 'Short rationale shown next to the navigation event (e.g. "this is the function the user asked about").' })),
+});
+
+const WriteFileParams = Type.Object({
+  path: Type.String({
+    description:
+      'Absolute path of the file to write. Relative paths are rejected — pass a fully-qualified path, ' +
+      'composing from an env-var like $OBSIDIAN_VAULT/Daily/2026-05-24.md if your skill exposes one.',
+  }),
+  content: Type.String({ description: 'Full file body to write or append.' }),
+  mode: Type.Optional(Type.Union([Type.Literal('overwrite'), Type.Literal('append')], {
+    description: '`overwrite` (default) replaces the file; `append` adds to the end (creates the file if absent).',
+    default: 'overwrite',
+  })),
+  createParents: Type.Optional(Type.Boolean({
+    description: 'If true, create missing parent directories (mkdir -p). Default true.',
+    default: true,
+  })),
 });
 
 /**
@@ -128,26 +137,85 @@ export function buildNavigateTool(onNavigate: (nodeId: string, reason?: string) 
   });
 }
 
+/**
+ * Build a `write_file` tool that writes a single file to disk.
+ *
+ * Only enabled for indexer-side skill jobs (not the UI agent) — file write
+ * is a meaningful trust boundary, so it's opt-in via `allowFileWrite` on
+ * `buildGraphTools`. Skills declare any directory roots they need via env
+ * vars (e.g. `coffeecode.requiredEnv: [OBSIDIAN_VAULT]`); the scheduler
+ * exports those into `process.env` for the job's duration, so this tool
+ * sees them via standard env-var expansion inside the path the agent
+ * supplies.
+ *
+ * Safety: paths must be absolute. We don't sandbox the writes — the agent
+ * is trusted code installed by the user under `~/.coffeecode/skills/`.
+ */
+export function buildWriteFileTool() {
+  return defineTool({
+    name: 'write_file',
+    label: 'Write file',
+    description:
+      'Write or append text to an absolute file path on disk. Required for skills that produce ' +
+      'output files (e.g. an Obsidian worklog under $OBSIDIAN_VAULT). Pass an absolute path — env ' +
+      'vars exposed to the job (via coffeecode.requiredEnv) are available in process.env if you ' +
+      'compose the path yourself.',
+    parameters: WriteFileParams,
+    execute: async (_id, raw: Static<typeof WriteFileParams>) => {
+      try {
+        const path = raw.path;
+        if (!isAbsolute(path)) return errorResult(`path must be absolute (got "${path}")`);
+
+        const mode = raw.mode ?? 'overwrite';
+        const createParents = raw.createParents ?? true;
+        if (createParents) {
+          mkdirSync(dirname(path), { recursive: true });
+        }
+        if (mode === 'append') {
+          appendFileSync(path, raw.content, 'utf-8');
+        } else {
+          writeFileSync(path, raw.content, 'utf-8');
+        }
+        return textResult({ ok: true, path, mode, bytes: Buffer.byteLength(raw.content, 'utf-8') });
+      } catch (err) {
+        return errorResult((err as Error).message);
+      }
+    },
+  });
+}
+
 // ── Build the tool list (closing db over each tool's execute()) ─────────────
 
+export interface BuildGraphToolsOptions {
+  /** Expose `upsert_entries` for writing nodes back into the graph. */
+  allowInsert?: boolean;
+  /**
+   * Expose `write_file` for writing arbitrary files to disk. Default
+   * `false`. The UI agent runs at lower trust and should never get
+   * filesystem write access; skill jobs (trusted code installed by the
+   * user under `~/.coffeecode/jobs/`) flip this on.
+   */
+  allowFileWrite?: boolean;
+}
+
 /**
- * Build the agent's tool list.
+ * Build the agent's graph + utility tool list.
  *
  *  - `db` is the SQLite connection every tool closes over.
  *  - `allowInsert` gates `upsert_entries`.
- *  - `skillRegistry` + `caller` drive `list_skills` / `get_skill`: each
- *    skill's `coffeecode.loadInto` declares which agents see it, so the
- *    indexer agent and the UI agent can be opted into different skill sets.
- *    When omitted the skill tools simply return an empty list (matches the
- *    behaviour for agents with no skills installed).
+ *  - `allowFileWrite` gates `write_file`.
+ *
+ * Skill discovery is **not** wired here — pi-coding-agent's native
+ * ResourceLoader handles SKILL.md surfacing (system-prompt injection +
+ * `/skill:<name>` slash commands). Wire skills via `createAgentSession`
+ * by passing a configured `resourceLoader`, not via this function.
  */
-export function buildGraphTools(
-  db: Db,
-  allowInsert: boolean,
-  skillRegistry: ReadonlyArray<Skill> = [],
-  caller: GraphToolsCaller = 'indexerAgent',
-) {
-  const tools = [
+export function buildGraphTools(db: Db, options: BuildGraphToolsOptions = {}) {
+  const allowInsert = options.allowInsert ?? false;
+  const allowFileWrite = options.allowFileWrite ?? false;
+  // Widen the array type — tools we push conditionally (upsert_entries,
+  // write_file) have different parameter shapes than the initial entries.
+  const tools: ReturnType<typeof defineTool>[] = [
     defineTool({
       name: 'search',
       label: 'Search knowledge graph',
@@ -250,28 +318,6 @@ export function buildGraphTools(
     }),
 
     defineTool({
-      name: 'list_skills',
-      label: 'List skills',
-      description: skills.listDescription,
-      parameters: ListSkillsParams,
-      execute: async () => textResult(skills.runList(skillRegistry, caller)),
-    }),
-
-    defineTool({
-      name: 'get_skill',
-      label: 'Get skill',
-      description: skills.getDescription,
-      parameters: GetSkillParams,
-      execute: async (_id, raw: Static<typeof GetSkillParams>) => {
-        const result = skills.runGet(skillRegistry, caller, { name: raw.name });
-        if (!result) {
-          return errorResult(`Skill "${raw.name}" not found. Use list_skills to see available skills.`);
-        }
-        return textResult(result);
-      },
-    }),
-
-    defineTool({
       name: 'resolve_symbols',
       label: 'Resolve symbol names',
       description: resolveSymbols.description,
@@ -311,6 +357,10 @@ export function buildGraphTools(
     );
   }
 
+  if (allowFileWrite) {
+    tools.push(buildWriteFileTool());
+  }
+
   return tools;
 }
 
@@ -320,8 +370,7 @@ export const GRAPH_TOOL_NAMES = [
   'regex',
   'raw_query',
   'get_node_by_id',
-  'list_skills',
-  'get_skill',
   'resolve_symbols',
   'upsert_entries',
+  'write_file',
 ] as const;

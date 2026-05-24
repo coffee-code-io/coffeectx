@@ -42,7 +42,7 @@ export interface JobRunResult {
 }
 
 export interface Job {
-  /** Unique scheduler ID, e.g. 'lsp', 'logs', 'skill:local-decisions'. */
+  /** Unique scheduler ID, e.g. 'lsp', 'claude', 'local-decisions'. */
   name: string;
   description?: string;
   /** Initial enabled state when the job is first registered. */

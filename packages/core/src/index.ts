@@ -11,6 +11,8 @@ export {
   resolveAgentAuth,
   resolveJobParameters,
   resolveJobEnv,
+  resolveSkillFilter,
+  applySkillFilter,
   resolveProjectByCwd,
   listEnabledProjects,
   COFFEECODE_DIR,
@@ -24,6 +26,9 @@ export type {
   AuthSettings,
   ToolsSettings,
   JobConfig,
+  ProjectSkillsConfig,
+  SkillFilter,
+  SkillFilterTarget,
 } from './config.js';
 export type {
   DbOptions,
@@ -52,8 +57,8 @@ export {
   builtinTypesDir,
 } from './builtin.js';
 export type { YamlTypeSpec, YamlNamedTypeEntry, YamlTypeFile, YamlLoadResult, SyncResult, YamlDirFilter, SyncAllTypesOptions } from './builtin.js';
-export { loadSkillsFromDir, defaultUserSkillsDir } from './skills.js';
-export type { Skill, SkillTrigger, SkillLoadTarget, SkillJobSpec } from './skills.js';
+export { loadSkillsFromDir, loadAllSkills, defaultUserSkillsDir, defaultUserJobsDir, parseTriggers } from './skills.js';
+export type { Skill, SkillTrigger, SkillJobSpec, SkillCategory, LoadAllSkillsOptions } from './skills.js';
 export { SCHEMA_DDL, VEC_TABLE_DDL, makeVecTableDDL } from './schema.js';
 export { formatDeepNode } from './deepFormat.js';
 export { parseQuery, executeQuery } from './query.js';

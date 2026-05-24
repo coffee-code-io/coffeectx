@@ -23,7 +23,8 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import type { Db, CoffeectxConfig, AuthSettings, Skill, SkillTrigger } from '@coffeectx/core';
-import { loadSkillsFromDir, defaultUserSkillsDir } from '@coffeectx/core';
+import { loadAllSkills, parseTriggers } from '@coffeectx/core';
+import { runUserJob } from '../agentRun/runUserJob.js';
 import type { Job, JobTrigger } from './types.js';
 import { indexWithLsp } from '../lsp/indexSymbols.js';
 import { indexAgentSessions } from '../agentLog/indexLogs.js';
@@ -366,29 +367,62 @@ function skillTriggersToJobTriggers(triggers: SkillTrigger[]): JobTrigger[] {
 }
 
 /**
- * Build a job from a user-installed SKILL.md whose front-matter declares a
- * `coffeecode.job` block. Generic shape: the agent gets the SKILL.md body
- * as its instructions, has full graph-tool access, and runs once per
- * trigger fire. (Unlike the hardcoded built-ins above, we don't feed event
- * batches — the skill body itself decides what to query.)
+ * Build a job from a user-installed SKILL.md (anything under
+ * `~/.coffeecode/jobs/<name>/`). Triggers come from (priority order):
+ *   1. `projects.<p>.jobs[<name>].triggers` in config.yaml (full override)
+ *   2. `coffeecode.job.triggers` in the SKILL.md front-matter
+ *
+ * If neither produces any triggers, the job is registered as manual-only —
+ * it appears in `job list` / the Jobs UI and only fires on explicit
+ * Trigger clicks.
+ *
+ * The agent itself is run fresh by `runUserJob`: a new pi session per
+ * trigger fire, SKILL.md body delivered as a single prompt, graph + file
+ * tools available, agent loops autonomously until `agent_end`. No event
+ * batching, no `processedEventIds` state — the skill decides what to
+ * query.
  *
  * Env vars declared on `skill.requiredEnv` are sourced from
- * `projects.<p>.jobs[<skillName>].env` and exported around `job.run` by
- * the scheduler's `withScopedEnv` wrapper, so we don't need to thread
- * them through here.
+ * `projects.<p>.jobs[<name>].env` and exported around `job.run` by the
+ * scheduler's `withScopedEnv` wrapper, so the agent (and any child
+ * processes it spawns) sees them via `process.env`.
  */
-function buildUserSkillJob(skill: Skill): Job | null {
-  if (!skill.job) return null;
-  const triggers = skillTriggersToJobTriggers(skill.job.triggers);
-  if (triggers.length === 0) return null;
-
-  return buildAgentLogJob({
+function buildUserSkillJob(skill: Skill, config: CoffeectxConfig, projectName: string): Job | null {
+  if (skill.category !== 'job') return null;
+  const triggers = resolveJobTriggers(skill, config, projectName);
+  return {
     name: skill.name,
     description: skill.description ?? `User skill: ${skill.name}`,
-    prompt: skill.body,
-    defaultEnabled: skill.job.defaultEnabled ?? false,
+    defaultEnabled: skill.job?.defaultEnabled ?? false,
     triggers,
-  });
+    async run(ctx) {
+      const auth = (ctx.parameters['auth'] as AuthSettings | undefined) ?? {};
+      const r = await runUserJob({
+        db: ctx.db,
+        jobName: skill.name,
+        projectName: ctx.project.name,
+        prompt: skill.body,
+        auth,
+        requiredEnv: skill.requiredEnv,
+        signal: ctx.signal,
+      });
+      return {
+        message: r.sessionFile ? `session ${r.sessionFile}` : 'done',
+      };
+    },
+  };
+}
+
+/**
+ * Pick the effective trigger list for a user job — config override wins,
+ * SKILL.md is the fallback, empty array means "manual only".
+ */
+function resolveJobTriggers(skill: Skill, config: CoffeectxConfig, projectName: string): JobTrigger[] {
+  const override = config.projects[projectName]?.jobs?.[skill.name]?.triggers;
+  if (Array.isArray(override) && override.length > 0) {
+    return skillTriggersToJobTriggers(parseTriggers(override));
+  }
+  return skill.job ? skillTriggersToJobTriggers(skill.job.triggers) : [];
 }
 
 /**
@@ -429,30 +463,18 @@ export function buildJobs(_db: Db, config: CoffeectxConfig, projectName: string)
   jobs.push(buildLocalDecisionsJob(config, projectName));
   jobs.push(buildLspEnrichmentJob(config, projectName));
 
-  // User skills. Each skill becomes (at most) one job — those without a
-  // `coffeecode.job` block are loaded-only and surface via list_skills.
-  const registry = loadSkillsFromDir(defaultUserSkillsDir());
+  // User skills + jobs. Skills from `~/.coffeecode/skills/` are
+  // agent-loadable only (no job registration here — pi's ResourceLoader
+  // surfaces them inside each agent run). Items under
+  // `~/.coffeecode/jobs/` are tagged `category: 'job'` and become
+  // scheduler jobs.
+  const registry = loadAllSkills();
   for (const skill of registry) {
+    if (skill.category !== 'job') continue;
     warnAboutMissingEnv(skill, config, projectName);
-    const job = buildUserSkillJob(skill);
+    const job = buildUserSkillJob(skill, config, projectName);
     if (job) jobs.push(job);
   }
 
-  // Deprecation nudge for old config keys.
-  warnAboutLegacySkillConfigKeys(config, projectName);
-
   return jobs;
-}
-
-function warnAboutLegacySkillConfigKeys(config: CoffeectxConfig, projectName: string): void {
-  const jobs = config.projects[projectName]?.jobs ?? {};
-  for (const key of Object.keys(jobs)) {
-    if (key.startsWith('skill:')) {
-      const newKey = key.slice('skill:'.length);
-      console.warn(
-        `[jobs] config key projects.${projectName}.jobs."${key}" is deprecated; ` +
-        `rename to "${newKey}" (the \`skill:\` prefix was dropped when skills moved to ~/.coffeecode/skills/).`,
-      );
-    }
-  }
 }
