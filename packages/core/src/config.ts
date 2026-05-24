@@ -81,6 +81,15 @@ export interface JobConfig {
   enabled?: boolean;
   /** Free-form parameters. Conventions: `auth` for jobs needing LLM auth, `intervalMs` for timer override. */
   parameters?: Record<string, unknown>;
+  /**
+   * Env vars exported into `process.env` for the duration of this job's
+   * run. Useful for credentials a skill's scripts read (e.g. Jira tokens,
+   * API keys). The scheduler enforces single-job-at-a-time, so scoping via
+   * `process.env` snapshot+restore is safe. Skills declare which vars they
+   * need via `coffeecode.requiredEnv` in their SKILL.md front-matter — the
+   * scheduler warns at startup if a required var isn't set here.
+   */
+  env?: Record<string, string>;
 }
 
 export interface ProjectEntry {
@@ -222,6 +231,11 @@ export function resolveAgentAuth(cfg: CoffeectxConfig, projectName: string): Aut
 /** Per-job parameters (whole bag) with empty fallback. */
 export function resolveJobParameters(cfg: CoffeectxConfig, projectName: string, jobName: string): Record<string, unknown> {
   return cfg.projects[projectName]?.jobs?.[jobName]?.parameters ?? {};
+}
+
+/** Per-job env-var map (whole bag) with empty fallback. */
+export function resolveJobEnv(cfg: CoffeectxConfig, projectName: string, jobName: string): Record<string, string> {
+  return cfg.projects[projectName]?.jobs?.[jobName]?.env ?? {};
 }
 
 /** Names of projects with enabled !== false. */

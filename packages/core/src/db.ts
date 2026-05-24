@@ -45,7 +45,7 @@ export type InsertListener = NodeEventListener;
 
 export type JobStatus = 'idle' | 'running' | 'disabled';
 export type JobResult = 'ok' | 'error' | 'cancelled';
-export type JobTriggerKind = 'timer' | 'onTypeInsert' | 'onNodeState' | 'manual' | 'startup';
+export type JobTriggerKind = 'timer' | 'onTypeInsert' | 'onNodeState' | 'cron' | 'manual' | 'startup';
 
 export interface JobRow {
   name: string;
@@ -102,6 +102,15 @@ export class Db implements QueryDb {
 
   /** Non-destructive migrations for columns added after initial release. */
   private migrate(): void {
+    // Drop the old DB-resident skills tables. Skills are now filesystem-only
+    // (loaded from `~/.coffeecode/skills/` at startup by `loadSkillsFromDir`),
+    // so these rows are dead weight. INDEX drops first, then child table,
+    // then parent — even though FK ON DELETE CASCADE handles row cleanup,
+    // DROP TABLE order still matters when FKs are enforced.
+    try { this.raw.exec(`DROP INDEX IF EXISTS idx_skill_types_skill`); } catch { /* ok */ }
+    try { this.raw.exec(`DROP TABLE IF EXISTS skill_types`); } catch { /* ok */ }
+    try { this.raw.exec(`DROP TABLE IF EXISTS skills`); } catch { /* ok */ }
+
     // named_types.description (pre-skills schema)
     try { this.raw.exec(`ALTER TABLE named_types ADD COLUMN description TEXT`); } catch { /* ok */ }
 
@@ -1804,67 +1813,10 @@ export class Db implements QueryDb {
     ).map(r => ({ name: r.name, typeId: r.type_id, description: r.description, source: r.source }));
   }
 
-  // ── Skills ─────────────────────────────────────────────────────────────────
-
-  upsertSkill(
-    name: string,
-    prompt: string,
-    source: 'builtin' | 'user' = 'user',
-    description?: string,
-    typeNames: string[] = [],
-  ): void {
-    const txn = this.raw.transaction(() => {
-      this.raw
-        .prepare(
-          `INSERT INTO skills(name, description, prompt, source, updated_at)
-           VALUES(?, ?, ?, ?, datetime('now'))
-           ON CONFLICT(name) DO UPDATE
-             SET description=excluded.description,
-                 prompt=excluded.prompt,
-                 source=excluded.source,
-                 updated_at=excluded.updated_at`,
-        )
-        .run(name, description ?? null, prompt, source);
-
-      this.raw.prepare(`DELETE FROM skill_types WHERE skill_name=?`).run(name);
-      for (let i = 0; i < typeNames.length; i++) {
-        this.raw
-          .prepare(`INSERT INTO skill_types(skill_name, type_name, position) VALUES(?,?,?)`)
-          .run(name, typeNames[i], i);
-      }
-    });
-    txn();
-  }
-
-  getSkill(name: string): { name: string; description: string | null; prompt: string; source: string; types: string[] } | null {
-    const row = this.raw
-      .prepare(`SELECT name, description, prompt, source FROM skills WHERE name=?`)
-      .get(name) as { name: string; description: string | null; prompt: string; source: string } | undefined;
-    if (!row) return null;
-
-    const types = (
-      this.raw
-        .prepare(`SELECT type_name FROM skill_types WHERE skill_name=? ORDER BY position`)
-        .all(name) as { type_name: string }[]
-    ).map(r => r.type_name);
-
-    return { ...row, types };
-  }
-
-  listSkills(): { name: string; description: string | null; source: string; types: string[] }[] {
-    const rows = this.raw
-      .prepare(`SELECT name, description, source FROM skills ORDER BY source, name`)
-      .all() as { name: string; description: string | null; source: string }[];
-
-    return rows.map(r => {
-      const types = (
-        this.raw
-          .prepare(`SELECT type_name FROM skill_types WHERE skill_name=? ORDER BY position`)
-          .all(r.name) as { type_name: string }[]
-      ).map(t => t.type_name);
-      return { ...r, types };
-    });
-  }
+  // Skills are no longer DB-resident — see `loadSkillsFromDir` in
+  // packages/core/src/skills.ts. The old `upsertSkill` / `getSkill` /
+  // `listSkills` methods have been removed; callers should use the
+  // filesystem registry directly.
 
   // ── Node-event bus ─────────────────────────────────────────────────────────
 

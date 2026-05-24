@@ -1,5 +1,5 @@
 /**
- * Built-in type + skill system: YAML → SQLite sync.
+ * Built-in type system: YAML → SQLite sync.
  *
  * YAML file format:
  *
@@ -16,17 +16,14 @@
  *           kind: Or
  *           types: [Symbol, Meaning]
  *
- *   skills:
- *     SkillName:
- *       description: "One-line summary"
- *       prompt: |
- *         Multi-line prompt explaining how to extract these types ...
- *       types: [TypeA, TypeB, ...]   # references to named types
- *
  * Leaf shorthands:
  *   "Symbol"    → SymbolType
  *   "Meaning"   → MeaningType
  *   "OtherName" → reference to another named type
+ *
+ * Skills used to live alongside types in a `skills:` block. They've moved
+ * to `~/.coffeecode/skills/<name>/SKILL.md` (front-matter format); the
+ * legacy block is parsed but ignored with a one-line warning here.
  */
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -59,16 +56,10 @@ export interface YamlNamedTypeEntry {
   spec: YamlTypeSpec;
 }
 
-/** A skill entry in YAML. */
-export interface YamlSkillEntry {
-  description?: string;
-  prompt: string;
-  types: string[]; // references to named types
-}
-
 export interface YamlTypeFile {
   types?: Record<string, unknown>; // raw — parsed via extractTypeEntry
-  skills?: Record<string, YamlSkillEntry>;
+  /** @deprecated Pre-skills-refactor; ignored at load time. */
+  skills?: unknown;
 }
 
 // ── Parsing helpers ───────────────────────────────────────────────────────────
@@ -100,7 +91,6 @@ function extractTypeEntry(raw: unknown): YamlNamedTypeEntry {
 
 export interface YamlLoadResult {
   types: Map<string, YamlNamedTypeEntry>;
-  skills: Map<string, YamlSkillEntry>;
 }
 
 export interface YamlDirFilter {
@@ -113,8 +103,7 @@ export interface YamlDirFilter {
 /** Load all *.yaml files from a directory, optionally filtered by filename stem. */
 export function loadYamlFromDir(dir: string, filter?: YamlDirFilter): YamlLoadResult {
   const types = new Map<string, YamlNamedTypeEntry>();
-  const skills = new Map<string, YamlSkillEntry>();
-  if (!existsSync(dir)) return { types, skills };
+  if (!existsSync(dir)) return { types };
 
   const include = filter?.include && filter.include.length > 0 ? new Set(filter.include) : null;
   const exclude = filter?.exclude && filter.exclude.length > 0 ? new Set(filter.exclude) : null;
@@ -135,11 +124,13 @@ export function loadYamlFromDir(dir: string, filter?: YamlDirFilter): YamlLoadRe
     for (const [name, raw] of Object.entries(parsed.types ?? {})) {
       types.set(name, extractTypeEntry(raw));
     }
-    for (const [name, raw] of Object.entries(parsed.skills ?? {})) {
-      skills.set(name, raw as YamlSkillEntry);
+    if (parsed.skills && typeof parsed.skills === 'object') {
+      console.warn(
+        `[builtin] ${file}: legacy "skills:" block ignored — skills now live under ~/.coffeecode/skills/<name>/SKILL.md`,
+      );
     }
   }
-  return { types, skills };
+  return { types };
 }
 
 /** @deprecated Use loadYamlFromDir; kept for callers that only need the spec map. */
@@ -246,11 +237,10 @@ function assertNotOrOrOptional(t: Type, context: string): void {
 
 export interface SyncResult {
   types: { synced: string[]; errors: Array<{ name: string; error: string }> };
-  skills: { synced: string[]; errors: Array<{ name: string; error: string }> };
 }
 
 /**
- * Load all YAML definitions from `dir` and upsert types + skills into the DB.
+ * Load all YAML definitions from `dir` and upsert types into the DB.
  */
 export function syncFromDir(
   db: Db,
@@ -258,7 +248,7 @@ export function syncFromDir(
   source: 'builtin' | 'user' = 'user',
   filter?: YamlDirFilter,
 ): SyncResult {
-  const { types: typeRegistry, skills: skillRegistry } = loadYamlFromDir(dir, filter);
+  const { types: typeRegistry } = loadYamlFromDir(dir, filter);
 
   // Build a flat spec map for the resolver
   const specRegistry = new Map<string, YamlTypeSpec>();
@@ -272,8 +262,6 @@ export function syncFromDir(
     try {
       // Named Or / Optional types are sugar — they get inlined at every use
       // site by `resolveYamlType`, so there's no `named_types` row to create.
-      // Other consumers (skill `types: [Name]` lists, raw_query `IsType`) refer
-      // to concrete named types only.
       if (isInlineableNamedSpec(entry.spec)) {
         typesSynced.push(name);
         continue;
@@ -291,25 +279,12 @@ export function syncFromDir(
     }
   }
 
-  const skillsSynced: string[] = [];
-  const skillsErrors: Array<{ name: string; error: string }> = [];
-
-  for (const [name, skill] of skillRegistry) {
-    try {
-      db.upsertSkill(name, skill.prompt, source, skill.description, skill.types);
-      skillsSynced.push(name);
-    } catch (err) {
-      skillsErrors.push({ name, error: (err as Error).message });
-    }
-  }
-
   // Remove type rows that are no longer reachable from any named type.
   // This cleans up orphaned rows from previous sync runs.
   db.gcOrphanedTypes();
 
   return {
     types: { synced: typesSynced, errors: typesErrors },
-    skills: { synced: skillsSynced, errors: skillsErrors },
   };
 }
 
@@ -318,29 +293,81 @@ export interface SyncAllTypesOptions {
   builtinFilter?: YamlDirFilter;
   /** Directory of user-defined YAML type files. */
   userDir?: string;
+  /**
+   * Additional YAML files contributed by user skills (via
+   * `coffeecode.types: ./types.yaml` in their SKILL.md front-matter).
+   * Loaded with `source: 'user'` AFTER the user-dir pass.
+   */
+  skillTypeFiles?: string[];
 }
 
-/** Sync built-in types + skills, then optionally user-defined ones. */
+/** Sync built-in types, then user-dir types, then any skill-contributed type files. */
 export function syncAllTypes(db: Db, userDirOrOptions?: string | SyncAllTypesOptions): SyncResult {
   const opts: SyncAllTypesOptions =
     typeof userDirOrOptions === 'string'
       ? { userDir: userDirOrOptions }
       : (userDirOrOptions ?? {});
 
-  const builtin = syncFromDir(db, builtinTypesDir(), 'builtin', opts.builtinFilter);
-  if (!opts.userDir) return builtin;
-
-  const user = syncFromDir(db, opts.userDir, 'user');
-  return {
-    types: {
-      synced: [...builtin.types.synced, ...user.types.synced],
-      errors: [...builtin.types.errors, ...user.types.errors],
-    },
-    skills: {
-      synced: [...builtin.skills.synced, ...user.skills.synced],
-      errors: [...builtin.skills.errors, ...user.skills.errors],
-    },
+  const merged: SyncResult = {
+    types: { synced: [], errors: [] },
   };
+  const append = (r: SyncResult) => {
+    merged.types.synced.push(...r.types.synced);
+    merged.types.errors.push(...r.types.errors);
+  };
+
+  append(syncFromDir(db, builtinTypesDir(), 'builtin', opts.builtinFilter));
+  if (opts.userDir) append(syncFromDir(db, opts.userDir, 'user'));
+  for (const file of opts.skillTypeFiles ?? []) {
+    append(syncFromFile(db, file, 'user'));
+  }
+  return merged;
+}
+
+/**
+ * Load a single YAML file's `types:` block and upsert into the DB. Used for
+ * per-skill type contributions (where the YAML lives next to the skill, not
+ * inside the user types dir).
+ */
+export function syncFromFile(db: Db, filePath: string, source: 'builtin' | 'user' = 'user'): SyncResult {
+  if (!existsSync(filePath)) {
+    return { types: { synced: [], errors: [{ name: filePath, error: 'file not found' }] } };
+  }
+  const content = readFileSync(filePath, 'utf-8');
+  const parsed = (parseYaml(content) as YamlTypeFile | null) ?? {};
+
+  const typeRegistry = new Map<string, YamlNamedTypeEntry>();
+  for (const [name, raw] of Object.entries(parsed.types ?? {})) {
+    typeRegistry.set(name, extractTypeEntry(raw));
+  }
+  if (parsed.skills && typeof parsed.skills === 'object') {
+    console.warn(
+      `[builtin] ${filePath}: legacy "skills:" block ignored — declare \`coffeecode.job\` in SKILL.md instead`,
+    );
+  }
+
+  const specRegistry = new Map<string, YamlTypeSpec>();
+  for (const [name, entry] of typeRegistry) specRegistry.set(name, entry.spec);
+
+  const typeIdCache = new Map<Type, string>();
+  const typesSynced: string[] = [];
+  const typesErrors: Array<{ name: string; error: string }> = [];
+
+  for (const [name, entry] of typeRegistry) {
+    try {
+      if (isInlineableNamedSpec(entry.spec)) { typesSynced.push(name); continue; }
+      const type = resolveYamlType(entry.spec, specRegistry);
+      const typeId = db.upsertType(type, typeIdCache, name);
+      db.upsertNamedType(name, typeId, source, entry.description, entry.hidden);
+      db.setStatesForType(name, entry.states ?? []);
+      typesSynced.push(name);
+    } catch (err) {
+      typesErrors.push({ name, error: (err as Error).message });
+    }
+  }
+
+  db.gcOrphanedTypes();
+  return { types: { synced: typesSynced, errors: typesErrors } };
 }
 
 /** @deprecated Alias for syncFromDir — kept for backwards compat. */

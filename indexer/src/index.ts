@@ -120,11 +120,11 @@ if (command === 'init') {
   console.log(`  DB:    ${result.dbPath}`);
   if (result.repoPath) console.log(`  Repo:  ${result.repoPath}`);
   if (result.logsPath) console.log(`  Logs:  ${result.logsPath}`);
-  console.log(`  Types: synced ${result.sync.types.synced.length} types, ${result.sync.skills.synced.length} skills`);
+  console.log(`  Types: synced ${result.sync.types.synced.length} types`);
 
-  if (result.sync.types.errors.length > 0 || result.sync.skills.errors.length > 0) {
+  if (result.sync.types.errors.length > 0) {
     console.error('  Sync errors:');
-    for (const { name: n, error } of [...result.sync.types.errors, ...result.sync.skills.errors]) {
+    for (const { name: n, error } of result.sync.types.errors) {
       console.error(`    ${n}: ${error}`);
     }
   }
@@ -207,10 +207,9 @@ switch (command) {
       builtinFilter: { include: globalCfg.types.include, exclude: globalCfg.types.exclude },
       userDir,
     });
-    console.log(`  Synced ${result.types.synced.length} types, ${result.skills.synced.length} skills`);
-    const allErrors = [...result.types.errors, ...result.skills.errors];
-    if (allErrors.length > 0) {
-      for (const { name, error } of allErrors) console.error(`  ${name}: ${error}`);
+    console.log(`  Synced ${result.types.synced.length} types`);
+    if (result.types.errors.length > 0) {
+      for (const { name, error } of result.types.errors) console.error(`  ${name}: ${error}`);
       db.close();
       process.exit(1);
     }
@@ -225,9 +224,8 @@ switch (command) {
       process.exit(1);
     }
     const result = syncFromDir(db, dir, 'user');
-    console.log(`Synced ${result.types.synced.length} types, ${result.skills.synced.length} skills from ${dir}`);
-    const allErrors = [...result.types.errors, ...result.skills.errors];
-    for (const { name, error } of allErrors) console.error(`  ${name}: ${error}`);
+    console.log(`Synced ${result.types.synced.length} types from ${dir}`);
+    for (const { name, error } of result.types.errors) console.error(`  ${name}: ${error}`);
     break;
   }
 

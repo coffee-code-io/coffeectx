@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { Db, createEmbedFn, log } from '@coffeectx/core';
+import { Db, createEmbedFn, log, loadSkillsFromDir, defaultUserSkillsDir } from '@coffeectx/core';
 import { loadConfig } from './config.js';
 import { registerSearchTool } from './tools/search.js';
 import { registerExactTool } from './tools/exact.js';
@@ -28,7 +28,11 @@ if (resolved.tools.search) reg('search', () => registerSearchTool(server, db));
 if (resolved.tools.exact) reg('exact', () => registerExactTool(server, db));
 if (resolved.tools.regex) reg('regex', () => registerRegexTool(server, db));
 if (resolved.tools.raw_query) reg('raw_query', () => registerRawQueryTool(server, db));
-if (resolved.tools.skills) reg('skills', () => registerSkillsTools(server, db));
+// Skills registry — loaded once at startup from `~/.coffeecode/skills/`.
+// MCP callers see every skill regardless of `loadInto`; gating is for
+// in-process agents only.
+const skillRegistry = loadSkillsFromDir(defaultUserSkillsDir());
+if (resolved.tools.skills) reg('skills', () => registerSkillsTools(server, skillRegistry));
 if (resolved.tools.load_node) reg('load_node', () => registerLoadNodeTool(server, db));
 if (resolved.tools.exact) reg('resolve_symbols', () => registerResolveSymbolsTool(server, db));
 if (resolved.tools.insert) reg('insert', () => registerUpsertEntriesTool(server, db));

@@ -90,25 +90,6 @@ CREATE TABLE IF NOT EXISTS named_types (
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Skills: prompt-based indexing recipes that reference a set of named types.
-CREATE TABLE IF NOT EXISTS skills (
-  name        TEXT PRIMARY KEY,
-  description TEXT,
-  prompt      TEXT NOT NULL,
-  source      TEXT NOT NULL DEFAULT 'user',
-  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Ordered list of type references per skill.
-CREATE TABLE IF NOT EXISTS skill_types (
-  skill_name TEXT    NOT NULL REFERENCES skills(name) ON DELETE CASCADE,
-  type_name  TEXT    NOT NULL REFERENCES named_types(name),
-  position   INTEGER NOT NULL,
-  PRIMARY KEY (skill_name, position)
-);
-
-CREATE INDEX IF NOT EXISTS idx_skill_types_skill ON skill_types(skill_name);
-
 -- Jobs registry: one row per scheduler-managed job.
 -- enabled mirrors the config setting on boot (config wins on reconcile).
 -- current_run_id is non-null while the job is executing.

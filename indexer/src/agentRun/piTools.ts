@@ -8,7 +8,7 @@
 
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type, type Static } from 'typebox';
-import type { Db } from '@coffeectx/core';
+import type { Db, Skill } from '@coffeectx/core';
 import {
   search,
   exact,
@@ -19,6 +19,9 @@ import {
   upsertEntries,
   resolveSymbols,
 } from '@coffeectx/tools';
+
+/** Caller identity for `list_skills`/`get_skill` visibility filtering. */
+export type GraphToolsCaller = 'indexerAgent' | 'uiAgent';
 
 /** Tool name → wraps a JSON-serialised body inside the pi content payload. */
 function textResult(value: unknown) {
@@ -127,7 +130,23 @@ export function buildNavigateTool(onNavigate: (nodeId: string, reason?: string) 
 
 // ── Build the tool list (closing db over each tool's execute()) ─────────────
 
-export function buildGraphTools(db: Db, allowInsert: boolean) {
+/**
+ * Build the agent's tool list.
+ *
+ *  - `db` is the SQLite connection every tool closes over.
+ *  - `allowInsert` gates `upsert_entries`.
+ *  - `skillRegistry` + `caller` drive `list_skills` / `get_skill`: each
+ *    skill's `coffeecode.loadInto` declares which agents see it, so the
+ *    indexer agent and the UI agent can be opted into different skill sets.
+ *    When omitted the skill tools simply return an empty list (matches the
+ *    behaviour for agents with no skills installed).
+ */
+export function buildGraphTools(
+  db: Db,
+  allowInsert: boolean,
+  skillRegistry: ReadonlyArray<Skill> = [],
+  caller: GraphToolsCaller = 'indexerAgent',
+) {
   const tools = [
     defineTool({
       name: 'search',
@@ -235,7 +254,7 @@ export function buildGraphTools(db: Db, allowInsert: boolean) {
       label: 'List skills',
       description: skills.listDescription,
       parameters: ListSkillsParams,
-      execute: async () => textResult(skills.runList(db)),
+      execute: async () => textResult(skills.runList(skillRegistry, caller)),
     }),
 
     defineTool({
@@ -244,7 +263,7 @@ export function buildGraphTools(db: Db, allowInsert: boolean) {
       description: skills.getDescription,
       parameters: GetSkillParams,
       execute: async (_id, raw: Static<typeof GetSkillParams>) => {
-        const result = skills.runGet(db, { name: raw.name });
+        const result = skills.runGet(skillRegistry, caller, { name: raw.name });
         if (!result) {
           return errorResult(`Skill "${raw.name}" not found. Use list_skills to see available skills.`);
         }

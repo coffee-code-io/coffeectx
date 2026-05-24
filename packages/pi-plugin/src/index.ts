@@ -29,6 +29,8 @@ import {
   resolveProjectByCwd,
   resolveProjectEmbed,
   resolveProjectTools,
+  loadSkillsFromDir,
+  defaultUserSkillsDir,
 } from '@coffeectx/core';
 import {
   search,
@@ -171,6 +173,12 @@ const factory = (pi: MinimalExtensionAPI): void => {
 
   const allowInsert = toolsCfg.insert === true;
 
+  // Skills are loaded from `~/.coffeecode/skills/` at registration time.
+  // pi-plugin runs as part of an external pi session (e.g. user's local
+  // pi CLI), so it has no agent-identity equivalent of indexerAgent /
+  // uiAgent — we expose every loaded skill, same policy as MCP.
+  const skillRegistry = loadSkillsFromDir(defaultUserSkillsDir());
+
   // ── Registrations ────────────────────────────────────────────────────────
 
   pi.registerTool({
@@ -274,7 +282,7 @@ const factory = (pi: MinimalExtensionAPI): void => {
     label: 'List skills',
     description: skills.listDescription,
     parameters: ListSkillsParams,
-    execute: async () => textResult(skills.runList(db)),
+    execute: async () => textResult(skills.runList(skillRegistry, 'mcp')),
   });
 
   pi.registerTool({
@@ -284,7 +292,7 @@ const factory = (pi: MinimalExtensionAPI): void => {
     parameters: GetSkillParams,
     execute: async (_id, raw) => {
       const p = raw as Static<typeof GetSkillParams>;
-      const result = skills.runGet(db, { name: p.name });
+      const result = skills.runGet(skillRegistry, 'mcp', { name: p.name });
       if (!result) return errorResult(`Skill "${p.name}" not found.`);
       return textResult(result);
     },

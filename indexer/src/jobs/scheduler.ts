@@ -11,9 +11,14 @@
  *   - a single global mutex: at most one job runs at a time
  */
 
-import { loadConfig, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry, type NodeEvent } from '@coffeectx/core';
+import { loadConfig, resolveJobEnv, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry, type NodeEvent } from '@coffeectx/core';
+import { CronExpressionParser } from 'cron-parser';
 import type { Job, JobContext, JobTrigger } from './types.js';
 import { withRunLog } from './runLog.js';
+
+// Wrapper to keep the call-site name short. Returning the parsed iterator
+// (which has `.next()`) is all the scheduler needs.
+const cronParseExpression = (e: string) => CronExpressionParser.parse(e);
 
 const DEBOUNCE_MS = 1_500;
 const TRIGGER_POLL_MS = 2_000;
@@ -26,13 +31,15 @@ interface ProjectInfo extends ProjectEntry {
 }
 
 interface PendingTrigger {
-  kind: 'timer' | 'onTypeInsert' | 'onNodeState' | 'manual' | 'startup';
+  kind: 'timer' | 'onTypeInsert' | 'onNodeState' | 'cron' | 'manual' | 'startup';
 }
 
 interface JobState {
   pending: PendingTrigger | null;
   debounceTimer: NodeJS.Timeout | null;
   timerHandle: NodeJS.Timeout | null;
+  /** One handle per cron trigger on the job; cleared + rescheduled per fire. */
+  cronHandles: NodeJS.Timeout[];
   cursorTypes: string[] | null; // set for jobs that have an onTypeInsert trigger
 }
 
@@ -72,6 +79,7 @@ export class Scheduler {
         pending: null,
         debounceTimer: null,
         timerHandle: null,
+        cronHandles: [],
         cursorTypes: collectInsertTypes(job.triggers),
       });
     }
@@ -159,6 +167,8 @@ export class Scheduler {
     for (const st of this.state.values()) {
       if (st.timerHandle) clearInterval(st.timerHandle);
       if (st.debounceTimer) clearTimeout(st.debounceTimer);
+      for (const h of st.cronHandles) clearTimeout(h);
+      st.cronHandles = [];
     }
 
     // Signal in-flight jobs to stop, then wait for them to honour it.
@@ -184,13 +194,46 @@ export class Scheduler {
   private installTimers(job: Job): void {
     const st = this.state.get(job.name)!;
     if (st.timerHandle) { clearInterval(st.timerHandle); st.timerHandle = null; }
+    for (const h of st.cronHandles) clearTimeout(h);
+    st.cronHandles = [];
+
     const row = this.db.getJob(job.name);
     if (!row?.enabled) return;
     for (const trig of job.triggers) {
-      if (trig.kind !== 'timer') continue;
-      // First fire after the interval, not immediately — keeps boot quiet.
-      st.timerHandle = setInterval(() => this.enqueue(job.name, { kind: 'timer' }), trig.intervalMs);
+      if (trig.kind === 'timer') {
+        // First fire after the interval, not immediately — keeps boot quiet.
+        st.timerHandle = setInterval(() => this.enqueue(job.name, { kind: 'timer' }), trig.intervalMs);
+      } else if (trig.kind === 'cron') {
+        this.armCron(job.name, trig.expression);
+      }
     }
+  }
+
+  /**
+   * Arm a one-shot `setTimeout` for the next cron fire-time, then re-arm
+   * after each fire. Using setTimeout rather than a `setInterval(60s)`
+   * polling loop keeps the firing precise (sub-second) and avoids drift
+   * across long-running processes.
+   */
+  private armCron(jobName: string, expression: string): void {
+    const st = this.state.get(jobName);
+    if (!st) return;
+    let nextMs: number;
+    try {
+      const parsed = cronParseExpression(expression);
+      nextMs = Math.max(0, parsed.next().getTime() - Date.now());
+    } catch (err) {
+      this.log(`[${jobName}] invalid cron "${expression}": ${(err as Error).message}`);
+      return;
+    }
+    const h = setTimeout(() => {
+      // Drop self from the handle list before enqueueing — we'll re-arm
+      // below regardless of whether the job actually runs.
+      st.cronHandles = st.cronHandles.filter(x => x !== h);
+      this.enqueue(jobName, { kind: 'cron' });
+      this.armCron(jobName, expression);
+    }, nextMs);
+    st.cronHandles.push(h);
   }
 
   private onNodeEvent(event: NodeEvent): void {
@@ -332,8 +375,11 @@ export class Scheduler {
     // nodes that arrive mid-run are caught on the next pass.
     const cursorBefore = this.state.get(job.name)!.cursorTypes ? this.db.maxNodeRowid() : null;
 
+    const envOverride = resolveJobEnv(this.config, this.project.name, job.name);
+
     try {
-      const result = await withRunLog(this.project.name, runId, () => job.run(ctx));
+      const result = await withScopedEnv(envOverride, () =>
+        withRunLog(this.project.name, runId, () => job.run(ctx)));
       this.db.endJobRun(runId, 'ok', { message: result.message, metrics: result.metrics });
       this.log(`[${job.name}] ok${result.message ? ` — ${result.message}` : ''}`);
       if (cursorBefore !== null) writeCatchupCursor(this.db, job.name, cursorBefore);
@@ -395,4 +441,29 @@ function writeCatchupCursor(db: Db, jobName: string, cursor: number): void {
   const state = (db.getJobState<CatchupState>(jobName)) ?? {};
   state.cursor = cursor;
   db.setJobState(jobName, state);
+}
+
+/**
+ * Run `fn` with `env` entries spliced into `process.env`, restoring the
+ * prior values (or unsetting freshly-added keys) afterwards. Used to inject
+ * per-job credentials (`projects.<p>.jobs[<job>].env`) for the duration of
+ * a single run. Safe because the scheduler holds a single-job-at-a-time
+ * mutex — concurrent jobs would race on `process.env`.
+ */
+async function withScopedEnv<T>(env: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const keys = Object.keys(env);
+  if (keys.length === 0) return fn();
+  const prior: Record<string, string | undefined> = {};
+  for (const k of keys) {
+    prior[k] = process.env[k];
+    process.env[k] = env[k];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const k of keys) {
+      if (prior[k] === undefined) delete process.env[k];
+      else process.env[k] = prior[k];
+    }
+  }
 }

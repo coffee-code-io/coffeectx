@@ -1,12 +1,6 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { parse as parseYaml } from 'yaml';
 import type { Db, DeepNode, AuthSettings } from '@coffeectx/core';
 import { formatDeepNode } from '@coffeectx/core';
 import { runSkillInteractive, type BatchPayload } from './runSkill.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Named types that represent indexable agent-log events. Each row is a
@@ -15,12 +9,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * session context.
  */
 const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentMessage', 'AgentSummary'];
-
-interface SkillDef {
-  name: string;
-  description: string;
-  prompt: string;
-}
 
 interface EventSnapshot {
   id: string;
@@ -35,30 +23,6 @@ function getSymbolValue(node: DeepNode | undefined): string | undefined {
   if (!node || node.kind !== 'atom') return undefined;
   if (node.atom.kind !== 'symbol') return undefined;
   return node.atom.value;
-}
-
-/** Resolve the absolute path of the bundled skills directory. */
-export function skillsDir(): string {
-  return join(__dirname, '../../skills');
-}
-
-/** Load a single skill definition by directory name; returns null if missing. */
-export function loadSkillDef(dirName: string): SkillDef | null {
-  const dir = join(skillsDir(), dirName);
-  try {
-    const meta = parseYaml(readFileSync(join(dir, 'skill.yaml'), 'utf-8')) as { name: string; description: string };
-    const prompt = readFileSync(join(dir, 'SKILL.md'), 'utf-8');
-    return { name: meta.name, description: meta.description, prompt };
-  } catch (err) {
-    console.warn(`[indexAgent] Failed to load skill from ${dir}:`, (err as Error).message);
-    return null;
-  }
-}
-
-/** Return the directory names of all available skills. */
-export function listAvailableSkills(): string[] {
-  try { return readdirSync(skillsDir()); }
-  catch { return []; }
 }
 
 /** Split a sorted event list into batches of `batchStep` events. */
@@ -85,8 +49,10 @@ export interface RunOneSkillOptions {
   db: Db;
   /** Active project name (used to namespace persisted pi sessions). */
   projectName: string;
-  /** Directory name of the skill under indexer/skills/. */
-  skillDirName: string;
+  /** Job-name slug. Used as the persisted session-id and progress key. */
+  skillName: string;
+  /** Pre-loaded prompt body — the agent's instructions for each batch. */
+  prompt: string;
   /** Event IDs already processed in prior runs of this skill. */
   processedEventIds: ReadonlySet<string>;
   /**
@@ -153,30 +119,25 @@ function loadNewEventsGroupedBySession(
  * Execute one skill across all sessions with unprocessed events.
  */
 export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkillResult> {
-  const { db, projectName, skillDirName, processedEventIds, onBatchProcessed, batchStep = 10, allowInsert, auth, signal } = opts;
+  const { db, projectName, skillName, prompt, processedEventIds, onBatchProcessed, batchStep = 10, allowInsert, auth, signal } = opts;
   const result: RunOneSkillResult = { batches: 0, sessions: 0, events: 0, errors: [] };
 
-  const skill = loadSkillDef(skillDirName);
-  if (!skill) {
-    result.errors.push({ error: `Skill "${skillDirName}" not found in indexer/skills/` });
-    return result;
-  }
   if (!auth) {
-    result.errors.push({ error: `Skill "${skillDirName}" requires parameters.auth (provider + model + apiKey)` });
+    result.errors.push({ error: `Skill "${skillName}" requires parameters.auth (provider + model + apiKey)` });
     return result;
   }
 
   const { sessions, total, skipped } = loadNewEventsGroupedBySession(db, processedEventIds);
   if (sessions.size === 0) {
-    console.log(`[indexAgent:${skillDirName}] ${total} events total, ${skipped} already processed — nothing to do`);
+    console.log(`[indexAgent:${skillName}] ${total} events total, ${skipped} already processed — nothing to do`);
     return result;
   }
 
-  console.log(`[indexAgent:${skillDirName}] ${sessions.size} sessions with new events (${total} total, ${skipped} processed)`);
+  console.log(`[indexAgent:${skillName}] ${sessions.size} sessions with new events (${total} total, ${skipped} processed)`);
 
   for (const [sessionId, sessionEvents] of sessions) {
     if (signal?.aborted) {
-      console.log(`[indexAgent:${skillDirName}] aborted before session ${sessionId}`);
+      console.log(`[indexAgent:${skillName}] aborted before session ${sessionId}`);
       break;
     }
     const batches = buildBatches(sessionEvents, batchStep);
@@ -185,8 +146,8 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
     try {
       await runSkillInteractive({
         db,
-        skillName: skill.name,
-        skillPrompt: skill.prompt,
+        skillName,
+        skillPrompt: prompt,
         eventBatches: batches.map(b => b.payload),
         sourceId: sessionId,
         projectName,
@@ -204,10 +165,10 @@ export async function runOneSkill(opts: RunOneSkillOptions): Promise<RunOneSkill
     } catch (err) {
       // Aborted runs aren't errors — the scheduler initiated the cancel.
       if (signal?.aborted) {
-        console.log(`[indexAgent:${skillDirName}] session ${sessionId} aborted: ${(err as Error).message}`);
+        console.log(`[indexAgent:${skillName}] session ${sessionId} aborted: ${(err as Error).message}`);
         break;
       }
-      result.errors.push({ error: `[${skillDirName}/${sessionId}] ${(err as Error).message}` });
+      result.errors.push({ error: `[${skillName}/${sessionId}] ${(err as Error).message}` });
     }
   }
 

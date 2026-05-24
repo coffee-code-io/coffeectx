@@ -10,6 +10,7 @@ export {
   resolveJobAuth,
   resolveAgentAuth,
   resolveJobParameters,
+  resolveJobEnv,
   resolveProjectByCwd,
   listEnabledProjects,
   COFFEECODE_DIR,
@@ -44,12 +45,15 @@ export {
   syncAllTypes,
   syncTypesFromDir,
   syncFromDir,
+  syncFromFile,
   loadYamlFromDir,
   loadYamlTypesFromDir,
   resolveYamlType,
   builtinTypesDir,
 } from './builtin.js';
-export type { YamlTypeSpec, YamlNamedTypeEntry, YamlSkillEntry, YamlTypeFile, YamlLoadResult, SyncResult, YamlDirFilter, SyncAllTypesOptions } from './builtin.js';
+export type { YamlTypeSpec, YamlNamedTypeEntry, YamlTypeFile, YamlLoadResult, SyncResult, YamlDirFilter, SyncAllTypesOptions } from './builtin.js';
+export { loadSkillsFromDir, defaultUserSkillsDir } from './skills.js';
+export type { Skill, SkillTrigger, SkillLoadTarget, SkillJobSpec } from './skills.js';
 export { SCHEMA_DDL, VEC_TABLE_DDL, makeVecTableDDL } from './schema.js';
 export { formatDeepNode } from './deepFormat.js';
 export { parseQuery, executeQuery } from './query.js';

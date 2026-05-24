@@ -16,7 +16,14 @@ export type JobTrigger =
    * Used to gate downstream jobs on upstream completion — e.g. skill jobs run
    * only after the LSP indexer bumps event nodes from `extracted` → `linked`.
    */
-  | { kind: 'onNodeState'; typeNames: string[]; state: string };
+  | { kind: 'onNodeState'; typeNames: string[]; state: string }
+  /**
+   * Standard 5-field cron expression (minute hour day-of-month month day-of-week).
+   * The scheduler computes the next fire-time at install + after each fire and
+   * arms a single `setTimeout`. Use for "every weekday at 9am" / "every 6h" /
+   * "first of the month" cadences that don't fit a fixed `intervalMs`.
+   */
+  | { kind: 'cron'; expression: string };
 
 export interface JobContext {
   db: Db;

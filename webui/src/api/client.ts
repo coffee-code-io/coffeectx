@@ -81,7 +81,7 @@ export interface SchedulerStatus {
 export interface JobRunRow {
   id: number;
   jobName: string;
-  triggerKind: 'timer' | 'onTypeInsert' | 'onNodeState' | 'manual' | 'startup';
+  triggerKind: 'timer' | 'onTypeInsert' | 'onNodeState' | 'cron' | 'manual' | 'startup';
   startedAt: string;
   endedAt: string | null;
   result: 'ok' | 'error' | 'cancelled' | null;
