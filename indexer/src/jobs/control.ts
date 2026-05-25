@@ -19,19 +19,32 @@ export type ProjectInfo = ProjectEntry & { name: string };
 
 /**
  * Ensure every job from the registry has a row in the project's DB, then
- * reconcile the live `enabled` flag from config (config wins). Mirrors what
- * the scheduler does on boot so a freshly-init'd project shows the right
- * picture before `daemonize` has ever run.
+ * reconcile the live `enabled` flag against config. Invariant: a job is
+ * `enabled=true` **iff** it has an entry in `projects.<p>.jobs[<name>]`.
+ * Available = not in config = always off.
+ *
+ * Concretely:
+ *   - cfgEntry present  → DB enabled mirrors `cfgEntry.enabled ?? defaultEnabled`
+ *   - cfgEntry missing  → DB enabled forced to false (cleans up stale rows
+ *                         from before the invariant existed, or hand edits).
+ *
+ * The scheduler polls config every few seconds and replays this same
+ * reconciliation, so dropping a job from config.yaml visibly turns it off
+ * within one tick.
  */
 export function ensureJobsRegistered(db: Db, config: CoffeectxConfig, projectName: string): Job[] {
   const jobs = buildJobs(db, config, projectName);
   const projectJobs = config.projects[projectName]?.jobs ?? {};
   for (const job of jobs) {
-    const created = db.upsertJob(job.name, { description: job.description, defaultEnabled: job.defaultEnabled });
+    db.upsertJob(job.name, { description: job.description, defaultEnabled: job.defaultEnabled });
     const cfgEntry = projectJobs[job.name];
-    if (cfgEntry?.enabled !== undefined) {
+    if (cfgEntry === undefined) {
+      // No config entry → not configured → must be off.
+      db.setJobEnabled(job.name, false);
+    } else if (cfgEntry.enabled !== undefined) {
       db.setJobEnabled(job.name, cfgEntry.enabled);
-    } else if (created) {
+    } else {
+      // Configured but no explicit `enabled` — fall back to defaultEnabled.
       db.setJobEnabled(job.name, job.defaultEnabled);
     }
   }

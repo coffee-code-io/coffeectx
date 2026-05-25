@@ -1,6 +1,17 @@
 ---
 name: obsidian-worklog
 description: Every morning, summarise yesterday's actions into an Obsidian daily note.
+# User jobs default to read-only graph access. This skill needs to write
+# a markdown file to the Obsidian vault, so it opts into `write_file`
+# explicitly via the Anthropic Agent Skills `allowed-tools` field.
+allowed-tools:
+  - search
+  - get_by_symbol_text
+  - regex
+  - raw_query
+  - get_node_by_id
+  - resolve_symbols
+  - write_file
 coffeecode:
   job:
     triggers:
@@ -38,12 +49,17 @@ Goal: write **one** Obsidian daily note at
    - `LocalDecision` / `Choice` — deliberate design picks.
    - `AgentSummary` — the assistant's own end-of-turn report-back.
 
-   Filter by `timestamp` starting with yesterday's date. Example (replace
-   the literal date with your computed yesterday):
+   Filter by the node's first-class `created_at` timestamp. Build the
+   ISO bounds from your computed `<YESTERDAY>` and `<TODAY>`:
 
    ```
-   IsType "LocalChangeEvent", Field "timestamp" Regex "^2026-05-23"
+   IsType "LocalChangeEvent",
+     CreatedAfter  "<YESTERDAY>T00:00:00Z",
+     CreatedBefore "<TODAY>T00:00:00Z"
    ```
+
+   The results' `$created_at` field is returned as an ISO string in the
+   raw_query response — use it for ordering inside each session.
 
    Group results by `sessionId` (a Symbol field on each event) so each
    session becomes one section in the note.

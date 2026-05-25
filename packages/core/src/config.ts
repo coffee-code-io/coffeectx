@@ -156,6 +156,19 @@ export interface ProjectEntry {
   agent?: { auth?: AuthSettings };
 }
 
+/** Global secrets integration switch. */
+export interface SecretsSettings {
+  /**
+   * When true, every in-process agent (UI / indexing / user jobs) gets
+   * the `exec_elevated` tool from `@coffeectx/secrets-pi` registered as a
+   * customTool. The agent must still pass the tool through its own
+   * allowlist (user jobs: SKILL.md `allowed-tools`; UI/indexing: hard-
+   * coded read-only / DB-writes policies — `exec_elevated` is added but
+   * those agents won't see it unless they're configured to). Default: false.
+   */
+  loadIntoAgents?: boolean;
+}
+
 export interface CoffeectxConfig {
   /** Default project name for CLI when --project is omitted. */
   active?: string;
@@ -166,6 +179,8 @@ export interface CoffeectxConfig {
     exclude?: string[];
     userDir?: string;
   };
+  /** Optional global secrets integration. */
+  secrets?: SecretsSettings;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
@@ -183,6 +198,7 @@ type RawConfig = Partial<{
   active: string;
   projects: Record<string, ProjectEntry>;
   types: CoffeectxConfig['types'];
+  secrets: SecretsSettings;
 }>;
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -204,7 +220,7 @@ export function loadConfig(): CoffeectxConfig {
 
   const types: CoffeectxConfig['types'] = { ...(raw.types ?? {}) };
 
-  return { active: raw.active, projects, types };
+  return { active: raw.active, projects, types, secrets: raw.secrets };
 }
 
 /** Save the full config back to ~/.coffeecode/config.yaml. */

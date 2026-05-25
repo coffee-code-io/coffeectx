@@ -33,16 +33,16 @@ import { useUi } from '../state/store';
 // ── Stream envelope shape (mirrors server: AgentEnvelope) ──────────────────
 
 type AgentEnvelope =
-  | { kind: 'ready'; activeSessionPath?: string }
+  | { kind: 'ready'; activeSessionPath?: string; history: HistoryItem[] }
   | { kind: 'error'; message: string }
   | { kind: 'session_switched'; activeSessionPath?: string; history: HistoryItem[] }
   | { kind: 'navigate'; nodeId: string; reason?: string }
   | { kind: 'agent'; event: PiEvent };
 
-interface HistoryItem {
-  role: 'user' | 'agent';
-  text: string;
-}
+type HistoryItem =
+  | { role: 'user'; text: string }
+  | { role: 'agent'; text: string }
+  | { role: 'tool'; toolName: string; text: string; toolError?: boolean };
 
 type PiEvent =
   | { type: 'agent_start' }
@@ -85,11 +85,14 @@ export function AgentChatPanel() {
   const [activeSessionPath, setActiveSessionPath] = useState<string | undefined>(undefined);
   const [showSessions, setShowSessions] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Restore-on-mount guard: we only auto-activate the stored session ONCE
-  // per project mount, after the SSE `ready` envelope tells us which one
-  // the server picked by default.
-  const restoreAttempted = useRef<string | null>(null);
-
+  // Remembers the activeSessionPath we last painted history for. The SSE
+  // stream re-fires `ready` on every transport reconnect (idle hiccups,
+  // proxy timeouts, browser tab throttling on switch), and the history
+  // payload only carries user/assistant text — not tool calls. Without
+  // this guard each reconnect would wipe accumulated tool-execution
+  // entries from `items`. We only repaint when the active path actually
+  // changes (initial connect or a real session switch).
+  const paintedHistoryFor = useRef<string | undefined>(undefined);
   // Session list — refetched when the active session changes so the
   // dropdown reflects newly-created sessions immediately.
   const sessionList = useQuery({
@@ -105,8 +108,9 @@ export function AgentChatPanel() {
     setItems([]);
     setConnError(null);
     setAuthError(null);
-    // New project = new restore window.
-    restoreAttempted.current = null;
+    // New project = next `ready` should repaint, even if paths happen to
+    // overlap (unlikely but cheap to guard).
+    paintedHistoryFor.current = undefined;
 
     const es = new EventSource(api.agentStreamUrl(project));
     es.onmessage = (ev) => {
@@ -126,30 +130,17 @@ export function AgentChatPanel() {
         case 'ready':
           setConnError(null);
           setActiveSessionPath(env.activeSessionPath);
-          if (project) {
-            // First-mount restore: if localStorage remembers a DIFFERENT
-            // session than the server defaulted to, switch to it. Guarded
-            // by `restoreAttempted` so EventSource auto-reconnects don't
-            // re-trigger the swap after the user has already navigated.
-            // Read store directly so we use the persisted value rather
-            // than a stale closure capture.
-            const remembered = useUi.getState().activeAgentSessionByProject[project];
-            if (
-              restoreAttempted.current !== project &&
-              remembered &&
-              remembered !== env.activeSessionPath
-            ) {
-              restoreAttempted.current = project;
-              api.activateAgentSession(project, remembered).catch(() => {
-                // Stale path — clear the remembered entry so we don't
-                // keep trying on every reconnect.
-                rememberAgentSession(project, undefined);
-              });
-            } else {
-              restoreAttempted.current = project;
-              rememberAgentSession(project, env.activeSessionPath);
-            }
+          // Paint the resumed session's history immediately on the
+          // initial connect / real session change. Skip it on plain
+          // transport reconnects — `ready` re-fires every time the SSE
+          // re-handshakes, but the history only carries user/assistant
+          // text (no tool calls), so replaying it would wipe locally-
+          // accumulated tool-execution entries.
+          if (paintedHistoryFor.current !== env.activeSessionPath) {
+            paintedHistoryFor.current = env.activeSessionPath;
+            setItems(env.history.map((h, i) => historyToChatItem(h, i)));
           }
+          if (project) rememberAgentSession(project, env.activeSessionPath);
           return;
         case 'error':
           setAuthError(env.message);
@@ -160,12 +151,9 @@ export function AgentChatPanel() {
           // the new session, so subsequent agent events flow into the same
           // EventSource.
           setActiveSessionPath(env.activeSessionPath);
+          paintedHistoryFor.current = env.activeSessionPath;
           if (project) rememberAgentSession(project, env.activeSessionPath);
-          setItems(env.history.map((h, i) => ({
-            key: `h:${i}`,
-            role: h.role,
-            text: h.text,
-          })));
+          setItems(env.history.map((h, i) => historyToChatItem(h, i)));
           setBusy(false);
           // Refresh the session list so the new active flag is reflected.
           queryClient.invalidateQueries({ queryKey: ['agent-sessions', project] });
@@ -186,6 +174,15 @@ export function AgentChatPanel() {
           return;
         case 'agent_end':
           setBusy(false);
+          // Refresh the session list so the message count + active flag
+          // for the freshly-prompted session reflect the new turn. The
+          // query key is keyed on `activeSessionPath`, which doesn't
+          // change when you prompt the same session — so without this
+          // invalidation the popover would only update on session
+          // switches.
+          if (project) {
+            queryClient.invalidateQueries({ queryKey: ['agent-sessions', project] });
+          }
           return;
         case 'tool_execution_start': {
           const tool = pe as Extract<PiEvent, { type: 'tool_execution_start' }>;
@@ -595,6 +592,25 @@ function extractAssistantText(msg: { content?: Array<{ type?: string; text?: str
     .map(c => c.text)
     .join('\n')
     .trim();
+}
+
+/**
+ * Map a server-rendered `HistoryItem` into a `ChatItem`. Keeps tool chip
+ * metadata (`toolName`, `toolError`) when the server signals the call
+ * failed — without this, a switched-back session would lose the red
+ * error styling on previously-broken tool calls.
+ */
+function historyToChatItem(h: HistoryItem, i: number): ChatItem {
+  if (h.role === 'tool') {
+    return {
+      key: `h:${i}`,
+      role: 'tool',
+      toolName: h.toolName,
+      text: h.text,
+      toolError: h.toolError,
+    };
+  }
+  return { key: `h:${i}`, role: h.role, text: h.text };
 }
 
 function describeToolCall(name: string, args: unknown): string {

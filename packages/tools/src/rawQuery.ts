@@ -14,11 +14,14 @@ Clause      = 'Symbol'  STRING                              exact symbol match
             | TypeQuery                                     filter by named type
             | MapQuery                                      filter map nodes by field contents
             | ListQuery                                     filter list nodes by items
+            | TimeQuery                                     filter map nodes by created_at / updated_at
             | '(' Query ')'                                 grouping
 
 TypeQuery   = 'IsType' STRING (',' 'IsType' STRING)*        OR semantics; STRING is named type
 MapQuery    = 'Field' STRING SubQuery (',' 'Field' STRING SubQuery)*
 ListQuery   = 'HasItem' SubQuery
+TimeQuery   = ('CreatedBefore' | 'CreatedAfter'
+              | 'UpdatedBefore' | 'UpdatedAfter') STRING    arg is ISO-8601 or numeric ms
 SubQuery    = '(' Query ')' | Clause
 
 Examples:
@@ -27,6 +30,8 @@ Examples:
   IsType "Project", Field "title" Meaning "auth"
   Field "tags" Symbol "security", Field "author" Regex "^alice"
   HasItem (Symbol "step1"), IsType "Workflow"
+  IsType "Plan", CreatedAfter "2026-05-23T00:00:00Z"
+  IsType "LocalChangeEvent", UpdatedBefore "2026-05-24T00:00:00Z"
 `.trim();
 
 export const description = `Query the knowledge graph using the retrival query language.\n\nSyntax:\n${SYNTAX}`;

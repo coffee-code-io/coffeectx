@@ -17,6 +17,14 @@ import type { AgentLogProvider, ProviderScanOptions } from './provider.js';
 import { Progress } from '../jobs/progress.js';
 import { computeFileContext } from './sessionContext.js';
 
+/** Parse an ISO-8601 timestamp into Unix ms; falls back to `Date.now()`
+ *  if the input is unparseable so we never insert NaN into the DB. */
+function parseMs(iso: string | undefined): number {
+  if (!iso) return Date.now();
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? Date.now() : ms;
+}
+
 export interface IndexLogsOptions extends ProviderScanOptions {
   /**
    * Project's repo root. When supplied, every file path written to
@@ -131,10 +139,14 @@ export async function indexAgentSessions(
       data: {
         sessionId: meta.sessionId,
         projectPath: meta.cwd ?? '',
-        startTime: meta.startTime,
         model: meta.model ?? '',
         provider: meta.provider,
       },
+      // The session's first-message timestamp becomes the node's created_at
+      // so range queries like `IsType "AgentSession", CreatedAfter "..."`
+      // mean "session started after". Date.parse handles ISO and falls back
+      // to NaN — anchor on `Date.now()` for unparseable values.
+      createdAt: parseMs(meta.startTime),
     });
     eventUuidByEntryIdx.push(null);
     existingSessionIds.add(meta.sessionId);
@@ -225,6 +237,10 @@ export async function indexAgentSessions(
 }
 
 function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
+  // Every event's wall-clock anchor maps to the node's created_at — the
+  // type-level `timestamp` symbol fields are gone now that the column is
+  // first-class.
+  const createdAt = parseMs(event.timestamp);
   switch (event.kind) {
     case 'user_input':
       return {
@@ -232,11 +248,11 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
         data: {
           sessionId: event.sessionId,
           uuid: event.uuid,
-          timestamp: event.timestamp,
           text: event.text ?? '',
           relatedFiles: [],
           relatedSymbols: event.linkedRefs,
         },
+        createdAt,
       };
 
     case 'file_create':
@@ -246,12 +262,12 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
         data: {
           sessionId: event.sessionId,
           uuid: event.uuid,
-          timestamp: event.timestamp,
           operation: event.kind === 'file_create' ? 'create' : 'edit',
           path: event.path ?? '',
           content: event.content ?? '',
           touchedSymbols: [],
         },
+        createdAt,
       };
 
     case 'shell_exec':
@@ -260,10 +276,10 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
         data: {
           sessionId: event.sessionId,
           uuid: event.uuid,
-          timestamp: event.timestamp,
           command: event.command ?? '',
           description: event.description ?? '',
         },
+        createdAt,
       };
 
     case 'agent_question':
@@ -272,10 +288,10 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
         data: {
           sessionId: event.sessionId,
           uuid: event.uuid,
-          timestamp: event.timestamp,
           question: event.question ?? '',
           relatedSymbols: event.linkedRefs,
         },
+        createdAt,
       };
 
     case 'agent_message':
@@ -284,10 +300,10 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
         data: {
           sessionId: event.sessionId,
           uuid: event.uuid,
-          timestamp: event.timestamp,
           text: event.text ?? '',
           relatedSymbols: event.linkedRefs,
         },
+        createdAt,
       };
 
     case 'agent_summary':
@@ -296,10 +312,10 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
         data: {
           sessionId: event.sessionId,
           uuid: event.uuid,
-          timestamp: event.timestamp,
           text: event.text ?? '',
           relatedSymbols: event.linkedRefs,
         },
+        createdAt,
       };
 
     default:

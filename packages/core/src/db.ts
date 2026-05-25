@@ -678,9 +678,10 @@ export class Db implements QueryDb {
 
     if (node.kind === 'map') {
       const typeId = this.upsertType(node.type);
+      const now = Date.now();
       this.raw
-        .prepare(`INSERT INTO nodes(id, kind, type_id) VALUES(?,?,?)`)
-        .run(id, 'map', typeId);
+        .prepare(`INSERT INTO nodes(id, kind, type_id, created_at, updated_at) VALUES(?,?,?,?,?)`)
+        .run(id, 'map', typeId, now, now);
       for (const [key, val] of Object.entries(node.entries)) {
         const valId = this.writeNode(val, embeds);
         this.raw
@@ -941,6 +942,11 @@ export class Db implements QueryDb {
     const embedMap = new Map<string, Float32Array>();
     for (const text of meaningTexts) if (text !== '') embedMap.set(text, await this.embed(text));
 
+    // Wall-clock anchor for every node touched by this batch. One value
+    // makes equal-time inserts / patches share an exact timestamp so range
+    // queries that bracket the batch don't miss entries.
+    const nowMs = Date.now();
+
     // ── Phase 4: write in a single transaction ──────────────────────────────
     const txn = this.raw.transaction(() => {
       // Insert shells for new entries first so $ref can resolve them.
@@ -948,9 +954,15 @@ export class Db implements QueryDb {
         const ti = typeInfos[i];
         const id = allocatedIds[i];
         if (!ti || !id || entries[i]!.id) continue; // skip patches and failed entries
+        const entry = entries[i]!;
+        const createdAt = entry.createdAt ?? nowMs;
+        const updatedAt = entry.updatedAt ?? createdAt;
         this.raw
-          .prepare(`INSERT INTO nodes(id, kind, type_id, state) VALUES(?,?,?,?)`)
-          .run(id, 'map', ti.typeId, targetStates[i]);
+          .prepare(
+            `INSERT INTO nodes(id, kind, type_id, state, created_at, updated_at)
+             VALUES(?,?,?,?,?,?)`,
+          )
+          .run(id, 'map', ti.typeId, targetStates[i], createdAt, updatedAt);
       }
 
       // Apply patch-driven state bumps (multi-state types only — single-state
@@ -962,6 +974,17 @@ export class Db implements QueryDb {
         const ti = typeInfos[i];
         if (!ti || ti.states.length <= 1) continue;
         this.raw.prepare(`UPDATE nodes SET state=? WHERE id=?`).run(targetStates[i], id);
+      }
+
+      // Bump `updated_at` on every patched entry (state change or not). The
+      // caller can override via `$updated_at`; otherwise the batch's nowMs
+      // wins. created_at is never touched on a patch.
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i]!;
+        const id = allocatedIds[i];
+        if (!id || !entry.id) continue; // patches only
+        const updatedAt = entry.updatedAt ?? nowMs;
+        this.raw.prepare(`UPDATE nodes SET updated_at=? WHERE id=?`).run(updatedAt, id);
       }
 
       // Write field values for all entries.
@@ -1219,7 +1242,13 @@ export class Db implements QueryDb {
       // upsertType on a shallow MapType finds the existing DB row via content_key.
       const typeId = this.upsertType(type);
       const id = uuidv4();
-      this.raw.prepare(`INSERT INTO nodes(id, kind, type_id) VALUES(?,?,?)`).run(id, 'map', typeId);
+      // Nested anonymous maps inherit the batch's wall-clock anchor — they
+      // can't be overridden individually (no `$created_at` plumbing for
+      // sub-objects), so a single Date.now() per nested insert is fine.
+      const now = Date.now();
+      this.raw
+        .prepare(`INSERT INTO nodes(id, kind, type_id, created_at, updated_at) VALUES(?,?,?,?,?)`)
+        .run(id, 'map', typeId, now, now);
       for (const [key, fieldType] of Object.entries(type.entries)) {
         if (obj[key] == null) continue;
         const valId = this.buildEntryNode(obj[key], fieldType, allocatedIds, embedMap, `${path}.${key}`);
@@ -1240,7 +1269,9 @@ export class Db implements QueryDb {
         `SELECT id, kind,
                 symbol_value  AS symbolValue,
                 meaning_text  AS meaningText,
-                type_id       AS typeId
+                type_id       AS typeId,
+                created_at    AS createdAt,
+                updated_at    AS updatedAt
          FROM nodes WHERE id=?`,
       )
       .get(id) as StoredNode | undefined;
@@ -1298,7 +1329,9 @@ export class Db implements QueryDb {
         `SELECT id, kind,
                 symbol_value  AS symbolValue,
                 meaning_text  AS meaningText,
-                type_id       AS typeId
+                type_id       AS typeId,
+                created_at    AS createdAt,
+                updated_at    AS updatedAt
          FROM nodes WHERE id=?`,
       )
       .get(id) as StoredNode | undefined;
@@ -1364,7 +1397,16 @@ export class Db implements QueryDb {
           state = states[states.length - 1];
         }
       }
-      return { kind: 'map', id, entries: result, type, typeName: namedRow?.name, state };
+      return {
+        kind: 'map',
+        id,
+        entries: result,
+        type,
+        typeName: namedRow?.name,
+        state,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      };
     }
 
     throw new Error(`Unknown node kind: ${row.kind}`);
@@ -1433,6 +1475,36 @@ export class Db implements QueryDb {
       .prepare(`SELECT list_id FROM list_items WHERE item_id IN (${placeholders})`)
       .all(...itemIds) as { list_id: string }[];
     return rows.map(r => r.list_id);
+  }
+
+  /**
+   * Range query over `nodes.created_at` / `updated_at`. Restricted to
+   * `kind='map'` because atom/list rows leave the timestamp columns NULL.
+   * Both `<` and `>` are strict — callers wanting an inclusive range can
+   * pass the exact boundary value (the `nowMs` shared across an insert
+   * batch lands on a single value, so `before NOW` and `after NOW` never
+   * overlap).
+   */
+  queryByTime(field: 'created_at' | 'updated_at', op: 'before' | 'after', ms: number): string[] {
+    const col = field === 'created_at' ? 'created_at' : 'updated_at';
+    const comparator = op === 'before' ? '<' : '>';
+    const rows = this.raw
+      .prepare(`SELECT id FROM nodes WHERE kind='map' AND ${col} ${comparator} ?`)
+      .all(ms) as { id: string }[];
+    return rows.map(r => r.id);
+  }
+
+  /**
+   * Fetch `created_at` / `updated_at` for a node without loading its
+   * contents. Returns null for atom/list rows (which leave the columns
+   * NULL) and for missing nodes.
+   */
+  getNodeTimestamps(id: string): { createdAt: number; updatedAt: number } | null {
+    const row = this.raw
+      .prepare(`SELECT created_at AS createdAt, updated_at AS updatedAt FROM nodes WHERE id=?`)
+      .get(id) as { createdAt: number | null; updatedAt: number | null } | undefined;
+    if (!row || row.createdAt == null || row.updatedAt == null) return null;
+    return { createdAt: row.createdAt, updatedAt: row.updatedAt };
   }
 
   /**

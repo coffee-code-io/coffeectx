@@ -13,7 +13,12 @@ CREATE TABLE IF NOT EXISTS nodes (
   -- Per-node state, valid only for named-type maps. NULL means the type has
   -- no declared state machine (default [ready]) and the node is at its
   -- single, final state.
-  state       TEXT
+  state       TEXT,
+  -- Unix epoch milliseconds. Set on kind='map' nodes; NULL on atom/list
+  -- nodes (which are immutable in this design). Integer storage is chosen
+  -- over ISO strings so the range indexes below scan small, cheap pages.
+  created_at  INTEGER,
+  updated_at  INTEGER
 );
 
 -- List contents (ordered)
@@ -173,6 +178,8 @@ CREATE TABLE IF NOT EXISTS node_refs (
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_nodes_kind         ON nodes(kind);
+CREATE INDEX IF NOT EXISTS idx_nodes_created_at   ON nodes(created_at);
+CREATE INDEX IF NOT EXISTS idx_nodes_updated_at   ON nodes(updated_at);
 CREATE INDEX IF NOT EXISTS idx_list_items_list    ON list_items(list_id);
 CREATE INDEX IF NOT EXISTS idx_map_entries_map    ON map_entries(map_id);
 CREATE INDEX IF NOT EXISTS idx_type_children_type ON type_children(type_id);

@@ -31,6 +31,11 @@ export function formatDeepNode(node: DeepNode): unknown {
         out['$type'] = node.typeName;
         if (node.id) out['$id'] = node.id;
         if (node.state) out['$state'] = node.state;
+        // Timestamps emit as ISO strings — agent-facing output trades the
+        // small parse cost for a human-readable contract. Storage stays
+        // INTEGER ms for fast range scans.
+        if (node.createdAt != null) out['$created_at'] = new Date(node.createdAt).toISOString();
+        if (node.updatedAt != null) out['$updated_at'] = new Date(node.updatedAt).toISOString();
       }
       for (const [key, child] of Object.entries(node.entries)) {
         const v = formatDeepNode(child);

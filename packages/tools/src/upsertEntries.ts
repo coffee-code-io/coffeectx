@@ -43,6 +43,12 @@ export interface ParseError {
 export interface InsertEntryDTO {
   $type: string;
   $id?: string;
+  /** Override the auto-set created_at. Accepts either an ISO-8601 string
+   *  or a numeric Unix-millisecond value. */
+  $created_at?: string | number;
+  /** Same shape as `$created_at`. Ignored on inserts unless the caller
+   *  wants to backdate; on patches, overrides the automatic bump. */
+  $updated_at?: string | number;
   [key: string]: unknown;
 }
 
@@ -50,6 +56,28 @@ interface NormalizedEntry {
   type: string;
   id?: string;
   data: Record<string, unknown>;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+/** Coerce an ISO-8601 string or numeric ms value to Unix milliseconds.
+ *  Returns null when the input is unset / undefined; throws on garbage. */
+function parseTimestamp(raw: unknown, field: string, index: number): number | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw < 0) {
+      throw new Error(`Entry[${index}] "${field}" must be a non-negative ms value, got ${raw}`);
+    }
+    return Math.floor(raw);
+  }
+  if (typeof raw === 'string') {
+    const ms = Date.parse(raw);
+    if (Number.isNaN(ms)) {
+      throw new Error(`Entry[${index}] "${field}" is not a valid ISO-8601 string: ${JSON.stringify(raw)}`);
+    }
+    return ms;
+  }
+  throw new Error(`Entry[${index}] "${field}" must be an ISO string or ms number, got ${typeof raw}`);
 }
 
 /** Parse the flat DTO format into the InsertEntry shape Db expects. */
@@ -77,12 +105,28 @@ export function parseEntries(raw: unknown[]): { entries: NormalizedEntry[]; erro
       entries.push({ type: '', data: {} });
       continue;
     }
+    let createdAt: number | null = null;
+    let updatedAt: number | null = null;
+    try {
+      createdAt = parseTimestamp(obj['$created_at'], '$created_at', i);
+      updatedAt = parseTimestamp(obj['$updated_at'], '$updated_at', i);
+    } catch (err) {
+      errors.push({ index: i, message: (err as Error).message });
+      entries.push({ type: '', data: {} });
+      continue;
+    }
     const data: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
-      if (k === '$type' || k === '$id') continue;
+      if (k === '$type' || k === '$id' || k === '$created_at' || k === '$updated_at') continue;
       data[k] = v;
     }
-    entries.push({ type: $type, id: $id as string | undefined, data });
+    entries.push({
+      type: $type,
+      id: $id as string | undefined,
+      data,
+      ...(createdAt != null ? { createdAt } : {}),
+      ...(updatedAt != null ? { updatedAt } : {}),
+    });
   }
 
   return { entries, errors };

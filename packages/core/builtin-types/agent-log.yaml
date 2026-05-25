@@ -6,7 +6,6 @@ types:
     fields:
       sessionId: Symbol    # provider-namespaced session id
       projectPath: Symbol  # cwd at session start
-      startTime: Symbol    # ISO timestamp of first message
       model: Symbol        # e.g. "claude-sonnet-4-6", "gpt-5-codex", "qwen/qwen3-32b"
       provider: Symbol     # "claude" | "codex" | "pi"
 
@@ -18,10 +17,8 @@ types:
     fields:
       sessionId: Symbol
       uuid: Symbol         # message UUID
-      timestamp: Symbol
       text: Symbol         # verbatim user message — Symbol (not Meaning) so it doesn't go into the vector store; UI renders markdown via length/markdown heuristic
       comment: Meaning?    # optional analyst annotation
-      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedFiles:        # file paths mentioned or implied by the user (empty = none)
         kind: List
         item: Symbol
@@ -37,12 +34,10 @@ types:
     fields:
       sessionId: Symbol
       uuid: Symbol
-      timestamp: Symbol
       operation: Symbol    # "create" | "edit"
       path: Symbol         # absolute file path
       content: Symbol      # FULL content (Write) or new_string (Edit) — Symbol so it doesn't embed; used for name-match enrichment
       comment: Meaning?    # optional analyst annotation
-      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       touchedSymbols:      # LSP symbol nodes whose name appears in `content` and whose file_path == `path` — populated during LSP indexing
         kind: List
         item: AnyLspSymbol
@@ -55,11 +50,9 @@ types:
     fields:
       sessionId: Symbol
       uuid: Symbol
-      timestamp: Symbol
       command: Symbol
       description: Symbol  # agent-supplied description of what the command does
       comment: Meaning?    # optional analyst annotation
-      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
 
   AgentQuestion:
     description: A clarifying question asked by the coding agent to the user before proceeding.
@@ -69,10 +62,8 @@ types:
     fields:
       sessionId: Symbol
       uuid: Symbol
-      timestamp: Symbol
       question: Symbol     # verbatim agent question — Symbol so it doesn't embed
       comment: Meaning?    # optional analyst annotation
-      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedSymbols:      # LSP symbol nodes mentioned in the question — populated during LSP indexing
         kind: List
         item: AnyLspSymbol
@@ -85,10 +76,8 @@ types:
     fields:
       sessionId: Symbol
       uuid: Symbol
-      timestamp: Symbol
       text: Symbol         # assistant in-progress narration — Symbol so it doesn't embed (UI still renders markdown)
       comment: Meaning?    # optional analyst annotation
-      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedSymbols:      # LSP symbol nodes mentioned in the message — populated during LSP indexing
         kind: List
         item: AnyLspSymbol
@@ -101,10 +90,8 @@ types:
     fields:
       sessionId: Symbol
       uuid: Symbol
-      timestamp: Symbol
       text: Symbol         # wrap-up narrative — Symbol so it doesn't embed
       comment: Meaning?    # optional analyst annotation
-      agentIndexed: Symbol?  # ISO timestamp when this event was processed by the agent indexer
       relatedSymbols:      # LSP symbol nodes mentioned in the summary — populated during LSP indexing
         kind: List
         item: AnyLspSymbol

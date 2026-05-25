@@ -78,8 +78,11 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
     catch (err) { result.errors.push({ path, error: (err as Error).message }); continue; }
 
     const name = basename(entry, extname(entry));
-    const updatedAt = new Date(stat.mtimeMs).toISOString();
-    const createdAt = stat.birthtimeMs ? new Date(stat.birthtimeMs).toISOString() : updatedAt;
+    // Persist mtime/birthtime as the node's first-class timestamps so they
+    // participate in CreatedAfter / UpdatedAfter queries. Both stored as
+    // Unix ms — same units the DB column expects.
+    const updatedAt = stat.mtimeMs;
+    const createdAt = stat.birthtimeMs || updatedAt;
     const title = extractTitle(content);
 
     // Orphan filter: `~/.claude/plans/` is GLOBAL across all projects, so we
@@ -105,14 +108,14 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
         data: {
           name,
           path,
-          createdAt,
-          updatedAt,
           content,
           ...(title ? { title } : {}),
           relatedFiles: filePaths,    // plain path strings (List<Symbol>)
           relatedSymbols: symbolRefs,
           acceptedBy,                 // namespaced sessionIds
         },
+        createdAt,
+        updatedAt,
       };
       try {
         const r = await db.insertEntries([newEntry]);
@@ -137,10 +140,10 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
 
     if (prior.updatedAt !== updatedAt) {
       // mtime changed — Db patching only adds absent fields, so we can't easily
-      // overwrite `content` / `updatedAt`. Surface this so the user can decide.
+      // overwrite `content`. Surface this so the user can decide.
       console.warn(
-        `[indexPlans] plan "${name}" changed on disk (mtime ${updatedAt}) but Db patching adds-only — ` +
-        `existing node retains previous content. Delete the Plan node manually to force a re-index.`,
+        `[indexPlans] plan "${name}" changed on disk (mtime ${new Date(updatedAt).toISOString()}) but ` +
+        `Db patching adds-only — existing node retains previous content. Delete the Plan node manually to force a re-index.`,
       );
     }
     if (added === 0) result.skipped++;
@@ -151,20 +154,20 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
 
 interface PlanRow {
   id: string;
-  updatedAt: string;
+  /** Unix ms — sourced from the node's first-class `updated_at` column. */
+  updatedAt: number;
 }
 
 function loadExistingPlans(db: Db): Map<string, PlanRow> {
   const out = new Map<string, PlanRow>();
   for (const id of db.queryByNamedType(['Plan'])) {
     const nameFieldId = db.getMapFieldId(id, 'name');
-    const updatedFieldId = db.getMapFieldId(id, 'updatedAt');
-    if (!nameFieldId || !updatedFieldId) continue;
+    if (!nameFieldId) continue;
     const nameNode = db.loadNode(nameFieldId);
-    const updatedNode = db.loadNode(updatedFieldId);
     if (nameNode.kind !== 'atom' || nameNode.atom.kind !== 'symbol') continue;
-    if (updatedNode.kind !== 'atom' || updatedNode.atom.kind !== 'symbol') continue;
-    out.set(nameNode.atom.value, { id, updatedAt: updatedNode.atom.value });
+    const ts = db.getNodeTimestamps(id);
+    if (!ts) continue;
+    out.set(nameNode.atom.value, { id, updatedAt: ts.updatedAt });
   }
   return out;
 }

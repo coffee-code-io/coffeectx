@@ -33,6 +33,7 @@ import type { AuthSettings, Db } from '@coffeectx/core';
 import { buildPiAuth } from './auth.js';
 import { buildGraphTools } from './piTools.js';
 import { buildResourceLoader } from './skillResourceLoader.js';
+import { maybeExecElevatedTool } from './secretsTool.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -139,24 +140,34 @@ export async function runSkillInteractive(
   );
 
   // ── 3. Build pi session with graph tools only ─────────────────────────────
-  // Skill jobs run with full indexer authority (the user installed them
-  // under ~/.coffeecode/skills/, same trust level as their own config).
-  // That includes `write_file` so skills like obsidian-worklog can emit
-  // their output to disk.
-  const customTools: ToolDefinition[] = buildGraphTools(db, {
-    allowInsert,
-    allowFileWrite: true,
-  });
+  // Hardcoded indexing agents (local-decisions / lsp-enrichment) are
+  // strictly DB-writers — no filesystem access. `write_file` is gone;
+  // `noTools: 'builtin'` already disables pi's read/bash/edit/write.
+  // User job-shaped skills (under ~/.coffeecode/jobs/) take a different
+  // path through `runUserJob.ts` and gate FS access on `allowed-tools`.
+  const customTools: ToolDefinition[] = [
+    ...buildGraphTools(db, {
+      allowInsert,
+      allowFileWrite: false,
+    }),
+    // Global `secrets.loadIntoAgents` injects `exec_elevated`. Indexing
+    // agents are trusted infrastructure — when the flag's on, they can
+    // call it directly (no per-skill allow-list at this layer).
+    ...maybeExecElevatedTool(),
+  ];
   const toolNames = customTools.map(t => t.name);
 
   // Pi-native skill loader. Surfaces `~/.coffeecode/skills/` and
   // `~/.coffeecode/jobs/` to the agent as `/skill:<name>` commands +
   // system-prompt entries, filtered by the project's `indexingAgents`
-  // bucket.
+  // bucket. The skill's role instructions live in `appendSystemPrompt`
+  // so they hit the system prompt on every turn — no priming round-trip
+  // and no need to keep the prompt in the JSONL as the first user turn.
   const resourceLoader = await buildResourceLoader({
     projectName,
     target: 'indexingAgents',
     cwd: PROJECT_ROOT,
+    appendSystemPrompt: [skillPrompt],
   });
 
   const { session } = await createAgentSession({
@@ -201,21 +212,11 @@ export async function runSkillInteractive(
     }
   };
 
-  // ── 4. On a fresh session, plant the skill prompt as the first turn.
-  // `session.prompt(text)` already awaits the full agent loop (the agent
-  // emits `agent_end` to subscribed listeners before this Promise resolves)
-  // — no separate "wait for end" step is needed.
-  //
-  // The skill prompt is the COMPLETE instruction set now — the previous
-  // `system.md` preamble was merged into the hardcoded prompts themselves
-  // (see indexer/prompts/local-decisions.md and lsp-enrichment.md).
-  if (!isResuming) {
-    lastAgentEnd = null;
-    await session.prompt(skillPrompt);
-    checkProviderError(-1);
-  }
-
-  // ── 5. Per-batch loop ─────────────────────────────────────────────────────
+  // ── 4. Per-batch loop ─────────────────────────────────────────────────────
+  // The skill prompt is in `appendSystemPrompt` (resource loader above),
+  // so we no longer plant it as a first user turn. Fresh sessions go
+  // straight into the per-batch loop — the role instructions hit the
+  // system prompt on every turn automatically.
   let batchesRun = 0;
   for (let i = 0; i < eventBatches.length; i++) {
     if (signal?.aborted) {

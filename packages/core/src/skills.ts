@@ -69,6 +69,17 @@ export interface Skill {
   typesPath?: string;
   /** Names of env vars the skill scripts read. Documentation + startup warn. */
   requiredEnv: ReadonlyArray<string>;
+  /**
+   * Anthropic Agent Skills `allowed-tools` field. Optional. When set, this
+   * is the only tool allowlist the skill's job (or skill-invocation) sees;
+   * the default is "read-only graph queries only" for user jobs and
+   * "DB-writes + graph queries, no FS" for hardcoded indexing skills.
+   *
+   * Names may include shell-style globs (`mcp__*`, `read*`). The indexer
+   * expands them against the live tool registry at session-build time —
+   * pi itself only accepts exact names in `tools: string[]`.
+   */
+  allowedTools?: ReadonlyArray<string>;
 }
 
 // ── Filesystem layout ──────────────────────────────────────────────────────
@@ -190,6 +201,7 @@ function loadOneSkill(dirName: string, skillDir: string, skillPath: string, cate
     job: parseJobSpec(cc.job),
     typesPath: resolveTypesPath(skillDir, cc.types),
     requiredEnv: parseRequiredEnv(cc.requiredEnv),
+    allowedTools: parseAllowedTools(front),
   };
 }
 
@@ -199,6 +211,31 @@ interface RawFrontMatter {
   name?: string;
   description?: string;
   coffeecode?: RawCoffeecodeBlock;
+  // Anthropic Agent Skills convention — kebab-case in YAML, parsed below.
+  'allowed-tools'?: unknown;
+  allowedTools?: unknown;
+}
+
+/**
+ * Parse the Anthropic Agent Skills `allowed-tools` field. Accepts either a
+ * YAML array (`["search", "raw_query"]`) or a comma-separated string
+ * (`"search, raw_query, mcp__*"`). Empty / missing → undefined (skill
+ * inherits the runner's default allowlist).
+ */
+function parseAllowedTools(front: RawFrontMatter | null | undefined): ReadonlyArray<string> | undefined {
+  if (!front) return undefined;
+  const raw = front['allowed-tools'] ?? front.allowedTools;
+  if (raw === undefined || raw === null) return undefined;
+  if (Array.isArray(raw)) {
+    const out = raw.filter((v): v is string => typeof v === 'string' && v.length > 0).map(s => s.trim());
+    return out.length > 0 ? out : undefined;
+  }
+  if (typeof raw === 'string') {
+    const out = raw.split(',').map(s => s.trim()).filter(s => s.length > 0);
+    return out.length > 0 ? out : undefined;
+  }
+  console.warn(`[skills] allowed-tools must be an array or comma-separated string; got ${typeof raw}`);
+  return undefined;
 }
 
 interface RawCoffeecodeBlock {

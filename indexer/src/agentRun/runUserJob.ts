@@ -28,6 +28,12 @@ import { buildGraphTools } from './piTools.js';
 import { buildResourceLoader } from './skillResourceLoader.js';
 import { PROJECT_ROOT } from './runEventStreamSkill.js';
 import { ProviderError } from './runEventStreamSkill.js';
+import {
+  DEFAULT_USER_JOB_TOOLS,
+  PI_BUILTIN_TOOL_NAMES,
+  resolveAllowedTools,
+} from './toolPolicy.js';
+import { maybeExecElevatedTool } from './secretsTool.js';
 
 const SESSION_ROOT = join(homedir(), '.coffeecode', 'sessions');
 
@@ -47,6 +53,11 @@ export interface RunUserJobOptions {
    *  body so the LLM agent (which has no JS sandbox) sees the resolved
    *  values directly instead of asking the user. */
   requiredEnv?: ReadonlyArray<string>;
+  /** Anthropic Agent Skills `allowed-tools` from SKILL.md front-matter.
+   *  Globs allowed (`mcp__*`). When omitted the runner uses the
+   *  `DEFAULT_USER_JOB_TOOLS` read-only graph allowlist — `upsert_entries`,
+   *  `write_file`, and pi's builtin FS/bash tools are blocked. */
+  allowedTools?: ReadonlyArray<string>;
   /** Scheduler abort signal. Honoured before/after the prompt; pi's
    *  `session.prompt()` doesn't accept signals today. */
   signal?: AbortSignal;
@@ -65,13 +76,18 @@ export interface RunUserJobResult {
  * `runEventStreamSkill.ts` for the same shape).
  */
 export async function runUserJob(opts: RunUserJobOptions): Promise<RunUserJobResult> {
-  const { db, jobName, projectName, prompt, auth, requiredEnv, signal } = opts;
+  const { db, jobName, projectName, prompt, auth, requiredEnv, allowedTools, signal } = opts;
 
   if (signal?.aborted) {
     return { sessionFile: undefined, willRetry: false };
   }
 
-  const fullPrompt = withEnvPreamble(prompt, requiredEnv ?? []);
+  // The skill body is role/instructions — goes into `appendSystemPrompt`.
+  // The user-turn payload is just the environment block + a brief kickoff
+  // so pi has a non-empty first message to drive the agent loop. Today's
+  // date + resolved env values land alongside the kickoff so the agent
+  // sees them as runtime context, not embedded in its system prompt.
+  const userKickoff = buildKickoffMessage(requiredEnv ?? []);
 
   const { model, authStorage } = buildPiAuth(auth);
 
@@ -84,16 +100,39 @@ export async function runUserJob(opts: RunUserJobOptions): Promise<RunUserJobRes
     `[runUserJob:${jobName}] starting fresh session in ${sessionDir} (model=${model.id})`,
   );
 
-  const customTools: ToolDefinition[] = buildGraphTools(db, {
-    allowInsert: true,
-    allowFileWrite: true,
-  });
-  const toolNames = customTools.map(t => t.name);
+  // Build the full superset of graph tools (read + insert + write_file),
+  // then let the resolver pick the subset the skill is allowed to see.
+  // Skills that omit `allowed-tools` get DEFAULT_USER_JOB_TOOLS — read-only
+  // graph access; `upsert_entries` / `write_file` / pi-builtin FS tools
+  // require an explicit opt-in via the skill's front-matter.
+  const allCustomTools: ToolDefinition[] = [
+    ...buildGraphTools(db, {
+      allowInsert: true,
+      allowFileWrite: true,
+    }),
+    // When `secrets.loadIntoAgents` is on, expose `exec_elevated` in the
+    // superset; the resolver below will only forward it if the skill's
+    // `allowed-tools` includes it (literal or glob).
+    ...maybeExecElevatedTool(),
+  ];
+  const effectiveAllowed = allowedTools && allowedTools.length > 0
+    ? allowedTools
+    : DEFAULT_USER_JOB_TOOLS;
+  const resolved = resolveAllowedTools(
+    { customTools: allCustomTools, piBuiltins: PI_BUILTIN_TOOL_NAMES },
+    effectiveAllowed,
+  );
+  const customTools = resolved.customTools;
+  const toolNames = resolved.toolNames;
+  console.log(
+    `[runUserJob:${jobName}] allowed-tools resolved to [${toolNames.join(', ') || '(none)'}]`,
+  );
 
   const resourceLoader = await buildResourceLoader({
     projectName,
     target: 'jobs',
     cwd: PROJECT_ROOT,
+    appendSystemPrompt: [prompt],
   });
 
   const { session } = await createAgentSession({
@@ -119,7 +158,7 @@ export async function runUserJob(opts: RunUserJobOptions): Promise<RunUserJobRes
   });
 
   try {
-    await session.prompt(fullPrompt);
+    await session.prompt(userKickoff);
   } catch (err) {
     session.dispose();
     throw err;
@@ -148,14 +187,19 @@ function sessionDirFor(projectName: string, jobName: string): string {
 }
 
 /**
- * Prepend an `## Environment` block listing the actual values for each
- * declared env var, so the agent doesn't have to ask the user (it has no
- * JS sandbox to read `process.env` itself). Unset vars are listed as
- * `(unset)` so the agent can fall back / error explicitly. Today's date is
- * also injected to give the agent a stable "now" anchor (relevant for
- * skills like obsidian-worklog that need "yesterday").
+ * Build the single user-turn that kicks off the agent loop. The skill's
+ * instructions live in `appendSystemPrompt`, so this payload only has
+ * to:
+ *   - resolve `requiredEnv` against `process.env` (the LLM has no JS
+ *     sandbox to read it itself),
+ *   - inject `TODAY` as a stable "now" anchor (relevant for skills like
+ *     obsidian-worklog that need "yesterday"),
+ *   - tell the agent to begin.
+ *
+ * Unset vars are listed as `(unset)` so the agent can fall back / error
+ * explicitly rather than silently substituting the literal `$VAR`.
  */
-function withEnvPreamble(prompt: string, requiredEnv: ReadonlyArray<string>): string {
+function buildKickoffMessage(requiredEnv: ReadonlyArray<string>): string {
   const lines: string[] = [];
   const today = new Date();
   const yyyy = today.getFullYear();
@@ -170,7 +214,6 @@ function withEnvPreamble(prompt: string, requiredEnv: ReadonlyArray<string>): st
     `## Environment\n\n` +
     `The following values are resolved for you — substitute them literally; do not ask the user.\n\n` +
     lines.join('\n') +
-    `\n\n---\n\n` +
-    prompt
+    `\n\nProceed with your role per the system prompt.`
   );
 }

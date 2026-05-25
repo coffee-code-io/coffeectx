@@ -6,12 +6,9 @@ types:
     fields:
       name: Symbol         # filename slug (no extension) — also the natural unique key
       path: Symbol         # absolute path to the .md file on disk
-      createdAt: Symbol    # ISO timestamp (file birthtime if available, else mtime of first ingest)
-      updatedAt: Symbol    # ISO timestamp of the file's last modification
       title: Meaning?      # first-line H1 (or first non-empty line) — extracted for summary search
       content: Meaning     # full markdown body
       comment: Meaning?    # optional analyst annotation
-      agentIndexed: Symbol?  # ISO timestamp when this plan was processed by the agent indexer
       relatedFiles:        # File paths mentioned in the plan content (plain strings — File is no longer a node type)
         kind: List
         item: Symbol

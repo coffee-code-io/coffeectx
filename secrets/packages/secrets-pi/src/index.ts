@@ -61,8 +61,32 @@ async function confirmUnmatched(command: string, ctx?: MinimalExtensionContext):
   return false;
 }
 
-export default function secretsPiExtension(pi: MinimalExtensionAPI): void {
-  pi.registerTool({
+/**
+ * Build the `exec_elevated` tool definition without registering it on a
+ * pi extension API. Returned object is shaped exactly like the pi
+ * `ToolDefinition` interface, so in-process coffeectx agents can wire it
+ * into `customTools` directly (no extension loader needed).
+ *
+ * Use the default export for the classic pi extension flow (drop a 3-
+ * liner into `~/.pi/agent/extensions/`); use this when you're driving
+ * `createAgentSession({ customTools: [...] })` yourself.
+ */
+export function buildExecElevatedTool(): {
+  name: string;
+  label: string;
+  description: string;
+  promptSnippet?: string;
+  promptGuidelines?: string[];
+  parameters: unknown;
+  execute: (
+    toolCallId: string,
+    params: unknown,
+    signal?: AbortSignal,
+    onUpdate?: unknown,
+    ctx?: MinimalExtensionContext,
+  ) => Promise<ToolExecuteResult>;
+} {
+  return {
     name: 'exec_elevated',
     label: 'Execute with secrets',
     description: 'Execute a bash command with configured secrets injected after whitelist validation.',
@@ -103,5 +127,9 @@ export default function secretsPiExtension(pi: MinimalExtensionAPI): void {
         return textResult(`Error: ${(err as Error).message}`, true);
       }
     },
-  });
+  };
+}
+
+export default function secretsPiExtension(pi: MinimalExtensionAPI): void {
+  pi.registerTool(buildExecElevatedTool());
 }

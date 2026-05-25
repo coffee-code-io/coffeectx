@@ -37,7 +37,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Db, syncAllTypes, syncFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadConfig, resolveProjectEmbed, listEnabledProjects } from '@coffeectx/core';
 import type { InsertEntry } from '@coffeectx/core';
-import { initProject, promptProjectName } from './init.js';
+import { initProject, interactiveSeedJobs, promptProjectName } from './init.js';
 import {
   loadProjects,
   setActiveProject,
@@ -126,6 +126,17 @@ if (command === 'init') {
     console.error('  Sync errors:');
     for (const { name: n, error } of result.sync.types.errors) {
       console.error(`    ${n}: ${error}`);
+    }
+  }
+
+  // Interactive seed: when run from a TTY, offer to populate the new
+  // project's job config with coding-agent auth + LSP command in the same
+  // session. Skipping leaves everything Available-but-unconfigured.
+  if (process.stdin.isTTY) {
+    try {
+      await interactiveSeedJobs(result.name, result.repoPath);
+    } catch (err) {
+      console.error(`  init: seed failed — ${(err as Error).message}`);
     }
   }
 

@@ -38,6 +38,7 @@ import {
 import { buildResourceLoader } from '../agentRun/skillResourceLoader.js';
 import { buildPiAuth } from '../agentRun/auth.js';
 import { buildGraphTools, buildNavigateTool } from '../agentRun/piTools.js';
+import { maybeExecElevatedTool } from '../agentRun/secretsTool.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SESSION_ROOT = join(homedir(), '.coffeecode', 'sessions');
@@ -66,10 +67,10 @@ export type AgentEnvelope =
   | { kind: 'session_switched'; activeSessionPath: string | undefined; history: HistoryItem[] };
 
 /** Minimal rendered shape we send to the client on session switch. */
-export interface HistoryItem {
-  role: 'user' | 'agent';
-  text: string;
-}
+export type HistoryItem =
+  | { role: 'user'; text: string }
+  | { role: 'agent'; text: string }
+  | { role: 'tool'; toolName: string; text: string; toolError?: boolean };
 
 export type SessionListener = (event: AgentEnvelope) => void;
 
@@ -82,15 +83,6 @@ interface PerProjectState {
   session: AgentSession;
   /** Absolute path of the currently active JSONL. */
   activeSessionPath: string | undefined;
-  /**
-   * True until the session has received its first real user turn. We plant
-   * the system prompt by *prepending* it to that first user message rather
-   * than firing a standalone `prompt()` call on session creation — that
-   * avoided a wasted LLM round-trip per "new chat" (it also meant pi's
-   * `SessionInfo.firstMessage` was returning the system blob instead of
-   * the user's real first message).
-   */
-  needsPriming: boolean;
   listeners: Set<SessionListener>;
   busy: boolean;
   abort: AbortController;
@@ -118,8 +110,42 @@ export interface UiSessionInfo {
   isActive: boolean;
 }
 
-/** Lazily build (or fetch the cached) active session for a project. */
-export async function getOrCreateSession(
+/**
+ * Long-lived listener Set, one per project. SSE connections register here
+ * once and keep firing across session switches — `tearDown` / `newSession` /
+ * `activateSession` install the same Set instance on every fresh
+ * `PerProjectState`, so a route handler that captures it at connect time
+ * doesn't go stale when the active session is swapped.
+ *
+ * Previously we built a fresh Set per state and copied entries forward;
+ * the SSE route's captured reference then pointed at an orphaned Set after
+ * the first switch, so `cleanup()` on disconnect leaked the listener into
+ * the still-live one. This map is the single source of truth.
+ */
+const PROJECT_LISTENERS = new Map<string, Set<SessionListener>>();
+
+function listenersFor(projectName: string): Set<SessionListener> {
+  let s = PROJECT_LISTENERS.get(projectName);
+  if (!s) {
+    s = new Set();
+    PROJECT_LISTENERS.set(projectName, s);
+  }
+  return s;
+}
+
+/** Return the cached active session if one exists. Never builds a new one;
+ *  callers handle the null branch (typically by calling `newSession`). */
+export function getActiveSession(projectName: string): PerProjectState | null {
+  return PROJECT_STATE.get(projectName) ?? null;
+}
+
+/**
+ * First-connect bootstrap for the SSE stream: returns the cached active
+ * session, or builds one from the most recent JSONL on disk (creating an
+ * empty one if the dir is empty). This is the only path that auto-resumes;
+ * `POST /agent/message` no longer falls back here — see route handler.
+ */
+export async function ensureActiveSession(
   projectName: string,
   db: Db,
 ): Promise<PerProjectState | { error: AgentNotConfiguredError }> {
@@ -129,14 +155,12 @@ export async function getOrCreateSession(
   const authOrErr = resolveAuthOrError(projectName);
   if ('error' in authOrErr) return authOrErr;
 
-  // Resume the most recent JSONL; pi creates one if the dir is empty.
   const sessionDir = sessionDirFor(projectName);
   mkdirSync(sessionDir, { recursive: true });
   const sessionManager = SessionManager.continueRecent(PROJECT_ROOT, sessionDir);
-  const needsPriming = !hasAnySessionFile(sessionDir);
 
   const state = await buildState({
-    projectName, db, auth: authOrErr.auth, sessionManager, needsPriming,
+    projectName, db, auth: authOrErr.auth, sessionManager,
   });
   PROJECT_STATE.set(projectName, state);
   return state;
@@ -165,17 +189,19 @@ export async function newSession(
   const authOrErr = resolveAuthOrError(projectName);
   if ('error' in authOrErr) return authOrErr;
 
-  const carriedListeners = await tearDown(projectName);
+  await tearDown(projectName);
 
   const sessionDir = sessionDirFor(projectName);
   mkdirSync(sessionDir, { recursive: true });
   const sessionManager = SessionManager.create(PROJECT_ROOT, sessionDir);
 
   const state = await buildState({
-    projectName, db, auth: authOrErr.auth, sessionManager, needsPriming: true,
+    projectName, db, auth: authOrErr.auth, sessionManager,
   });
-  for (const l of carriedListeners) state.listeners.add(l);
   PROJECT_STATE.set(projectName, state);
+  // listeners.add(...) carry-forward is gone — every state points at the
+  // same Set instance via listenersFor(projectName), so SSE clients stay
+  // attached automatically across swaps.
   broadcast(state, { kind: 'session_switched', activeSessionPath: state.activeSessionPath, history: [] });
   return state;
 }
@@ -201,12 +227,11 @@ export async function activateSession(
     return { error: { message: `Session file not found in project: ${sessionPath}` } };
   }
 
-  const carriedListeners = await tearDown(projectName);
+  await tearDown(projectName);
   const sessionManager = SessionManager.open(absPath, sessionDir);
   const state = await buildState({
-    projectName, db, auth: authOrErr.auth, sessionManager, needsPriming: false,
+    projectName, db, auth: authOrErr.auth, sessionManager,
   });
-  for (const l of carriedListeners) state.listeners.add(l);
   PROJECT_STATE.set(projectName, state);
 
   const history = renderHistory(state.session);
@@ -237,11 +262,11 @@ export async function deleteSession(
   const wasActive = cur?.activeSessionPath === absPath;
 
   // If we're killing the active session, abort+dispose first so pi releases
-  // the file handle and any in-flight prompt gets cancelled. Listeners are
-  // carried over so the SSE clients stay connected through the rebind.
-  let carriedListeners: Set<SessionListener> = new Set();
+  // the file handle and any in-flight prompt gets cancelled. Listeners
+  // remain in the project-wide `listenersFor(projectName)` Set across the
+  // tear-down + rebuild so SSE clients keep firing.
   if (wasActive) {
-    carriedListeners = await tearDown(projectName);
+    await tearDown(projectName);
   }
 
   try {
@@ -255,11 +280,10 @@ export async function deleteSession(
         try {
           const sm = SessionManager.continueRecent(PROJECT_ROOT, sessionDir);
           const state = await buildState({
-            projectName, db, auth: authOrErr.auth, sessionManager: sm, needsPriming: false,
+            projectName, db, auth: authOrErr.auth, sessionManager: sm,
           });
-          for (const l of carriedListeners) state.listeners.add(l);
           PROJECT_STATE.set(projectName, state);
-        } catch { /* leave PROJECT_STATE empty — getOrCreateSession will rebuild on next connect */ }
+        } catch { /* leave PROJECT_STATE empty — ensureActiveSession will rebuild on next connect */ }
       }
     }
     return { error: { message: `delete failed: ${(err as Error).message}` } };
@@ -281,9 +305,8 @@ export async function deleteSession(
     : SessionManager.create(PROJECT_ROOT, sessionDir);
 
   const state = await buildState({
-    projectName, db, auth: authOrErr.auth, sessionManager, needsPriming: !hasSurvivors,
+    projectName, db, auth: authOrErr.auth, sessionManager,
   });
-  for (const l of carriedListeners) state.listeners.add(l);
   PROJECT_STATE.set(projectName, state);
 
   // Tell connected clients: we switched (their old session is gone). For
@@ -341,26 +364,23 @@ interface BuildArgs {
   db: Db;
   auth: AuthSettings;
   sessionManager: SessionManager;
-  /**
-   * False for fresh sessions (we'll prepend the UI agent prompt to the
-   * user's first message), true for resumed sessions that already carry
-   * their priming turn in the JSONL.
-   */
-  needsPriming: boolean;
 }
 
 async function buildState(args: BuildArgs): Promise<PerProjectState> {
   const piAuth = buildPiAuth(args.auth);
 
   // Pre-allocate so the tools' closures see the eventual state object.
+  // The listeners Set is the project-wide one — every `buildState` returns
+  // a state pointing at the same `Set` instance, so SSE listeners survive
+  // every session swap (`newSession`, `activateSession`, `deleteSession`)
+  // without the route handler needing to re-register.
   const state: PerProjectState = {
     projectName: args.projectName,
     db: args.db,
     auth: args.auth,
     session: null as unknown as AgentSession,
     activeSessionPath: undefined,
-    needsPriming: args.needsPriming,
-    listeners: new Set(),
+    listeners: listenersFor(args.projectName),
     busy: false,
     abort: new AbortController(),
   };
@@ -372,8 +392,28 @@ async function buildState(args: BuildArgs): Promise<PerProjectState> {
   const customTools: ToolDefinition[] = [
     ...buildGraphTools(args.db, { allowInsert: false }),
     navigateTool,
+    // Global `secrets.loadIntoAgents` flag injects `exec_elevated` here.
+    // Listed in the tools allowlist too so the UI agent can actually call
+    // it when the flag is on — there's no per-skill gate for this agent.
+    ...maybeExecElevatedTool(),
   ];
   const toolNames = customTools.map(t => t.name);
+
+  // UI agent role/instructions go into pi's `appendSystemPrompt` — pi
+  // splices them into the system prompt on every turn, keeping the user
+  // turn (and the JSONL preview) clean. Resolved at session-build time
+  // so a hot-reloaded prompt picks up on the next "new chat" without a
+  // process restart. Failures are surfaced into the chat stream so the
+  // user sees them rather than silently running without instructions.
+  let appendSystemPrompt: string[] | undefined;
+  try {
+    appendSystemPrompt = [readFileSync(UI_AGENT_PROMPT_PATH, 'utf-8')];
+  } catch (err) {
+    broadcast(state, {
+      kind: 'agent',
+      event: { type: 'error', message: `failed to load ui-agent prompt: ${(err as Error).message}` },
+    });
+  }
 
   // Pi-native skill loader filtered by the project's `uiAgent` bucket —
   // the agent's `/skill:<name>` slash commands and system-prompt entries
@@ -382,6 +422,7 @@ async function buildState(args: BuildArgs): Promise<PerProjectState> {
     projectName: args.projectName,
     target: 'uiAgent',
     cwd: PROJECT_ROOT,
+    appendSystemPrompt,
   });
 
   const { session } = await createAgentSession({
@@ -408,32 +449,13 @@ async function buildState(args: BuildArgs): Promise<PerProjectState> {
 }
 
 async function runPrompt(state: PerProjectState, text: string): Promise<void> {
-  // On the first user turn of a fresh session, prepend the UI agent
-  // prompt. We embed it as the same prompt() so pi sees a single user
-  // message — that keeps `SessionInfo.firstMessage` aligned with what the
-  // user actually typed (renderHistory drops the priming preamble by
-  // length heuristic; the session-list preview uses pi's own truncation
-  // and only shows the first ~80 chars, so as long as the user's text
-  // comes FIRST the preview reads right).
-  let payload = text;
-  if (state.needsPriming) {
-    try {
-      const uiPrompt = readFileSync(UI_AGENT_PROMPT_PATH, 'utf-8');
-      // User text first, then the system instructions tucked behind a
-      // separator. Pi's first-message extractor reads the literal head of
-      // the first user message, so leading with the real query keeps the
-      // session-switcher preview meaningful.
-      payload = `${text}\n\n---\n\n<system-instructions>\n${uiPrompt}\n</system-instructions>`;
-    } catch (err) {
-      broadcast(state, {
-        kind: 'agent',
-        event: { type: 'error', message: `failed to load ui-agent prompt: ${(err as Error).message}` },
-      });
-    }
-    state.needsPriming = false;
-  }
+  // Role instructions land in `appendSystemPrompt` on the resource
+  // loader (see `buildState` below); pi splices them into the system
+  // prompt on every turn, so we no longer need to prepend them to the
+  // user's first message. The session JSONL stays clean — each user
+  // turn is exactly what the user typed.
   try {
-    await state.session.prompt(payload);
+    await state.session.prompt(text);
   } catch (err) {
     broadcast(state, {
       kind: 'agent',
@@ -446,18 +468,18 @@ async function runPrompt(state: PerProjectState, text: string): Promise<void> {
 
 /**
  * Drop the active session for a project (abort + dispose), preserving the
- * JSONL on disk. Returns the listener set so the caller can hand it to the
- * replacement session — that's how SSE clients stay connected across
- * switches without having to reconnect.
+ * JSONL on disk. The project's listener Set lives in
+ * `PROJECT_LISTENERS` and is shared with every freshly-built state, so
+ * tear-down doesn't touch listener registrations — SSE clients stay
+ * connected across switches without reconnecting.
  */
-async function tearDown(projectName: string): Promise<Set<SessionListener>> {
+async function tearDown(projectName: string): Promise<void> {
   const prev = PROJECT_STATE.get(projectName);
-  if (!prev) return new Set();
+  if (!prev) return;
   try { prev.abort.abort(); } catch { /* ok */ }
   try { await raceWithTimeout(prev.session.abort(), 3_000); } catch { /* ignore */ }
   try { prev.session.dispose(); } catch { /* ok */ }
   PROJECT_STATE.delete(projectName);
-  return prev.listeners;
 }
 
 function broadcast(state: PerProjectState, env: AgentEnvelope): void {
@@ -466,31 +488,102 @@ function broadcast(state: PerProjectState, env: AgentEnvelope): void {
   }
 }
 
-function renderHistory(session: AgentSession): HistoryItem[] {
+/**
+ * Render a session's persisted messages into the flat scrollback shape the
+ * web UI expects. Walks every message in order, emitting:
+ *
+ *   - user messages → `{ role: 'user', text }`
+ *   - assistant messages → in source order: each `toolCall` block becomes
+ *     a `{ role: 'tool', toolName, text }` chip; the remaining text
+ *     content becomes a single `{ role: 'agent', text }` bubble at the
+ *     end (matches the live-stream rendering where text arrives via
+ *     `message_end` after every `tool_execution_start` for the same
+ *     turn).
+ *   - toolResult messages → patch the matching `tool` chip with
+ *     `toolError: true` so failures stay visible across session swaps.
+ *
+ * Without the tool chips, switching between sessions in the popover
+ * silently wiped every previously-rendered tool call from the chat.
+ */
+export function renderHistory(session: AgentSession): HistoryItem[] {
   const out: HistoryItem[] = [];
+  // Index tool chips by toolCallId so toolResult messages can flip the
+  // error flag in place.
+  const toolByCallId = new Map<string, { role: 'tool'; toolName: string; text: string; toolError?: boolean }>();
+
   for (const msg of session.messages) {
-    // Pi's AgentMessage union — we only care about role-tagged ones with
-    // text content. ToolResult messages and assistant tool_call segments
-    // are skipped (history replay shows the conversation, not the work).
-    const m = msg as { role?: string; content?: unknown };
-    if (m.role !== 'user' && m.role !== 'assistant') continue;
-    let text = extractText(m.content);
-    if (!text) continue;
-    // The first user turn of any fresh session has the UI agent prompt
-    // appended behind a `---\n<system-instructions>…</system-instructions>`
-    // delimiter (see runPrompt). Strip it from history so the user only
-    // sees what they actually typed.
-    text = stripSystemInstructions(text);
-    if (!text) continue;
-    out.push({ role: m.role === 'user' ? 'user' : 'agent', text });
+    const m = msg as { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean };
+
+    if (m.role === 'user') {
+      let text = extractText(m.content);
+      if (!text) continue;
+      // Back-compat: sessions captured before we moved instructions to
+      // `appendSystemPrompt` had the UI agent prompt appended behind a
+      // `\n---\n<system-instructions>…</system-instructions>` delimiter
+      // on the first user turn. Strip that suffix when replaying legacy
+      // JSONLs so the user only sees what they actually typed.
+      text = stripLegacySystemInstructions(text);
+      if (!text) continue;
+      out.push({ role: 'user', text });
+      continue;
+    }
+
+    if (m.role === 'assistant') {
+      // Surface tool calls in source order alongside the assistant's
+      // text, mirroring the live event stream (tool_execution_start
+      // chips interleave with message_end text).
+      if (Array.isArray(m.content)) {
+        for (const block of m.content as Array<{ type?: string; id?: string; name?: string; arguments?: unknown }>) {
+          if (block?.type !== 'toolCall') continue;
+          const chip: { role: 'tool'; toolName: string; text: string; toolError?: boolean } = {
+            role: 'tool',
+            toolName: block.name ?? '?',
+            text: describeToolCall(block.name ?? '?', block.arguments),
+          };
+          out.push(chip);
+          if (block.id) toolByCallId.set(block.id, chip);
+        }
+      }
+      const text = extractText(m.content);
+      if (text) out.push({ role: 'agent', text });
+      continue;
+    }
+
+    if (m.role === 'toolResult') {
+      if (m.isError && m.toolCallId) {
+        const chip = toolByCallId.get(m.toolCallId);
+        if (chip) chip.toolError = true;
+      }
+      // Tool result text isn't surfaced in the UI today (live stream
+      // doesn't render it either) — only the error flag matters here.
+      continue;
+    }
   }
   return out;
 }
 
-function stripSystemInstructions(text: string): string {
+/**
+ * One-line chip text for a persisted tool call. Mirrors the live-side
+ * `describeToolCall` in the webui — keep them in sync.
+ */
+function describeToolCall(name: string, args: unknown): string {
+  let body = '';
+  if (args && typeof args === 'object') {
+    const obj = args as Record<string, unknown>;
+    const primary =
+      obj['query'] ?? obj['pattern'] ?? obj['value'] ?? obj['id'] ?? obj['nodeId'] ?? obj['name'];
+    if (typeof primary === 'string') body = primary;
+    else body = JSON.stringify(obj);
+  } else {
+    body = String(args ?? '');
+  }
+  if (body.length > 80) body = body.slice(0, 77) + '…';
+  return `${name} ${body}`.trim();
+}
+
+function stripLegacySystemInstructions(text: string): string {
   const idx = text.indexOf('<system-instructions>');
   if (idx === -1) return text;
-  // Also peel off the preceding "\n\n---\n\n" separator we wrote alongside.
   return text.slice(0, idx).replace(/\n+---\n*$/, '').trimEnd();
 }
 

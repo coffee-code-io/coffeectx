@@ -12,7 +12,8 @@ const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuest
 
 interface EventSnapshot {
   id: string;
-  timestamp: string;
+  /** Unix ms — sourced from the node's first-class `created_at` column. */
+  createdAt: number;
   sessionId: string;
   typeName: string;
   summary: unknown;
@@ -97,10 +98,11 @@ function loadNewEventsGroupedBySession(
       const sessionId = getSymbolValue(node.entries['sessionId']);
       if (!sessionId) continue;
 
-      // AgentSummary has no timestamp; use empty string so it sorts first
-      // within the session (it's a session-level header).
-      const timestamp = getSymbolValue(node.entries['timestamp']) ?? '';
-      const snap: EventSnapshot = { id, timestamp, sessionId, typeName, summary: formatDeepNode(node) };
+      // Use the node's first-class `created_at` as the chronological anchor.
+      // Falls back to 0 when missing so legacy rows (from before this column
+      // existed) sort to the front rather than blowing up.
+      const createdAt = db.getNodeTimestamps(id)?.createdAt ?? 0;
+      const snap: EventSnapshot = { id, createdAt, sessionId, typeName, summary: formatDeepNode(node) };
       if (!sessions.has(sessionId)) sessions.set(sessionId, []);
       sessions.get(sessionId)!.push(snap);
     } catch {
@@ -109,7 +111,7 @@ function loadNewEventsGroupedBySession(
   }
 
   for (const events of sessions.values()) {
-    events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    events.sort((a, b) => a.createdAt - b.createdAt);
   }
 
   return { sessions, total: allEventIds.length, skipped };

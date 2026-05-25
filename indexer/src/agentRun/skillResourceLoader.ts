@@ -47,6 +47,13 @@ export interface BuildResourceLoaderOptions {
    * our use (we don't ship coffeectx skills via pi's per-user dir).
    */
   agentDir?: string;
+  /**
+   * Role-specific instructions appended to pi's base system prompt. The
+   * loader exposes these via `getAppendSystemPrompt()` and pi splices
+   * them into the system prompt on every turn — no more prepending the
+   * role text to the user's first message.
+   */
+  appendSystemPrompt?: string[];
 }
 
 export async function buildResourceLoader(opts: BuildResourceLoaderOptions): Promise<ResourceLoader> {
@@ -68,6 +75,7 @@ export async function buildResourceLoader(opts: BuildResourceLoaderOptions): Pro
       skills: applySkillFilter(base.skills, filter),
       diagnostics: base.diagnostics,
     }),
+    appendSystemPrompt: opts.appendSystemPrompt,
   });
 
   // Pi populates the loader lazily; `reload()` forces the first scan so

@@ -16,12 +16,14 @@
 import type { FastifyInstance } from 'fastify';
 import { getDb } from '../dbPool.js';
 import {
-  getOrCreateSession,
+  ensureActiveSession,
+  getActiveSession,
   sendMessage,
   newSession,
   activateSession,
   deleteSession,
   listProjectSessions,
+  renderHistory,
   type AgentEnvelope,
   type SessionListener,
 } from '../agentSessions.js';
@@ -35,7 +37,11 @@ export async function registerAgentRoutes(app: FastifyInstance): Promise<void> {
       try { db = getDb(req.params.p); }
       catch (err) { reply.code(404); return { error: (err as Error).message }; }
 
-      const session = await getOrCreateSession(req.params.p, db);
+      // SSE stream first-connect is the *only* path that auto-resumes the
+      // most-recent JSONL. Message routing (below) no longer falls back to
+      // continueRecent — that was the source of the "client says A, server
+      // sends to B" bug.
+      const session = await ensureActiveSession(req.params.p, db);
       reply.raw.setHeader('Content-Type', 'text/event-stream');
       reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
       reply.raw.setHeader('Connection', 'keep-alive');
@@ -53,7 +59,17 @@ export async function registerAgentRoutes(app: FastifyInstance): Promise<void> {
         return;
       }
 
-      writeEnvelope({ kind: 'ready', activeSessionPath: session.activeSessionPath });
+      // Include the resumed session's history so the client can render
+       // the scrollback on connect — without this, a page reload showed
+       // an empty chat panel while the popover still marked the session
+       // as "active", making history-clicks on it short-circuit (=
+       // looked broken).
+      const history = renderHistory(session.session);
+      writeEnvelope({
+        kind: 'ready',
+        activeSessionPath: session.activeSessionPath,
+        history,
+      });
 
       // The "listener" is the per-connection thing. After a session switch
       // the agentSessions module reattaches the same Set instance to the
@@ -71,8 +87,9 @@ export async function registerAgentRoutes(app: FastifyInstance): Promise<void> {
 
       const cleanup = () => {
         clearInterval(keepAlive);
-        // Best effort: the listener Set may have been swapped out by a
-        // session switch. Delete from BOTH the original and the current.
+        // The listener Set is project-wide and shared with every state
+        // built across session swaps — deleting once removes it from the
+        // single source of truth.
         session.listeners.delete(listener);
       };
       req.raw.on('close', cleanup);
@@ -95,10 +112,19 @@ export async function registerAgentRoutes(app: FastifyInstance): Promise<void> {
       try { db = getDb(req.params.p); }
       catch (err) { reply.code(404); return { error: (err as Error).message }; }
 
-      const session = await getOrCreateSession(req.params.p, db);
-      if ('error' in session) {
-        reply.code(412);
-        return { error: session.error.message, reason: session.error.reason };
+      // Trust the SSE layer to have established an active session. If the
+      // user never opened the chat panel (no active session in memory),
+      // create a fresh JSONL rather than resuming the most-recent one on
+      // disk — otherwise an explicit history pick could be silently
+      // overridden by `continueRecent`.
+      let session = getActiveSession(req.params.p);
+      if (!session) {
+        const r = await newSession(req.params.p, db);
+        if ('error' in r) {
+          reply.code(412);
+          return { error: r.error.message, reason: r.error.reason };
+        }
+        session = r;
       }
 
       try {

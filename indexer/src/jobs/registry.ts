@@ -138,7 +138,7 @@ function buildClaudeJob(config: CoffeectxConfig, projectName: string): Job {
   return {
     name: 'claude',
     description: 'Index Claude Code JSONL session logs.',
-    defaultEnabled: true,
+    defaultEnabled: false,
     triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_AGENTLOG_INTERVAL_MS) }],
     async run(ctx) {
       const path = readString(ctx.parameters, 'path');
@@ -166,13 +166,12 @@ function buildClaudeJob(config: CoffeectxConfig, projectName: string): Job {
 
 function buildCodexJob(config: CoffeectxConfig, projectName: string): Job {
   const params = projectJobParams(config, projectName, 'codex');
-  const statePath = readString(params, 'statePath') ?? DEFAULT_CODEX_STATE_PATH;
-  // Default-enable iff codex appears to be installed for this user.
-  const defaultEnabled = existsSync(statePath);
   return {
     name: 'codex',
     description: 'Index OpenAI Codex CLI sessions from ~/.codex/.',
-    defaultEnabled,
+    // Every job now defaults to off — being in config.yaml is the explicit
+    // signal that the user wants this job running.
+    defaultEnabled: false,
     triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_AGENTLOG_INTERVAL_MS) }],
     async run(ctx) {
       const sp = readString(ctx.parameters, 'statePath') ?? DEFAULT_CODEX_STATE_PATH;
@@ -230,7 +229,7 @@ function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
   return {
     name: 'plans',
     description: 'Ingest Claude plan-mode markdown files from ~/.claude/plans/.',
-    defaultEnabled: true,
+    defaultEnabled: false,
     triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_PLANS_INTERVAL_MS) }],
     async run(ctx) {
       const plansDir = readString(ctx.parameters, 'plansDir') ?? DEFAULT_PLANS_DIR;
@@ -329,7 +328,7 @@ function buildLocalDecisionsJob(config: CoffeectxConfig, projectName: string): J
     name: 'local-decisions',
     description: 'Extract local decisions, implementation choices, and concrete change events from agent session events.',
     prompt: loadPrompt('local-decisions.md'),
-    defaultEnabled: true,
+    defaultEnabled: false,
     triggers: [
       { kind: 'onNodeState', typeNames: SKILL_TRIGGER_TYPES, state: 'linked' },
       { kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_SKILL_FALLBACK_INTERVAL_MS) },
@@ -404,6 +403,7 @@ function buildUserSkillJob(skill: Skill, config: CoffeectxConfig, projectName: s
         prompt: skill.body,
         auth,
         requiredEnv: skill.requiredEnv,
+        allowedTools: skill.allowedTools,
         signal: ctx.signal,
       });
       return {

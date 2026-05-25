@@ -70,6 +70,10 @@ export interface StoredNode {
   // meaningVec stored separately in vec0 virtual table
   // For maps
   typeId?: string;
+  /** Unix ms, set only on `kind='map'` rows. */
+  createdAt?: number;
+  /** Unix ms, set only on `kind='map'` rows. */
+  updatedAt?: number;
 }
 
 export interface StoredType {
@@ -88,7 +92,18 @@ export interface StoredType {
 export type DeepNode =
   | { kind: 'atom'; atom: Atom }
   | { kind: 'list'; items: DeepNode[] }
-  | { kind: 'map'; id?: string; entries: Record<Sym, DeepNode>; type: Type; typeName?: string; state?: string }
+  | {
+      kind: 'map';
+      id?: string;
+      entries: Record<Sym, DeepNode>;
+      type: Type;
+      typeName?: string;
+      state?: string;
+      /** Unix ms. Present iff the node was loaded from a stored row. */
+      createdAt?: number;
+      /** Unix ms. Present iff the node was loaded from a stored row. */
+      updatedAt?: number;
+    }
   | { kind: 'ref'; id: string }
   | { kind: 'cycle'; id: string };
 
@@ -118,6 +133,17 @@ export interface InsertEntry {
    * explicit `$state` are rejected as immutable.
    */
   state?: string;
+  /**
+   * Optional explicit `created_at` / `updated_at` overrides (Unix
+   * milliseconds since epoch). Tools accept ISO strings or numbers and
+   * normalise to ms here.
+   *
+   * On inserts: both default to `Date.now()` when omitted.
+   * On patches: `updated_at` defaults to `Date.now()` (always bumped);
+   *   `createdAt` is ignored (the original creation timestamp is preserved).
+   */
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface InsertResult {

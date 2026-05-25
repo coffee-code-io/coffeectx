@@ -115,7 +115,17 @@ const ResolveSymbolsParams = Type.Object({
 
 const UpsertEntriesParams = Type.Object({
   entries: Type.Array(
-    Type.Object({ $type: Type.String(), $id: Type.Optional(Type.String()) }, { additionalProperties: true }),
+    Type.Object(
+      {
+        $type: Type.String(),
+        $id: Type.Optional(Type.String()),
+        // $created_at / $updated_at are optional overrides for the auto-set
+        // node timestamps. Accept ISO-8601 strings or numeric ms.
+        $created_at: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+        $updated_at: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+      },
+      { additionalProperties: true },
+    ),
     { minItems: 1, description: 'Array of entries. "$type" is required.' },
   ),
 });

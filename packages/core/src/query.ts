@@ -10,7 +10,11 @@
  *               | TypeQuery                                     -- filter by named type
  *               | MapQuery                                      -- filter map nodes by fields
  *               | ListQuery                                     -- filter list nodes by items
+ *               | TimeQuery                                     -- filter map nodes by created_at / updated_at
  *               | '(' Query ')'                                 -- grouping
+ *
+ *   TimeQuery   = ('CreatedBefore' | 'CreatedAfter'
+ *                 | 'UpdatedBefore' | 'UpdatedAfter') STRING    -- ISO-8601 or numeric ms
  *
  *   TypeQuery   = 'IsType' STRING (',' 'IsType' STRING)*        -- OR semantics
  *   MapQuery    = 'Field' STRING SubQuery (',' 'Field' STRING SubQuery)*  -- AND semantics
@@ -40,6 +44,7 @@ export type QueryClause =
   | { kind: 'TypeQuery'; types: string[] } // OR across IsType values
   | { kind: 'MapQuery'; fields: MapField[] } // AND across fields
   | { kind: 'ListQuery'; item: Query }
+  | { kind: 'TimeQuery'; field: 'created_at' | 'updated_at'; op: 'before' | 'after'; ms: number }
   | { kind: 'Group'; inner: QueryClause };
 
 export interface MapField {
@@ -49,7 +54,35 @@ export interface MapField {
 
 // ── Lexer ─────────────────────────────────────────────────────────────────────
 
-const KEYWORDS = new Set(['Symbol', 'Regex', 'Meaning', 'Id', 'IsType', 'Field', 'HasItem']);
+const KEYWORDS = new Set([
+  'Symbol', 'Regex', 'Meaning', 'Id', 'IsType', 'Field', 'HasItem',
+  'CreatedBefore', 'CreatedAfter', 'UpdatedBefore', 'UpdatedAfter',
+]);
+
+const TIME_KEYWORDS: Record<string, { field: 'created_at' | 'updated_at'; op: 'before' | 'after' }> = {
+  CreatedBefore: { field: 'created_at', op: 'before' },
+  CreatedAfter:  { field: 'created_at', op: 'after'  },
+  UpdatedBefore: { field: 'updated_at', op: 'before' },
+  UpdatedAfter:  { field: 'updated_at', op: 'after'  },
+};
+
+/** Accept either ISO-8601 strings or numeric-ms strings. Numeric form lets
+ *  callers persist exact timestamps round-trip; ISO is the readable default. */
+function parseTimeArg(raw: string): number {
+  const trimmed = raw.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n < 0) {
+      throw new Error(`Time argument must be a non-negative ms value, got ${raw}`);
+    }
+    return n;
+  }
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) {
+    throw new Error(`Time argument is not a valid ISO-8601 string or ms number: ${JSON.stringify(raw)}`);
+  }
+  return ms;
+}
 
 type Token =
   | { type: 'KW'; value: string }
@@ -183,6 +216,15 @@ class Parser {
         this.consume();
         return { kind: 'ListQuery', item: this.parseSubQuery() };
       }
+      case 'CreatedBefore':
+      case 'CreatedAfter':
+      case 'UpdatedBefore':
+      case 'UpdatedAfter': {
+        this.consume();
+        const spec = TIME_KEYWORDS[t.value]!;
+        const raw = this.expectStr();
+        return { kind: 'TimeQuery', field: spec.field, op: spec.op, ms: parseTimeArg(raw) };
+      }
       default:
         throw new Error(`Unknown keyword '${t.value}'`);
     }
@@ -257,6 +299,10 @@ export interface QueryDb {
   queryByNamedType(names: string[]): string[];
   queryMapsByField(key: string, valueIds: string[]): string[];
   queryListsByItem(itemIds: string[]): string[];
+  /** Range query against `nodes.created_at` / `updated_at` (kind='map' only).
+   *  `ms` is a Unix millisecond cutoff. `op === 'before'` returns rows with
+   *  the column strictly less than `ms`; `'after'` is strictly greater. */
+  queryByTime(field: 'created_at' | 'updated_at', op: 'before' | 'after', ms: number): string[];
 }
 
 export async function executeQuery(query: Query, db: QueryDb): Promise<string[]> {
@@ -322,6 +368,9 @@ async function executeClause(clause: QueryClause, db: QueryDb): Promise<string[]
       const itemIds = await executeQuery(clause.item, db);
       return db.queryListsByItem(itemIds);
     }
+
+    case 'TimeQuery':
+      return db.queryByTime(clause.field, clause.op, clause.ms);
 
     case 'Group':
       return executeClause(clause.inner, db);
