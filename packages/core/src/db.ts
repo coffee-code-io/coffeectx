@@ -5,6 +5,7 @@ import { SCHEMA_DDL, makeVecTableDDL } from './schema.js';
 import type { Node, Type, Atom, Sym, EmbedFn, SearchResult, StoredNode, DeepNode, InsertEntry, InsertResult } from './types.js';
 import type { QueryDb } from './query.js';
 import { populateNodeRefsFor, rebuildNodeRefs } from './nodeRefs.js';
+import { extractRequiredLiterals, ftsPhrase } from './regexLiterals.js';
 
 import { log } from './logger.js';
 
@@ -1420,18 +1421,66 @@ export class Db implements QueryDb {
   }
 
   querySymbolExact(value: string): string[] {
+    // Trigram phrase queries need ≥3 chars (FTS5 generates no trigrams
+    // for shorter input). For 1- or 2-char values fall back to the
+    // legacy scan — the candidate set is small at those sizes and
+    // FTS5 would return zero rows regardless.
+    if (value.length < 3) {
+      const rows = this.raw
+        .prepare(`SELECT id FROM nodes WHERE kind='symbol' AND symbol_value=?`)
+        .all(value) as { id: string }[];
+      return rows.map(r => r.id);
+    }
+    // MATCH narrows on case-insensitive substring containment; the
+    // `n.symbol_value = ?` clause re-imposes today's BINARY-collation
+    // case-sensitive equality on the (now-small) candidate set.
     const rows = this.raw
-      .prepare(`SELECT id FROM nodes WHERE kind='symbol' AND symbol_value=?`)
-      .all(value) as { id: string }[];
+      .prepare(
+        `SELECT n.id FROM nodes_fts f
+           JOIN nodes n ON n.id = f.node_id
+          WHERE n.kind = 'symbol'
+            AND f.text MATCH ?
+            AND n.symbol_value = ?`,
+      )
+      .all(ftsPhrase(value), value) as { id: string }[];
     return rows.map(r => r.id);
   }
 
   /** Matches symbol_value for kind='symbol' nodes AND meaning_text for kind='meaning' nodes. */
   querySymbolRegex(pattern: string): string[] {
+    // Step 1: pull required-literal substrings (length ≥ 3) the regex
+    // forces every match to contain. Patterns where no such literal is
+    // extractable (top-level alternation, pure char-class queries,
+    // `^\d+$` style…) fall back to today's REGEXP UDF full scan.
+    const literals = extractRequiredLiterals(pattern);
+    if (literals.length === 0) {
+      const rows = this.raw
+        .prepare(
+          `SELECT id FROM nodes
+             WHERE (kind='symbol'  AND regexp(?, symbol_value))
+                OR (kind='meaning' AND regexp(?, meaning_text))`,
+        )
+        .all(pattern, pattern) as { id: string }[];
+      return rows.map(r => r.id);
+    }
+    // Step 2: AND every literal into one FTS5 phrase query — rows that
+    // pass contain ALL required literals as substrings. JS RegExp then
+    // re-verifies on the (much smaller) candidate set so semantics stay
+    // identical to the legacy full scan.
+    const matchExpr = literals.map(ftsPhrase).join(' AND ');
     const rows = this.raw
-      .prepare(`SELECT id FROM nodes WHERE (kind='symbol' AND regexp(?, symbol_value)) OR (kind='meaning' AND regexp(?, meaning_text))`)
-      .all(pattern, pattern) as { id: string }[];
-    return rows.map(r => r.id);
+      .prepare(
+        `SELECT n.id, n.kind, n.symbol_value AS sv, n.meaning_text AS mt
+           FROM nodes_fts f
+           JOIN nodes n ON n.id = f.node_id
+          WHERE n.kind IN ('symbol', 'meaning')
+            AND f.text MATCH ?`,
+      )
+      .all(matchExpr) as Array<{ id: string; kind: string; sv: string | null; mt: string | null }>;
+    const re = new RegExp(pattern, 'i');
+    return rows
+      .filter(r => re.test(r.kind === 'symbol' ? (r.sv ?? '') : (r.mt ?? '')))
+      .map(r => r.id);
   }
 
   async queryMeaning(text: string, limit: number): Promise<string[]> {

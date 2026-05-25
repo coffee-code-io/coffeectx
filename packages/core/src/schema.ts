@@ -176,6 +176,42 @@ CREATE TABLE IF NOT EXISTS node_refs (
   PRIMARY KEY (src_id, dst_id, field_path)
 );
 
+-- Trigram FTS5 index over atom text. Speeds up querySymbolExact and
+-- querySymbolRegex: phrase MATCH narrows candidates by substring
+-- containment in O(log n), then SQL equality (exact) or JS RegExp
+-- (regex) verifies on the small candidate set. Case-insensitive trigrams
+-- match how the legacy REGEXP UDF behaves today. Maps stay out of the
+-- index — they have no inline text.
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+  text,
+  node_id UNINDEXED,
+  tokenize = 'trigram case_sensitive 0'
+);
+
+-- Auto-sync triggers: every symbol/meaning atom INSERT/UPDATE/DELETE on
+-- nodes keeps nodes_fts consistent without callers having to write
+-- twice. Lets us add the FTS index without touching the ~6 INSERT sites
+-- in db.ts.
+CREATE TRIGGER IF NOT EXISTS nodes_ai_fts AFTER INSERT ON nodes
+  WHEN NEW.kind IN ('symbol', 'meaning')
+BEGIN
+  INSERT INTO nodes_fts(node_id, text)
+  VALUES (NEW.id, COALESCE(NEW.symbol_value, NEW.meaning_text));
+END;
+
+CREATE TRIGGER IF NOT EXISTS nodes_au_fts AFTER UPDATE ON nodes
+  WHEN NEW.kind IN ('symbol', 'meaning')
+BEGIN
+  DELETE FROM nodes_fts WHERE node_id = OLD.id;
+  INSERT INTO nodes_fts(node_id, text)
+  VALUES (NEW.id, COALESCE(NEW.symbol_value, NEW.meaning_text));
+END;
+
+CREATE TRIGGER IF NOT EXISTS nodes_ad_fts AFTER DELETE ON nodes
+BEGIN
+  DELETE FROM nodes_fts WHERE node_id = OLD.id;
+END;
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_nodes_kind         ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_created_at   ON nodes(created_at);

@@ -1,0 +1,192 @@
+# Reference ~/.coffeecode/config.yaml.
+#
+# Copy to ~/.coffeecode/config.yaml and prune sections you don't need.
+# Every block here is optional — coffeectx ships defaults for everything
+# except `projects.<name>.db` (which `retrival-index init` writes for you).
+#
+# Schema reference: packages/core/src/config.ts (interface CoffeectxConfig).
+
+# Default project for CLI commands when `--project` is omitted.
+active: my-project
+
+# Global type-loading. Builtin types live under packages/core/builtin-types/
+# and are filtered via include/exclude (names without `.yaml`). `userDir`
+# is scanned for extra type YAMLs at sync time.
+types:
+  # include: [code, decision, agent-log]   # whitelist (omit = all)
+  # exclude: [api]                          # blacklist (used when include is empty)
+  userDir: ~/.coffeecode/types
+
+# Wire @coffeectx/secrets-pi's `exec_elevated` tool into every in-process
+# agent (UI / indexing / user jobs). User-job skills still need to opt in
+# via SKILL.md `allowed-tools: exec_elevated, ...`. Default: false.
+secrets:
+  loadIntoAgents: false
+
+projects:
+  my-project:
+    # Created and updated by `retrival-index init` / `use`. Both fields
+    # must point at real paths; the DB file is auto-created on first open.
+    db: ~/.coffeecode/db/my-project.db
+    repoPath: /Users/you/code/my-project
+    created: "2026-05-25T00:00:00Z"
+    enabled: true
+
+    # ── Embedding provider ─────────────────────────────────────────────
+    # Used for Meaning vectors. The `dimensions` value MUST match the
+    # live DB — changing it requires re-init. Stub returns zero vectors
+    # (useful for tests / no-network setups).
+    core:
+      embed:
+        provider: openai            # stub | openai | openrouter | ollama
+        model: text-embedding-3-small
+        dimensions: 128
+        apiKey: sk-...
+        # baseUrl: https://api.openai.com/v1      # provider-default if omitted
+
+    # ── MCP server tool toggles ────────────────────────────────────────
+    # Controls which tools the external MCP server (mcp/) exposes to
+    # Claude Desktop & co. The in-process UI/indexing agents are
+    # unaffected — they wire their own allowlists in code.
+    mcp:
+      tools:
+        search:    true
+        exact:     true
+        regex:     true
+        raw_query: true
+        load_node: true
+        insert:    false             # writes default OFF
+
+    # ── UI agent auth ──────────────────────────────────────────────────
+    # The right-sidebar chat in the webui. Without this the panel shows
+    # a "configure agent.auth" hint and refuses to spawn a session.
+    agent:
+      auth:
+        authType: anthropic         # openai | anthropic | openrouter | google | xai | …
+        model: claude-sonnet-4-6
+        apiKey: sk-ant-...
+
+    # ── Per-agent skill visibility ─────────────────────────────────────
+    # Three buckets, all optional. Each shapes as { include?, exclude? }:
+    #   - include non-empty → whitelist (skill visible iff in list)
+    #   - else exclude        → blacklist
+    #   - both empty/absent   → all skills visible to that agent
+    #
+    # Skills are loaded from ~/.coffeecode/skills/ (plain agent skills)
+    # and ~/.coffeecode/jobs/ (job-shaped skills); the same name shows
+    # up in the picker for whichever agents pass its filter.
+    skills:
+      uiAgent:
+        exclude: [obsidian-worklog]  # don't surface job-shaped skills to the UI agent
+      indexingAgents:
+        # whitelist nothing extra → indexers see no user skills
+        include: []
+      jobs:
+        # default (omit) → every user-installed job-shaped skill loadable
+
+    # ── Scheduled jobs ─────────────────────────────────────────────────
+    # The invariant: `enabled: true` requires an entry here. Available
+    # (= no entry) jobs always stay off. Built-ins also need `enabled`
+    # toggled explicitly — there are no implicit defaults.
+    jobs:
+      # Index Claude Code JSONL session logs.
+      claude:
+        enabled: true
+        parameters:
+          path: /Users/you/.claude/projects/-Users-you-code-my-project
+          # newerThan: "2026-01-01T00:00:00Z"      # skip older sessions
+          # intervalMs: 30000                        # default: 30s
+
+      # Index OpenAI Codex CLI sessions. Default state path:
+      # ~/.codex/state_5.sqlite (override with `statePath`).
+      codex:
+        enabled: false
+        parameters:
+          # statePath: ~/.codex/state_5.sqlite
+          # intervalMs: 30000
+
+      # Index pi.dev sessions from a directory of JSONL files.
+      pi:
+        enabled: false
+        parameters:
+          # sessionsPath: ~/.pi/agent/sessions/<project>
+          # intervalMs: 30000
+
+      # Ingest Claude plan-mode markdown files.
+      plans:
+        enabled: true
+        parameters:
+          # plansDir: ~/.claude/plans                # default
+          # intervalMs: 300000                       # default: 5m
+
+      # LSP source indexing. You can have several with `lsp:<suffix>`
+      # keys (e.g. `lsp:python`) and each gets its own parameter block.
+      lsp:
+        enabled: false
+        parameters:
+          # repoPath defaults to the project's top-level `repoPath` when
+          # omitted, so this only needs setting for non-default trees.
+          # repoPath: /Users/you/code/my-project/server
+          lspCommand: "typescript-language-server --stdio"
+          # intervalMs: 600000                       # default: 10m
+
+      # Agent over new agent-log events. Extracts decisions / change
+      # events / choices into typed graph nodes.
+      local-decisions:
+        enabled: true
+        parameters:
+          auth:
+            authType: anthropic
+            model: claude-sonnet-4-6
+            apiKey: sk-ant-...
+          # batchStep: 10                            # events per LLM turn
+          # intervalMs: 600000                       # fallback timer; usually fires via onNodeState
+
+      # Agent that patches comments onto LSP* symbol nodes touched by
+      # recent file operations. Off by default — opt in if you want it.
+      lsp-enrichment:
+        enabled: false
+        parameters:
+          auth:
+            authType: anthropic
+            model: claude-sonnet-4-6
+            apiKey: sk-ant-...
+
+      # ── User-installed skill jobs ─────────────────────────────────────
+      # One block per ~/.coffeecode/jobs/<dir>/SKILL.md that you want to
+      # run. The key is the skill directory name.
+      obsidian-worklog:
+        enabled: false
+        # Triggers override the SKILL.md `coffeecode.job.triggers`
+        # defaults wholesale (no merging). Drop this block to use the
+        # SKILL.md defaults.
+        triggers:
+          - kind: cron
+            expression: "0 9 * * *"   # every day at 09:00 local
+        # Env values exposed to the skill's prompt preamble (the agent
+        # has no JS sandbox, so it sees these as literal values).
+        env:
+          OBSIDIAN_VAULT: /Users/you/Documents/MyVault
+        parameters:
+          auth:
+            authType: anthropic
+            model: claude-sonnet-4-6
+            apiKey: sk-ant-...
+
+  # ── A second project, sharing the same on-disk layout ──────────────
+  # Keep one block per repo you index. The UI/MCP route by cwd to the
+  # project whose `repoPath` is the longest prefix of the request's cwd.
+  scratch:
+    db: ~/.coffeecode/db/scratch.db
+    repoPath: /Users/you/code/scratch
+    created: "2026-05-25T00:00:00Z"
+    enabled: true
+    core:
+      embed:
+        provider: stub                # no network — zero vectors
+        dimensions: 128
+    agent:
+      auth:
+        authType: anthropic
+        model: claude-haiku-4-5
+        apiKey: sk-ant-...
