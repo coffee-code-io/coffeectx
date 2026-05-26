@@ -74,6 +74,14 @@ export interface StoredNode {
   createdAt?: number;
   /** Unix ms, set only on `kind='map'` rows. */
   updatedAt?: number;
+  /** Always populated; for unversioned nodes equals `id`. */
+  timelineId?: string;
+  /** Always populated; defaults to 1. Bumps on `bumpVersion` upserts. */
+  version?: number;
+  /** 1 iff the row is hidden from search-path queries. The row remains
+   *  loadable by exact id. Set by version bumps (prior versions) and
+   *  by the `delete` flag on `upsertEntries`. */
+  tombstone?: boolean;
 }
 
 export interface StoredType {
@@ -103,6 +111,13 @@ export type DeepNode =
       createdAt?: number;
       /** Unix ms. Present iff the node was loaded from a stored row. */
       updatedAt?: number;
+      /** Always populated; for unversioned nodes equals `id`. */
+      timelineId?: string;
+      /** Always populated; 1-based version within the timeline. */
+      version?: number;
+      /** True iff the node is tombstoned (deleted or superseded). The
+       *  exact id still loads — debug-mode UIs can surface the row. */
+      tombstone?: boolean;
     }
   | { kind: 'ref'; id: string }
   | { kind: 'cycle'; id: string };
@@ -144,6 +159,32 @@ export interface InsertEntry {
    */
   createdAt?: number;
   updatedAt?: number;
+  /**
+   * Only meaningful with `id` set, and only valid for types declaring
+   * `withHistory: true`. Allocates a fresh node id and links it into
+   * the same `timeline_id` as the referenced node with `version + 1`,
+   * applying `data` as a shallow patch (unchanged fields are kept;
+   * `null` values explicitly clear a field). Bypasses the final-state
+   * immutability check — this IS the way to "edit" a finalised node.
+   * The new version resets to the type's first declared state unless
+   * `state` is supplied; `createdAt` is inherited from the prior
+   * version; `updatedAt` is set to now.
+   *
+   * Sourced from the `upsertEntries` tool's top-level `bumpVersion`
+   * param (not a per-entry DTO field); applied uniformly to every
+   * entry in the batch by the tool layer before reaching `Db`.
+   */
+  bumpVersion?: boolean;
+  /**
+   * Only meaningful with `id` set, and only valid for types declaring
+   * `withHistory: true`. Tombstones the current version (and its
+   * anonymous subtree) so the timeline disappears from every search
+   * path and from `node_refs`. The row stays loadable by exact id.
+   *
+   * Sourced from the `upsertEntries` tool's top-level `delete` flag;
+   * mutually exclusive with `bumpVersion`.
+   */
+  delete?: boolean;
 }
 
 export interface InsertResult {

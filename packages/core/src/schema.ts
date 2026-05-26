@@ -18,7 +18,16 @@ CREATE TABLE IF NOT EXISTS nodes (
   -- nodes (which are immutable in this design). Integer storage is chosen
   -- over ISO strings so the range indexes below scan small, cheap pages.
   created_at  INTEGER,
-  updated_at  INTEGER
+  updated_at  INTEGER,
+  -- Versioning. Every node belongs to a timeline; unversioned nodes have
+  -- timeline_id = id and version = 1. Named-type rows of types declared
+  -- with withHistory: true can be bumped via upsertEntries' bumpVersion
+  -- flag, producing a NEW row with the same timeline_id and version+1.
+  -- tombstone = 1 hides a row from every search-path query while keeping
+  -- it loadable by exact id (history / deleted-state lookups).
+  timeline_id TEXT    NOT NULL,
+  version     INTEGER NOT NULL DEFAULT 1,
+  tombstone   INTEGER NOT NULL DEFAULT 0
 );
 
 -- List contents (ordered)
@@ -86,13 +95,16 @@ CREATE INDEX IF NOT EXISTS idx_named_type_states_name ON named_type_states(type_
 -- Named types: human-readable names → type_id.
 -- source distinguishes 'builtin' (shipped YAML) from 'user' (custom).
 -- hidden=1 means entries of this type are excluded from search/exact/regex by default.
+-- with_history=1 opts the type into versioning — upsertEntries' bumpVersion
+-- and delete tool flags become valid for nodes of this type.
 CREATE TABLE IF NOT EXISTS named_types (
-  name        TEXT PRIMARY KEY,
-  type_id     TEXT NOT NULL REFERENCES types(id),
-  description TEXT,
-  source      TEXT NOT NULL DEFAULT 'user',
-  hidden      INTEGER NOT NULL DEFAULT 0,
-  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  name         TEXT PRIMARY KEY,
+  type_id      TEXT NOT NULL REFERENCES types(id),
+  description  TEXT,
+  source       TEXT NOT NULL DEFAULT 'user',
+  hidden       INTEGER NOT NULL DEFAULT 0,
+  with_history INTEGER NOT NULL DEFAULT 0,
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Jobs registry: one row per scheduler-managed job.
@@ -216,6 +228,8 @@ END;
 CREATE INDEX IF NOT EXISTS idx_nodes_kind         ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_created_at   ON nodes(created_at);
 CREATE INDEX IF NOT EXISTS idx_nodes_updated_at   ON nodes(updated_at);
+CREATE INDEX IF NOT EXISTS idx_nodes_timeline     ON nodes(timeline_id, version);
+CREATE INDEX IF NOT EXISTS idx_nodes_tombstone    ON nodes(tombstone);
 CREATE INDEX IF NOT EXISTS idx_list_items_list    ON list_items(list_id);
 CREATE INDEX IF NOT EXISTS idx_map_entries_map    ON map_entries(map_id);
 CREATE INDEX IF NOT EXISTS idx_type_children_type ON type_children(type_id);

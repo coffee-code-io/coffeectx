@@ -311,9 +311,16 @@ switch (command) {
   }
 
   case 'load-node': {
+    // Lookup modes:
+    //   load-node <id>                          # exact row
+    //   load-node --timeline <uuid>             # current version of timeline
+    //   load-node --timeline <uuid> --version N # specific (timeline, version)
     const nodeId = positional(1);
-    if (!nodeId) {
+    const timelineId = flag('--timeline');
+    const versionArg = flag('--version');
+    if (!nodeId && !timelineId) {
       console.error('Usage: coffeectx-index load-node <id> [--depth <n>] [--project <name>]');
+      console.error('   or: coffeectx-index load-node --timeline <uuid> [--version <n>] [--depth <n>] [--project <name>]');
       db.close();
       process.exit(1);
     }
@@ -324,16 +331,36 @@ switch (command) {
       db.close();
       process.exit(1);
     }
+    let version: number | undefined;
+    if (versionArg !== undefined) {
+      version = parseInt(versionArg, 10);
+      if (isNaN(version) || version < 1) {
+        console.error('--version must be a positive integer');
+        db.close();
+        process.exit(1);
+      }
+    }
     const verbose = args.includes('--verbose') || args.includes('-v');
     let node;
+    let resolvedId = nodeId ?? timelineId!;
     try {
-      node = db.loadNodeDeep(nodeId, depth);
+      if (nodeId) {
+        node = db.loadNodeDeep(nodeId, depth);
+      } else if (version !== undefined) {
+        node = db.loadNodeAtVersion(timelineId!, version, depth);
+        if (node.kind === 'map' && node.id) resolvedId = node.id;
+      } else {
+        node = db.loadCurrentVersion(timelineId!, depth);
+        if (node.kind === 'map' && node.id) resolvedId = node.id;
+      }
     } catch (err) {
       console.error((err as Error).message);
       db.close();
       process.exit(1);
     }
-    const output = verbose ? { id: nodeId, depth, node } : { id: nodeId, node: formatDeepNode(node) };
+    const output = verbose
+      ? { id: resolvedId, depth, node }
+      : { id: resolvedId, node: formatDeepNode(node) };
     console.log(JSON.stringify(output, null, 2));
     break;
   }

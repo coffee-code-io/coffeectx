@@ -266,7 +266,9 @@ export class Db implements QueryDb {
       });
       const newSymbol = (value: string): string => {
         const id = uuidv4();
-        this.raw.prepare(`INSERT INTO nodes(id, kind, symbol_value) VALUES(?,?,?)`).run(id, 'symbol', value);
+        this.raw
+          .prepare(`INSERT INTO nodes(id, kind, symbol_value, timeline_id) VALUES(?,?,?,?)`)
+          .run(id, 'symbol', value, id);
         return id;
       };
       for (const { id } of sessions) {
@@ -667,7 +669,9 @@ export class Db implements QueryDb {
     }
 
     if (node.kind === 'list') {
-      this.raw.prepare(`INSERT INTO nodes(id, kind) VALUES(?,?)`).run(id, 'list');
+      this.raw
+        .prepare(`INSERT INTO nodes(id, kind, timeline_id) VALUES(?,?,?)`)
+        .run(id, 'list', id);
       for (let i = 0; i < node.items.length; i++) {
         const itemId = this.writeNode(node.items[i]!, embeds);
         this.raw
@@ -681,8 +685,11 @@ export class Db implements QueryDb {
       const typeId = this.upsertType(node.type);
       const now = Date.now();
       this.raw
-        .prepare(`INSERT INTO nodes(id, kind, type_id, created_at, updated_at) VALUES(?,?,?,?,?)`)
-        .run(id, 'map', typeId, now, now);
+        .prepare(
+          `INSERT INTO nodes(id, kind, type_id, created_at, updated_at, timeline_id)
+           VALUES(?,?,?,?,?,?)`,
+        )
+        .run(id, 'map', typeId, now, now, id);
       for (const [key, val] of Object.entries(node.entries)) {
         const valId = this.writeNode(val, embeds);
         this.raw
@@ -700,16 +707,16 @@ export class Db implements QueryDb {
 
     if (atom.kind === 'symbol') {
       this.raw
-        .prepare(`INSERT INTO nodes(id, kind, symbol_value) VALUES(?,?,?)`)
-        .run(id, 'symbol', atom.value);
+        .prepare(`INSERT INTO nodes(id, kind, symbol_value, timeline_id) VALUES(?,?,?,?)`)
+        .run(id, 'symbol', atom.value, id);
       return id;
     }
 
     if (atom.kind === 'meaning') {
       const text = atom.value.text;
       this.raw
-        .prepare(`INSERT INTO nodes(id, kind, meaning_text) VALUES(?,?,?)`)
-        .run(id, 'meaning', text);
+        .prepare(`INSERT INTO nodes(id, kind, meaning_text, timeline_id) VALUES(?,?,?,?)`)
+        .run(id, 'meaning', text, id);
       // Skip embedding for empty meanings — they have no semantic content and
       // would pollute vector-search results with arbitrarily-ranked zero rows.
       const vec = embeds.get(text);
@@ -752,15 +759,34 @@ export class Db implements QueryDb {
     const targetStates: Array<string | null> = entries.map(() => null);
     // Patches that need to fire a state-change after their fields land.
     const stateBumps = new Map<number, { from: string | null; to: string }>();
+    // Per-entry operation kind. Distinguishes plain inserts, additive
+    // patches, version bumps (new row + tombstone prior), and deletes
+    // (tombstone current).
+    const opKinds: Array<'insert' | 'patch' | 'bump' | 'delete'> = entries.map(() => 'insert');
+    // For id-based ops (patch / bump / delete): the prior row's metadata
+    // captured during Phase 1 so Phase 4 doesn't re-query SQLite per entry.
+    interface PriorMeta {
+      typeId: string;
+      state: string | null;
+      timelineId: string;
+      version: number;
+      createdAt: number | null;
+    }
+    const priorMeta: Array<PriorMeta | null> = entries.map(() => null);
 
     const typeInfos: Array<{ typeId: string; schema: Extract<Type, { kind: 'MapType' }>; states: string[] } | null> = [];
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]!;
 
-      // For patch entries verify the existing node exists and has a compatible type.
+      // For id-based ops (patch / bump / delete) verify the existing node
+      // exists and has a compatible type.
       if (entry.id) {
-        // Reject empty patch — there's nothing to do.
-        if (Object.keys(entry.data).length === 0 && entry.state == null) {
+        // Reject empty patch — there's nothing to do. Bumps with no field
+        // changes ARE meaningful (new version row, fresh updated_at), so
+        // skip the empty check for bumpVersion. Delete ignores body
+        // entirely, so we don't care about emptiness there either.
+        const opForEmptyCheck = entry.bumpVersion ? 'bump' : entry.delete ? 'delete' : 'patch';
+        if (opForEmptyCheck === 'patch' && Object.keys(entry.data).length === 0 && entry.state == null) {
           errors.push({
             index: i,
             path: '',
@@ -771,8 +797,18 @@ export class Db implements QueryDb {
         }
 
         const row = this.raw
-          .prepare(`SELECT kind, type_id FROM nodes WHERE id=?`)
-          .get(entry.id) as { kind: string; type_id: string | null } | undefined;
+          .prepare(
+            `SELECT kind, type_id, state, timeline_id, version, created_at
+               FROM nodes WHERE id=?`,
+          )
+          .get(entry.id) as {
+            kind: string;
+            type_id: string | null;
+            state: string | null;
+            timeline_id: string;
+            version: number;
+            created_at: number | null;
+          } | undefined;
         if (!row) {
           errors.push({ index: i, path: '', message: `Node not found: "${entry.id}"` });
           typeInfos.push(null);
@@ -811,8 +847,67 @@ export class Db implements QueryDb {
         }
 
         const states = this.getStatesForType(entry.type);
+
+        priorMeta[i] = {
+          typeId: row.type_id,
+          state: row.state,
+          timelineId: row.timeline_id,
+          version: row.version,
+          createdAt: row.created_at,
+        };
+
+        // ── Dispatch on op kind ─────────────────────────────────────────────
+        if (entry.bumpVersion) {
+          if (!this.isHistoryEnabledNamedType(entry.type)) {
+            errors.push({
+              index: i,
+              path: '',
+              message: `bumpVersion: type "${entry.type}" does not declare withHistory: true`,
+            });
+            typeInfos.push(null);
+            continue;
+          }
+          if (entry.state != null && !states.includes(entry.state)) {
+            errors.push({
+              index: i,
+              path: '',
+              message: `$state "${entry.state}" not in [${states.join(', ')}] for type "${entry.type}"`,
+            });
+            typeInfos.push(null);
+            continue;
+          }
+          // New version resets to type's first state by default — the
+          // lifecycle starts over. Single-state types encode their (only)
+          // state as NULL.
+          const headState = entry.state ?? states[0]!;
+          targetStates[i] = states.length > 1 ? headState : null;
+          opKinds[i] = 'bump';
+          typeInfos.push({ typeId: row.type_id, schema, states });
+          continue;
+        }
+
+        if (entry.delete) {
+          if (!this.isHistoryEnabledNamedType(entry.type)) {
+            errors.push({
+              index: i,
+              path: '',
+              message: `delete: type "${entry.type}" does not declare withHistory: true`,
+            });
+            typeInfos.push(null);
+            continue;
+          }
+          opKinds[i] = 'delete';
+          // Phase 4 only needs the prior id + the priorMeta block; no
+          // typeInfos row required, but we push one so indices line up
+          // with downstream loops.
+          typeInfos.push({ typeId: row.type_id, schema, states });
+          continue;
+        }
+
+        // ── Plain additive patch (today's behaviour) ──────────────────────
+        opKinds[i] = 'patch';
         const finalState = states[states.length - 1]!;
-        const currentRaw = this.getNodeState(entry.id);
+        const currentRaw = row.state;
         const currentEffective = currentRaw ?? finalState;
 
         // Final-state immutability — only relaxed when the patch supplies an
@@ -884,15 +979,22 @@ export class Db implements QueryDb {
     }
 
     // ── Phase 2: allocate IDs ───────────────────────────────────────────────
-    // Patch entries reuse their existing id; new entries get a fresh uuid.
-    const allocatedIds: (string | null)[] = entries.map((e, i) =>
-      typeInfos[i] ? (e.id ?? uuidv4()) : null,
-    );
+    // - insert: fresh uuid.
+    // - patch:  reuse the existing id.
+    // - bump:   FRESH uuid (the new version is a new row).
+    // - delete: existing id (we're just tombstoning).
+    const allocatedIds: (string | null)[] = entries.map((e, i) => {
+      if (!typeInfos[i]) return null;
+      if (opKinds[i] === 'bump') return uuidv4();
+      if (opKinds[i] === 'delete') return e.id ?? null;
+      // insert / patch
+      return e.id ?? uuidv4();
+    });
 
     // ── Phase 2.5: validate required fields (insert-only) ───────────────────
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]!;
-      if (entry.id) continue; // patches accept partial data
+      if (entry.id) continue; // patches / bumps / deletes accept partial data
       const ti = typeInfos[i];
       if (!ti) continue;
       const missing: string[] = [];
@@ -909,10 +1011,12 @@ export class Db implements QueryDb {
       }
     }
 
-    // ── Phase 2.7: for patches, load existing keys to avoid re-embedding ────
+    // ── Phase 2.7: for plain patches, load existing keys to avoid re-embedding
+    // Bumps and deletes don't use the additive-patch path so they skip this.
     const existingKeysPerEntry = new Map<number, Set<string>>();
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]!;
+      if (opKinds[i] !== 'patch') continue;
       if (!entry.id || !allocatedIds[i]) continue;
       const rows = this.raw
         .prepare(`SELECT key FROM map_entries WHERE map_id=?`)
@@ -921,14 +1025,26 @@ export class Db implements QueryDb {
     }
 
     // ── Phase 3: collect meaning texts for embedding ────────────────────────
+    // For bumps we embed only the CHANGED fields (the patch payload) —
+    // unchanged-anonymous fields are deep-copied with their existing
+    // embeddings intact (see `deepCopyAnonymousSubtree`).
     const meaningTexts = new Set<string>();
     for (let i = 0; i < entries.length; i++) {
       const ti = typeInfos[i];
       if (!ti || !allocatedIds[i]) continue;
+      if (opKinds[i] === 'delete') continue;
       const entry = entries[i]!;
       const existingKeys = existingKeysPerEntry.get(i);
 
-      if (existingKeys) {
+      if (opKinds[i] === 'bump') {
+        // Patch payload only — null values are explicit clears (no embed).
+        for (const [key, fieldType] of Object.entries(ti.schema.entries)) {
+          if (!(key in entry.data)) continue;
+          const value = entry.data[key];
+          if (value == null) continue;
+          this.collectEntryMeanings(value, fieldType, meaningTexts);
+        }
+      } else if (existingKeys) {
         // Patch: only collect meanings for keys we'll actually add.
         for (const [key, fieldType] of Object.entries(ti.schema.entries)) {
           if (existingKeys.has(key)) continue;
@@ -950,46 +1066,74 @@ export class Db implements QueryDb {
 
     // ── Phase 4: write in a single transaction ──────────────────────────────
     const txn = this.raw.transaction(() => {
-      // Insert shells for new entries first so $ref can resolve them.
+      // Insert shells for fresh entries AND for bump v_next rows. $ref
+      // resolution depends on these being present before field writes.
       for (let i = 0; i < entries.length; i++) {
         const ti = typeInfos[i];
         const id = allocatedIds[i];
-        if (!ti || !id || entries[i]!.id) continue; // skip patches and failed entries
+        if (!ti || !id) continue;
+        const op = opKinds[i];
+        if (op === 'patch' || op === 'delete') continue;
+
         const entry = entries[i]!;
-        const createdAt = entry.createdAt ?? nowMs;
-        const updatedAt = entry.updatedAt ?? createdAt;
-        this.raw
-          .prepare(
-            `INSERT INTO nodes(id, kind, type_id, state, created_at, updated_at)
-             VALUES(?,?,?,?,?,?)`,
-          )
-          .run(id, 'map', ti.typeId, targetStates[i], createdAt, updatedAt);
+        if (op === 'bump') {
+          // New version row of an existing timeline.
+          const prev = priorMeta[i]!;
+          const createdAt = entry.createdAt ?? prev.createdAt ?? nowMs;
+          const updatedAt = entry.updatedAt ?? nowMs;
+          this.raw
+            .prepare(
+              `INSERT INTO nodes(id, kind, type_id, state, created_at, updated_at,
+                                  timeline_id, version, tombstone)
+               VALUES(?,?,?,?,?,?,?,?,0)`,
+            )
+            .run(
+              id, 'map', ti.typeId, targetStates[i],
+              createdAt, updatedAt,
+              prev.timelineId, prev.version + 1,
+            );
+        } else {
+          // Fresh insert. Single-row timeline; defaults version=1, tombstone=0.
+          const createdAt = entry.createdAt ?? nowMs;
+          const updatedAt = entry.updatedAt ?? createdAt;
+          this.raw
+            .prepare(
+              `INSERT INTO nodes(id, kind, type_id, state, created_at, updated_at,
+                                  timeline_id)
+               VALUES(?,?,?,?,?,?,?)`,
+            )
+            .run(id, 'map', ti.typeId, targetStates[i], createdAt, updatedAt, id);
+        }
       }
 
       // Apply patch-driven state bumps (multi-state types only — single-state
-      // bumps short-circuit to a no-op above).
+      // bumps short-circuit to a no-op above). Plain-patch only; bump's
+      // state is written on the shell insert above; delete doesn't bump.
       for (let i = 0; i < entries.length; i++) {
+        if (opKinds[i] !== 'patch') continue;
         const id = allocatedIds[i];
-        if (!id || !entries[i]!.id) continue;
+        if (!id) continue;
         if (!stateBumps.has(i)) continue;
         const ti = typeInfos[i];
         if (!ti || ti.states.length <= 1) continue;
         this.raw.prepare(`UPDATE nodes SET state=? WHERE id=?`).run(targetStates[i], id);
       }
 
-      // Bump `updated_at` on every patched entry (state change or not). The
-      // caller can override via `$updated_at`; otherwise the batch's nowMs
-      // wins. created_at is never touched on a patch.
+      // Bump `updated_at` on every patched entry (state change or not).
+      // Plain-patch only — bump's updated_at lands on shell insert; delete's
+      // updated_at is bumped in its own sub-pass below.
       for (let i = 0; i < entries.length; i++) {
+        if (opKinds[i] !== 'patch') continue;
         const entry = entries[i]!;
         const id = allocatedIds[i];
-        if (!id || !entry.id) continue; // patches only
+        if (!id) continue;
         const updatedAt = entry.updatedAt ?? nowMs;
         this.raw.prepare(`UPDATE nodes SET updated_at=? WHERE id=?`).run(updatedAt, id);
       }
 
-      // Write field values for all entries.
+      // Write field values for inserts and plain patches.
       for (let i = 0; i < entries.length; i++) {
+        if (opKinds[i] !== 'insert' && opKinds[i] !== 'patch') continue;
         const ti = typeInfos[i];
         const id = allocatedIds[i];
         if (!ti || !id) continue;
@@ -1019,13 +1163,132 @@ export class Db implements QueryDb {
           this.raw.prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`).run(id, key, valueId);
         }
       }
+
+      // ── Bump-specific: carry forward v_prev's map_entries, applying the
+      // shallow patch. Unchanged anonymous descendants get deep-copied so
+      // tombstoning v_prev's subtree doesn't affect v_next. Named-type
+      // references ($id targets) are aliased — they live in their own
+      // timelines and shouldn't be touched.
+      for (let i = 0; i < entries.length; i++) {
+        if (opKinds[i] !== 'bump') continue;
+        const ti = typeInfos[i];
+        const v2Id = allocatedIds[i];
+        const entry = entries[i]!;
+        if (!ti || !v2Id || !entry.id) continue;
+
+        const priorEntries = this.raw
+          .prepare(`SELECT key, value_id FROM map_entries WHERE map_id=?`)
+          .all(entry.id) as { key: string; value_id: string }[];
+        const priorKeys = new Set(priorEntries.map(r => r.key));
+
+        for (const { key, value_id: priorValueId } of priorEntries) {
+          // Explicit clear via `null` in the patch.
+          if (key in entry.data && entry.data[key] === null) continue;
+
+          if (key in entry.data) {
+            // Changed: build a fresh value subtree.
+            const fieldType = ti.schema.entries[key];
+            if (!fieldType) {
+              errors.push({ index: i, path: key, message: `Unknown field "${key}" on type "${entry.type}"` });
+              continue;
+            }
+            let newValueId: string;
+            try {
+              newValueId = this.buildEntryNode(entry.data[key], fieldType, allocatedIds, embedMap, `[${i}].${key}`);
+            } catch (err) {
+              errors.push({ index: i, path: key, message: (err as Error).message });
+              continue;
+            }
+            this.raw
+              .prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`)
+              .run(v2Id, key, newValueId);
+          } else {
+            // Unchanged. deepCopyAnonymousSubtree handles the alias-vs-copy
+            // decision: $id refs to named-type maps return the same id;
+            // anonymous descendants get a fresh subtree.
+            const carriedId = this.deepCopyAnonymousSubtree(priorValueId);
+            this.raw
+              .prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`)
+              .run(v2Id, key, carriedId);
+          }
+        }
+
+        // NEW keys (present in patch but not in v_prev).
+        for (const [key, fieldType] of Object.entries(ti.schema.entries)) {
+          if (priorKeys.has(key)) continue;
+          if (!(key in entry.data)) continue;
+          const value = entry.data[key];
+          if (value == null) continue;
+          let newValueId: string;
+          try {
+            newValueId = this.buildEntryNode(value, fieldType, allocatedIds, embedMap, `[${i}].${key}`);
+          } catch (err) {
+            errors.push({ index: i, path: key, message: (err as Error).message });
+            continue;
+          }
+          this.raw
+            .prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?,?,?)`)
+            .run(v2Id, key, newValueId);
+        }
+
+        // Tombstone v_prev: walk anonymous descendants first, then the root.
+        this.tombstoneAnonymousSubtree(entry.id);
+        this.raw.prepare(`UPDATE nodes SET tombstone = 1 WHERE id = ?`).run(entry.id);
+      }
+
+      // ── Delete-specific: walk current's anonymous subtree, tombstone it
+      // and the root, and bump updated_at on the root so debug UIs can see
+      // when the deletion happened.
+      for (let i = 0; i < entries.length; i++) {
+        if (opKinds[i] !== 'delete') continue;
+        const id = allocatedIds[i];
+        if (!id) continue;
+        this.tombstoneAnonymousSubtree(id);
+        this.raw
+          .prepare(`UPDATE nodes SET tombstone = 1, updated_at = ? WHERE id = ?`)
+          .run(nowMs, id);
+      }
     });
     txn();
 
+    // ── Post-txn: node_refs maintenance for bump / delete ──────────────────
+    // Kept outside the transaction to mirror today's pattern (the existing
+    // populateNodeRefsFor call below already runs post-commit).
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      if (opKinds[i] === 'bump') {
+        const v2Id = allocatedIds[i];
+        if (!entry.id || !v2Id) continue;
+        // v_prev moved out of "current" — drop its outgoing edges and
+        // redirect every incoming edge to v_next.
+        this.raw.prepare(`DELETE FROM node_refs WHERE src_id = ?`).run(entry.id);
+        this.raw
+          .prepare(`UPDATE OR IGNORE node_refs SET dst_id = ? WHERE dst_id = ?`)
+          .run(v2Id, entry.id);
+        // Any rows that collided with existing (src, v2Id, field_path)
+        // entries from v_next's outgoing edges via the UPDATE OR IGNORE
+        // get left behind under dst=entry.id — purge them.
+        this.raw.prepare(`DELETE FROM node_refs WHERE dst_id = ?`).run(entry.id);
+      } else if (opKinds[i] === 'delete') {
+        if (!entry.id) continue;
+        this.raw
+          .prepare(`DELETE FROM node_refs WHERE src_id = ? OR dst_id = ?`)
+          .run(entry.id, entry.id);
+      }
+    }
+
     // Update materialized edge index for every touched entry (inserts and
-    // patches alike — patches may have added new $id refs). INSERT OR IGNORE
-    // keeps it idempotent if a root is walked again later.
-    const touchedIds = allocatedIds.filter((id): id is string => typeof id === 'string');
+    // patches alike — patches may have added new $id refs). Bumps' new
+    // v_next id is included so v_next's outgoing edges get indexed; the
+    // pre-bump DELETE/UPDATE above already cleared v_prev's rows. Deletes
+    // are excluded (their refs were purged outright). INSERT OR IGNORE
+    // keeps populateNodeRefsFor idempotent if a root is walked again.
+    const touchedIds: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      if (opKinds[i] === 'delete') continue;
+      const id = allocatedIds[i];
+      if (typeof id === 'string') touchedIds.push(id);
+    }
     if (touchedIds.length > 0) {
       try {
         populateNodeRefsFor(this.raw, touchedIds);
@@ -1142,6 +1405,173 @@ export class Db implements QueryDb {
     }
   }
 
+  // ── Versioning helpers ──────────────────────────────────────────────────
+  //
+  // Used by the bumpVersion / delete branches of insertEntries to walk a
+  // versioned node's anonymous subtree. Named-type child references
+  // ($id-style) are STOPPED on — those targets have their own lifecycle
+  // and must not be tombstoned or deep-copied as part of a parent bump.
+
+  /** True iff the node is a map whose type_id is registered as a named
+   *  type. Used to decide where to stop the recursion. */
+  private isNamedTypeMap(id: string): boolean {
+    const row = this.raw
+      .prepare(
+        `SELECT 1 FROM nodes n
+           JOIN named_types nt ON nt.type_id = n.type_id
+          WHERE n.id = ? AND n.kind = 'map' LIMIT 1`,
+      )
+      .get(id) as { 1: number } | undefined;
+    return !!row;
+  }
+
+  /**
+   * Walk the anonymous descendant subtree of `rootId` (via map_entries +
+   * list_items), flipping `tombstone = 1` on every node reached. Stops
+   * at named-type map boundaries — those are independent timelines and
+   * must not be touched. The root itself is NOT tombstoned by this
+   * helper — the caller flips it (and chooses how to log the action).
+   *
+   * Called inside the same transaction as the bump / delete write.
+   */
+  private tombstoneAnonymousSubtree(rootId: string): void {
+    const visited = new Set<string>([rootId]);
+    const stack: string[] = [];
+
+    // Seed with the root's immediate children — we never tombstone the
+    // root via this walk, only its descendants.
+    const seedChildren = this.collectAnonymousChildren(rootId, /*rootIsNamed=*/true);
+    for (const c of seedChildren) stack.push(c);
+
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      this.raw.prepare(`UPDATE nodes SET tombstone = 1 WHERE id = ?`).run(id);
+
+      // Don't recurse past named-type boundaries.
+      if (this.isNamedTypeMap(id)) continue;
+
+      for (const c of this.collectAnonymousChildren(id, /*rootIsNamed=*/false)) {
+        if (!visited.has(c)) stack.push(c);
+      }
+    }
+  }
+
+  /** Direct children of a node via list_items / map_entries. The
+   *  `rootIsNamed` flag is FYI only — both branches collect children
+   *  uniformly; the caller is responsible for stopping recursion at
+   *  named-type maps via `isNamedTypeMap` on the children. */
+  private collectAnonymousChildren(id: string, _rootIsNamed: boolean): string[] {
+    const row = this.raw
+      .prepare(`SELECT kind FROM nodes WHERE id = ?`)
+      .get(id) as { kind: string } | undefined;
+    if (!row) return [];
+    if (row.kind === 'list') {
+      const rows = this.raw
+        .prepare(`SELECT item_id FROM list_items WHERE list_id = ?`)
+        .all(id) as { item_id: string }[];
+      return rows.map(r => r.item_id);
+    }
+    if (row.kind === 'map') {
+      const rows = this.raw
+        .prepare(`SELECT value_id FROM map_entries WHERE map_id = ?`)
+        .all(id) as { value_id: string }[];
+      return rows.map(r => r.value_id);
+    }
+    return [];
+  }
+
+  /**
+   * Deep-copy a node subtree, returning the new root's id. Used to
+   * carry forward UNCHANGED anonymous fields from v_prev into v_next
+   * during a version bump — anonymous descendants get fresh copies so
+   * v_prev's tombstone walk doesn't affect v_next.
+   *
+   * Named-type maps (i.e. `$id` references to other timelines) are
+   * ALIASED: the helper returns the original id unchanged, since those
+   * targets have their own lifecycle.
+   *
+   * Called inside the same transaction as the bump write.
+   */
+  private deepCopyAnonymousSubtree(srcId: string): string {
+    const src = this.raw
+      .prepare(
+        `SELECT kind, symbol_value, meaning_text, type_id, state, created_at, updated_at
+           FROM nodes WHERE id = ?`,
+      )
+      .get(srcId) as {
+        kind: string;
+        symbol_value: string | null;
+        meaning_text: string | null;
+        type_id: string | null;
+        state: string | null;
+        created_at: number | null;
+        updated_at: number | null;
+      } | undefined;
+    if (!src) throw new Error(`deepCopyAnonymousSubtree: node "${srcId}" not found`);
+
+    // Named-type map → alias. The caller's bump logic already asks us to
+    // copy "unchanged anonymous fields"; if the value happens to be a
+    // named-type ref, the right thing is to share the id (no copy).
+    if (src.kind === 'map' && this.isNamedTypeMap(srcId)) return srcId;
+
+    const newId = uuidv4();
+    if (src.kind === 'symbol') {
+      this.raw
+        .prepare(`INSERT INTO nodes(id, kind, symbol_value, timeline_id) VALUES(?, ?, ?, ?)`)
+        .run(newId, 'symbol', src.symbol_value, newId);
+      return newId;
+    }
+    if (src.kind === 'meaning') {
+      this.raw
+        .prepare(`INSERT INTO nodes(id, kind, meaning_text, timeline_id) VALUES(?, ?, ?, ?)`)
+        .run(newId, 'meaning', src.meaning_text, newId);
+      // Copy the embedding bytes verbatim — same text, same vector.
+      const vec = this.raw
+        .prepare(`SELECT embedding FROM meaning_vecs WHERE node_id = ?`)
+        .get(srcId) as { embedding: Buffer } | undefined;
+      if (vec) {
+        this.raw
+          .prepare(`INSERT INTO meaning_vecs(node_id, embedding) VALUES(?, ?)`)
+          .run(newId, vec.embedding);
+      }
+      return newId;
+    }
+    if (src.kind === 'list') {
+      this.raw
+        .prepare(`INSERT INTO nodes(id, kind, timeline_id) VALUES(?, ?, ?)`)
+        .run(newId, 'list', newId);
+      const items = this.raw
+        .prepare(`SELECT position, item_id FROM list_items WHERE list_id = ? ORDER BY position`)
+        .all(srcId) as { position: number; item_id: string }[];
+      for (const { position, item_id } of items) {
+        const childId = this.deepCopyAnonymousSubtree(item_id);
+        this.raw
+          .prepare(`INSERT INTO list_items(list_id, position, item_id) VALUES(?, ?, ?)`)
+          .run(newId, position, childId);
+      }
+      return newId;
+    }
+    // Anonymous map (named-type case short-circuited above).
+    this.raw
+      .prepare(
+        `INSERT INTO nodes(id, kind, type_id, state, created_at, updated_at, timeline_id)
+         VALUES(?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(newId, 'map', src.type_id, src.state, src.created_at, src.updated_at, newId);
+    const entries = this.raw
+      .prepare(`SELECT key, value_id FROM map_entries WHERE map_id = ?`)
+      .all(srcId) as { key: string; value_id: string }[];
+    for (const { key, value_id } of entries) {
+      const childId = this.deepCopyAnonymousSubtree(value_id);
+      this.raw
+        .prepare(`INSERT INTO map_entries(map_id, key, value_id) VALUES(?, ?, ?)`)
+        .run(newId, key, childId);
+    }
+    return newId;
+  }
+
   /**
    * Build (insert) a node for a single field value given its shallow schema type.
    * Called inside the transaction; must be synchronous.
@@ -1207,7 +1637,9 @@ export class Db implements QueryDb {
       if (typeof value !== 'string')
         throw new Error(`${path}: expected string for SymbolType, got ${typeof value}`);
       const id = uuidv4();
-      this.raw.prepare(`INSERT INTO nodes(id, kind, symbol_value) VALUES(?,?,?)`).run(id, 'symbol', value);
+      this.raw
+        .prepare(`INSERT INTO nodes(id, kind, symbol_value, timeline_id) VALUES(?,?,?,?)`)
+        .run(id, 'symbol', value, id);
       return id;
     }
 
@@ -1215,7 +1647,9 @@ export class Db implements QueryDb {
       if (typeof value !== 'string')
         throw new Error(`${path}: expected string for MeaningType, got ${typeof value}`);
       const id = uuidv4();
-      this.raw.prepare(`INSERT INTO nodes(id, kind, meaning_text) VALUES(?,?,?)`).run(id, 'meaning', value);
+      this.raw
+        .prepare(`INSERT INTO nodes(id, kind, meaning_text, timeline_id) VALUES(?,?,?,?)`)
+        .run(id, 'meaning', value, id);
       // Skip embedding for empty meanings — see insertNode's atom='meaning' branch.
       const vec = embedMap.get(value);
       if (vec) {
@@ -1228,7 +1662,9 @@ export class Db implements QueryDb {
       if (!Array.isArray(value))
         throw new Error(`${path}: expected array for ListType, got ${typeof value}`);
       const id = uuidv4();
-      this.raw.prepare(`INSERT INTO nodes(id, kind) VALUES(?,?)`).run(id, 'list');
+      this.raw
+        .prepare(`INSERT INTO nodes(id, kind, timeline_id) VALUES(?,?,?)`)
+        .run(id, 'list', id);
       for (let i = 0; i < value.length; i++) {
         const itemId = this.buildEntryNode(value[i], type.itemType, allocatedIds, embedMap, `${path}[${i}]`);
         this.raw.prepare(`INSERT INTO list_items(list_id, position, item_id) VALUES(?,?,?)`).run(id, i, itemId);
@@ -1248,8 +1684,11 @@ export class Db implements QueryDb {
       // sub-objects), so a single Date.now() per nested insert is fine.
       const now = Date.now();
       this.raw
-        .prepare(`INSERT INTO nodes(id, kind, type_id, created_at, updated_at) VALUES(?,?,?,?,?)`)
-        .run(id, 'map', typeId, now, now);
+        .prepare(
+          `INSERT INTO nodes(id, kind, type_id, created_at, updated_at, timeline_id)
+           VALUES(?,?,?,?,?,?)`,
+        )
+        .run(id, 'map', typeId, now, now, id);
       for (const [key, fieldType] of Object.entries(type.entries)) {
         if (obj[key] == null) continue;
         const valId = this.buildEntryNode(obj[key], fieldType, allocatedIds, embedMap, `${path}.${key}`);
@@ -1332,7 +1771,10 @@ export class Db implements QueryDb {
                 meaning_text  AS meaningText,
                 type_id       AS typeId,
                 created_at    AS createdAt,
-                updated_at    AS updatedAt
+                updated_at    AS updatedAt,
+                timeline_id   AS timelineId,
+                version       AS version,
+                tombstone     AS tombstone
          FROM nodes WHERE id=?`,
       )
       .get(id) as StoredNode | undefined;
@@ -1407,10 +1849,86 @@ export class Db implements QueryDb {
         state,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
+        timelineId: row.timelineId,
+        version: row.version,
+        tombstone: row.tombstone ? true : undefined,
       };
     }
 
     throw new Error(`Unknown node kind: ${row.kind}`);
+  }
+
+  // ── Versioned lookup ──────────────────────────────────────────────────────
+  //
+  // Search paths return only current-version, non-tombstoned rows. These
+  // helpers let callers explicitly opt into the history layer:
+  //   - loadCurrentVersion(timelineId): the row with max(version) — the
+  //     "live" snapshot, even if tombstoned (a deletion is still
+  //     observable through these helpers).
+  //   - loadNodeAtVersion(timelineId, version): exact (timeline, version)
+  //     lookup.
+  //   - listTimelineVersions(timelineId): the full version history with
+  //     tombstone flags, for UI history widgets.
+
+  /** Return the id of the most-recent version of the given timeline,
+   *  or `null` if no node exists for that timeline. Returns the id
+   *  regardless of tombstone — exposing deletion is the caller's call. */
+  getCurrentVersionId(timelineId: string): string | null {
+    const row = this.raw
+      .prepare(
+        `SELECT id FROM nodes
+          WHERE timeline_id = ?
+          ORDER BY version DESC LIMIT 1`,
+      )
+      .get(timelineId) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
+  /** Load the current-version DeepNode for `timelineId`, or throw if no
+   *  node exists for that timeline. Tombstone is reported via the
+   *  returned `tombstone` field so callers can render "deleted". */
+  loadCurrentVersion(timelineId: string, depth = 10): DeepNode {
+    const id = this.getCurrentVersionId(timelineId);
+    if (!id) throw new Error(`No node found for timeline_id="${timelineId}"`);
+    return this.loadNodeDeep(id, depth);
+  }
+
+  /** Load the node at a specific `(timelineId, version)` pair, or throw
+   *  if that exact tuple doesn't exist. */
+  loadNodeAtVersion(timelineId: string, version: number, depth = 10): DeepNode {
+    const row = this.raw
+      .prepare(`SELECT id FROM nodes WHERE timeline_id = ? AND version = ?`)
+      .get(timelineId, version) as { id: string } | undefined;
+    if (!row) {
+      throw new Error(`No node found for timeline_id="${timelineId}" version=${version}`);
+    }
+    return this.loadNodeDeep(row.id, depth);
+  }
+
+  /** All versions of a timeline, oldest first. Useful for UI history
+   *  panes — each row carries its tombstone flag so deletions show
+   *  inline. Returns empty array when nothing matches. */
+  listTimelineVersions(
+    timelineId: string,
+  ): Array<{ id: string; version: number; createdAt: number | null; tombstone: boolean }> {
+    const rows = this.raw
+      .prepare(
+        `SELECT id, version, created_at AS createdAt, tombstone
+           FROM nodes WHERE timeline_id = ?
+          ORDER BY version`,
+      )
+      .all(timelineId) as Array<{
+        id: string;
+        version: number;
+        createdAt: number | null;
+        tombstone: number;
+      }>;
+    return rows.map(r => ({
+      id: r.id,
+      version: r.version,
+      createdAt: r.createdAt,
+      tombstone: r.tombstone === 1,
+    }));
   }
 
   // ── QueryDb interface ──────────────────────────────────────────────────────
@@ -1425,20 +1943,22 @@ export class Db implements QueryDb {
     // for shorter input). For 1- or 2-char values fall back to the
     // legacy scan — the candidate set is small at those sizes and
     // FTS5 would return zero rows regardless.
+    //
+    // Every search path filters out tombstoned rows: bumped-out versions
+    // and deleted timelines must not surface here. Exact id lookup
+    // (`queryById` / `loadNodeDeep`) is the documented escape hatch.
     if (value.length < 3) {
       const rows = this.raw
-        .prepare(`SELECT id FROM nodes WHERE kind='symbol' AND symbol_value=?`)
+        .prepare(`SELECT id FROM nodes WHERE kind='symbol' AND symbol_value=? AND tombstone=0`)
         .all(value) as { id: string }[];
       return rows.map(r => r.id);
     }
-    // MATCH narrows on case-insensitive substring containment; the
-    // `n.symbol_value = ?` clause re-imposes today's BINARY-collation
-    // case-sensitive equality on the (now-small) candidate set.
     const rows = this.raw
       .prepare(
         `SELECT n.id FROM nodes_fts f
            JOIN nodes n ON n.id = f.node_id
           WHERE n.kind = 'symbol'
+            AND n.tombstone = 0
             AND f.text MATCH ?
             AND n.symbol_value = ?`,
       )
@@ -1457,8 +1977,9 @@ export class Db implements QueryDb {
       const rows = this.raw
         .prepare(
           `SELECT id FROM nodes
-             WHERE (kind='symbol'  AND regexp(?, symbol_value))
-                OR (kind='meaning' AND regexp(?, meaning_text))`,
+             WHERE tombstone = 0
+               AND ((kind='symbol'  AND regexp(?, symbol_value))
+                 OR (kind='meaning' AND regexp(?, meaning_text)))`,
         )
         .all(pattern, pattern) as { id: string }[];
       return rows.map(r => r.id);
@@ -1474,6 +1995,7 @@ export class Db implements QueryDb {
            FROM nodes_fts f
            JOIN nodes n ON n.id = f.node_id
           WHERE n.kind IN ('symbol', 'meaning')
+            AND n.tombstone = 0
             AND f.text MATCH ?`,
       )
       .all(matchExpr) as Array<{ id: string; kind: string; sv: string | null; mt: string | null }>;
@@ -1485,12 +2007,31 @@ export class Db implements QueryDb {
 
   async queryMeaning(text: string, limit: number): Promise<string[]> {
     const vec = await this.embed(text);
-    const rows = this.raw
+    // The vec0 virtual table doesn't natively know about tombstones —
+    // over-fetch ~4× then filter in JS. Keeps the existing MATCH/k/ORDER
+    // BY distance pattern intact (vec0 has quirks around JOINs that
+    // can disable index usage).
+    const candidates = this.raw
       .prepare(
-        `SELECT node_id FROM meaning_vecs WHERE embedding MATCH ? AND k=? ORDER BY distance`,
+        `SELECT node_id FROM meaning_vecs
+          WHERE embedding MATCH ? AND k=? ORDER BY distance`,
       )
-      .all(vec, limit) as { node_id: string }[];
-    return rows.map(r => r.node_id);
+      .all(vec, limit * 4) as { node_id: string }[];
+    if (candidates.length === 0) return [];
+    const placeholders = candidates.map(() => '?').join(',');
+    const visible = this.raw
+      .prepare(
+        `SELECT id FROM nodes
+          WHERE id IN (${placeholders}) AND tombstone = 0`,
+      )
+      .all(...candidates.map(r => r.node_id)) as { id: string }[];
+    const visibleSet = new Set(visible.map(r => r.id));
+    // Preserve the vec0 ordering — filter the candidate list rather than
+    // re-sorting visible rows.
+    return candidates
+      .map(r => r.node_id)
+      .filter(id => visibleSet.has(id))
+      .slice(0, limit);
   }
 
   queryByNamedType(names: string[]): string[] {
@@ -1500,7 +2041,8 @@ export class Db implements QueryDb {
       .prepare(
         `SELECT n.id FROM nodes n
          JOIN named_types nt ON n.type_id = nt.type_id
-         WHERE nt.name IN (${placeholders})`,
+         WHERE nt.name IN (${placeholders})
+           AND n.tombstone = 0`,
       )
       .all(...names) as { id: string }[];
     return rows.map(r => r.id);
@@ -1511,7 +2053,10 @@ export class Db implements QueryDb {
     const placeholders = valueIds.map(() => '?').join(',');
     const rows = this.raw
       .prepare(
-        `SELECT map_id FROM map_entries WHERE key=? AND value_id IN (${placeholders})`,
+        `SELECT me.map_id FROM map_entries me
+         JOIN nodes n ON n.id = me.map_id
+         WHERE me.key=? AND me.value_id IN (${placeholders})
+           AND n.tombstone = 0`,
       )
       .all(key, ...valueIds) as { map_id: string }[];
     return rows.map(r => r.map_id);
@@ -1521,7 +2066,12 @@ export class Db implements QueryDb {
     if (itemIds.length === 0) return [];
     const placeholders = itemIds.map(() => '?').join(',');
     const rows = this.raw
-      .prepare(`SELECT list_id FROM list_items WHERE item_id IN (${placeholders})`)
+      .prepare(
+        `SELECT li.list_id FROM list_items li
+         JOIN nodes n ON n.id = li.list_id
+         WHERE li.item_id IN (${placeholders})
+           AND n.tombstone = 0`,
+      )
       .all(...itemIds) as { list_id: string }[];
     return rows.map(r => r.list_id);
   }
@@ -1538,7 +2088,10 @@ export class Db implements QueryDb {
     const col = field === 'created_at' ? 'created_at' : 'updated_at';
     const comparator = op === 'before' ? '<' : '>';
     const rows = this.raw
-      .prepare(`SELECT id FROM nodes WHERE kind='map' AND ${col} ${comparator} ?`)
+      .prepare(
+        `SELECT id FROM nodes
+          WHERE kind='map' AND tombstone=0 AND ${col} ${comparator} ?`,
+      )
       .all(ms) as { id: string }[];
     return rows.map(r => r.id);
   }
@@ -1572,9 +2125,13 @@ export class Db implements QueryDb {
    * Useful for callers that need to append plain symbol strings into an
    * existing list field (e.g. Plan.relatedFiles).
    */
+  // Helper kept old-shape for backwards compat — callers don't need to
+  // know about timeline_id; an unversioned symbol's timeline IS its id.
   insertSymbolNode(value: string): string {
     const id = uuidv4();
-    this.raw.prepare(`INSERT INTO nodes(id, kind, symbol_value) VALUES(?,?,?)`).run(id, 'symbol', value);
+    this.raw
+      .prepare(`INSERT INTO nodes(id, kind, symbol_value, timeline_id) VALUES(?,?,?,?)`)
+      .run(id, 'symbol', value, id);
     return id;
   }
 
@@ -1880,19 +2437,21 @@ export class Db implements QueryDb {
     source: 'builtin' | 'user' = 'user',
     description?: string,
     hidden?: boolean,
+    withHistory?: boolean,
   ): void {
     this.raw
       .prepare(
-        `INSERT INTO named_types(name, type_id, description, source, hidden, updated_at)
-         VALUES(?, ?, ?, ?, ?, datetime('now'))
+        `INSERT INTO named_types(name, type_id, description, source, hidden, with_history, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(name) DO UPDATE
            SET type_id=excluded.type_id,
                description=excluded.description,
                source=excluded.source,
                hidden=excluded.hidden,
+               with_history=excluded.with_history,
                updated_at=excluded.updated_at`,
       )
-      .run(name, typeId, description ?? null, source, hidden ? 1 : 0);
+      .run(name, typeId, description ?? null, source, hidden ? 1 : 0, withHistory ? 1 : 0);
   }
 
   /** Returns true if the named type exists and is marked hidden. */
@@ -1901,6 +2460,16 @@ export class Db implements QueryDb {
       .prepare(`SELECT hidden FROM named_types WHERE name=?`)
       .get(name) as { hidden: number } | undefined;
     return row ? row.hidden === 1 : false;
+  }
+
+  /** Returns true if the named type exists and opts into versioning via
+   *  `withHistory: true` in its YAML. Gates `bumpVersion` / `delete`
+   *  tool flags on `upsertEntries`. */
+  isHistoryEnabledNamedType(name: string): boolean {
+    const row = this.raw
+      .prepare(`SELECT with_history FROM named_types WHERE name=?`)
+      .get(name) as { with_history: number } | undefined;
+    return row ? row.with_history === 1 : false;
   }
 
   /**

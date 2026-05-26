@@ -17,6 +17,10 @@ Each entry is a plain JSON object in the same format that \`get_node_by_id\` and
 Omit \`$id\` to create a new node (all required fields must be present).
 Provide \`$id\` to patch an existing node — only absent fields are added; existing keys are left untouched.
 
+Top-level tool flags (apply to every entry in the batch):
+  - \`bumpVersion: true\` — every entry MUST have \`$id\`. Each is treated as a version bump: a NEW node row is allocated sharing the prior row's \`timeline_id\` (\`version + 1\`), applying the entry's fields as a shallow patch (unchanged keys are kept; \`null\` values explicitly clear). Allowed on nodes in their type's final immutable state — this IS the supported way to "edit" a finalised node. The new version resets to the type's first declared state unless \`$state\` is supplied; \`created_at\` is inherited from the prior version. Only valid for types declaring \`withHistory: true\` in their YAML. Mutually exclusive with \`delete\`.
+  - \`delete: true\` — every entry MUST have \`$id\` (field payloads are ignored). Each referenced node's current version is tombstoned: the row stays on disk but disappears from search and from the backref index. Only valid for types declaring \`withHistory: true\` in their YAML. Mutually exclusive with \`bumpVersion\`.
+
 Embeddings for Meaning fields are computed automatically.
 Cross-references within the batch: use \`{ "$ref": N }\` as a value, where N is the 0-based index of another entry.
 
@@ -28,6 +32,12 @@ Examples:
 
   Patch an existing node with missing fields:
     { "$type": "Decision", "$id": "a3f2...", "context": "Chosen after evaluating Postgres and DynamoDB" }
+
+  Bump a versioned Decision with one field change (tool param bumpVersion: true):
+    { "$type": "Decision", "$id": "a3f2...", "rationale": "After re-evaluating, switching to Postgres" }
+
+  Soft-delete a versioned Decision (tool param delete: true):
+    { "$type": "Decision", "$id": "a3f2..." }
 
   Batch with a cross-reference (entry 1 references entry 0):
     [
@@ -58,6 +68,8 @@ interface NormalizedEntry {
   data: Record<string, unknown>;
   createdAt?: number;
   updatedAt?: number;
+  bumpVersion?: boolean;
+  delete?: boolean;
 }
 
 /** Coerce an ISO-8601 string or numeric ms value to Unix milliseconds.
@@ -134,6 +146,17 @@ export function parseEntries(raw: unknown[]): { entries: NormalizedEntry[]; erro
 
 export interface Params {
   entries: InsertEntryDTO[];
+  /**
+   * When true, every entry MUST have `$id`. Each is treated as a
+   * version bump (see tool description). Mutually exclusive with
+   * `delete`.
+   */
+  bumpVersion?: boolean;
+  /**
+   * When true, every entry MUST have `$id`. Each referenced node is
+   * tombstoned. Mutually exclusive with `bumpVersion`.
+   */
+  delete?: boolean;
 }
 
 export interface UpsertResponse {
@@ -142,8 +165,36 @@ export interface UpsertResponse {
 }
 
 export async function run(db: Db, p: Params): Promise<UpsertResponse> {
+  if (p.bumpVersion && p.delete) {
+    return {
+      parseErrors: [{
+        index: -1,
+        message: '`bumpVersion` and `delete` are mutually exclusive — pass at most one.',
+      }],
+    };
+  }
   const { entries, errors } = parseEntries(p.entries);
   if (errors.length > 0) return { parseErrors: errors };
+
+  if ((p.bumpVersion || p.delete) && entries.some(e => !e.id)) {
+    return {
+      parseErrors: [{
+        index: entries.findIndex(e => !e.id),
+        message: `${p.bumpVersion ? 'bumpVersion' : 'delete'}: every entry must include "$id"`,
+      }],
+    };
+  }
+
+  // Stamp the tool-level flag onto every entry so the Db layer can
+  // dispatch per-entry. Keeping the flag tool-scoped (not in the DTO)
+  // means we never persist "bumpVersion: true" into the data.
+  if (p.bumpVersion) {
+    for (const e of entries) e.bumpVersion = true;
+  }
+  if (p.delete) {
+    for (const e of entries) e.delete = true;
+  }
+
   const result = await db.insertEntries(entries);
   return { result };
 }

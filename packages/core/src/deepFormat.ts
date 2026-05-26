@@ -36,6 +36,13 @@ export function formatDeepNode(node: DeepNode): unknown {
         // INTEGER ms for fast range scans.
         if (node.createdAt != null) out['$created_at'] = new Date(node.createdAt).toISOString();
         if (node.updatedAt != null) out['$updated_at'] = new Date(node.updatedAt).toISOString();
+        // Versioning identity. Present on every map node (unversioned
+        // rows have version=1 and timelineId === id). Tombstone is only
+        // emitted when true — the absence of the field is the common
+        // case and keeps current-version payloads slim.
+        if (node.timelineId) out['$timeline_id'] = node.timelineId;
+        if (node.version != null) out['$version'] = node.version;
+        if (node.tombstone) out['$tombstone'] = true;
       }
       for (const [key, child] of Object.entries(node.entries)) {
         const v = formatDeepNode(child);

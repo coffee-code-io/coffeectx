@@ -48,6 +48,14 @@ export interface YamlNamedTypeEntry {
   description?: string;
   hidden?: boolean;
   /**
+   * Opt the type into versioning. When true, `upsertEntries` accepts the
+   * tool-level `bumpVersion` / `delete` flags for nodes of this type —
+   * a bump creates a new node row sharing `timeline_id` with the prior
+   * version (`version + 1`), and a delete tombstones the current row.
+   * Non-`withHistory` types stay single-version forever.
+   */
+  withHistory?: boolean;
+  /**
    * Ordered state machine for this type. Defaults to `['ready']` when absent.
    * The last element is the final (immutable) state — upserts on a node at
    * that state throw unless they explicitly bump $state.
@@ -74,7 +82,7 @@ function extractTypeEntry(raw: unknown): YamlNamedTypeEntry {
   if (typeof raw === 'string') return { spec: raw };
 
   const obj = raw as Record<string, unknown>;
-  const { description, hidden, states, ...rest } = obj;
+  const { description, hidden, withHistory, states, ...rest } = obj;
   let parsedStates: string[] | undefined;
   if (Array.isArray(states) && states.every(s => typeof s === 'string') && states.length > 0) {
     parsedStates = states as string[];
@@ -82,6 +90,7 @@ function extractTypeEntry(raw: unknown): YamlNamedTypeEntry {
   return {
     description: typeof description === 'string' ? description : undefined,
     hidden: hidden === true,
+    withHistory: withHistory === true,
     states: parsedStates,
     spec: rest as YamlTypeSpec,
   };
@@ -268,7 +277,7 @@ export function syncFromDir(
       }
       const type = resolveYamlType(entry.spec, specRegistry);
       const typeId = db.upsertType(type, typeIdCache, name);
-      db.upsertNamedType(name, typeId, source, entry.description, entry.hidden);
+      db.upsertNamedType(name, typeId, source, entry.description, entry.hidden, entry.withHistory);
       // Sync the state machine. `setStatesForType` wipes any pre-existing
       // rows so removing `states:` from the YAML restores the default
       // `[ready]` behaviour at read time.
@@ -358,7 +367,7 @@ export function syncFromFile(db: Db, filePath: string, source: 'builtin' | 'user
       if (isInlineableNamedSpec(entry.spec)) { typesSynced.push(name); continue; }
       const type = resolveYamlType(entry.spec, specRegistry);
       const typeId = db.upsertType(type, typeIdCache, name);
-      db.upsertNamedType(name, typeId, source, entry.description, entry.hidden);
+      db.upsertNamedType(name, typeId, source, entry.description, entry.hidden, entry.withHistory);
       db.setStatesForType(name, entry.states ?? []);
       typesSynced.push(name);
     } catch (err) {

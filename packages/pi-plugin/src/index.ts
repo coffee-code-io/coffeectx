@@ -103,7 +103,9 @@ const RawQueryParams = Type.Object({
 });
 
 const LoadNodeParams = Type.Object({
-  id: Type.String({ description: 'Node UUID to load' }),
+  id: Type.Optional(Type.String({ description: 'Exact node UUID — returns this exact row (any version, tombstone-agnostic).' })),
+  timelineId: Type.Optional(Type.String({ description: 'Timeline UUID — returns the current (latest-version) row unless `version` is also set.' })),
+  version: Type.Optional(Type.Integer({ minimum: 1, description: 'With `timelineId`: load this specific (timeline, version) tuple.' })),
   depth: Type.Optional(Type.Integer({ minimum: 0, maximum: 20, default: 10 })),
   verbose: Type.Optional(Type.Boolean({ default: false })),
 });
@@ -269,6 +271,8 @@ const factory = (pi: MinimalExtensionAPI): void => {
       try {
         const result = loadNode.run(db, {
           id: p.id,
+          timelineId: p.timelineId,
+          version: p.version,
           depth: p.depth ?? 10,
           verbose: p.verbose ?? false,
         });

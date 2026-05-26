@@ -70,7 +70,9 @@ const RawQueryParams = Type.Object({
 });
 
 const LoadNodeParams = Type.Object({
-  id: Type.String({ description: 'Node UUID to load' }),
+  id: Type.Optional(Type.String({ description: 'Exact node UUID — returns this exact row (any version, tombstone-agnostic).' })),
+  timelineId: Type.Optional(Type.String({ description: 'Timeline UUID — returns the current (latest-version) row unless `version` is also set.' })),
+  version: Type.Optional(Type.Integer({ minimum: 1, description: 'With `timelineId`: load this specific (timeline, version) tuple.' })),
   depth: Type.Optional(Type.Integer({ minimum: 0, maximum: 20, default: 10 })),
   verbose: Type.Optional(Type.Boolean({ default: false })),
 });
@@ -307,6 +309,8 @@ export function buildGraphTools(db: Db, options: BuildGraphToolsOptions = {}) {
         try {
           const result = loadNode.run(db, {
             id: raw.id,
+            timelineId: raw.timelineId,
+            version: raw.version,
             depth: raw.depth ?? 10,
             verbose: raw.verbose ?? false,
           });

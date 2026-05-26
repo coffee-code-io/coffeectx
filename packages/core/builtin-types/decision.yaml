@@ -1,6 +1,7 @@
 types:
   Decision:
     description: A deliberate architectural or design choice that shaped the codebase — what was decided and why.
+    withHistory: true         # opts the type into version bumps + soft-delete via upsertEntries' tool flags
     kind: Map
     fields:
       title: Symbol           # short imperative phrase, e.g. "Use SQLite for storage"
