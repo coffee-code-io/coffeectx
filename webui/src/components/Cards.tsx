@@ -20,6 +20,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useUi } from '../state/store';
+import { formatLocalTimestamp } from '../lib/formatTimestamp';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -95,9 +96,22 @@ function ValueView({ value, depth, budget }: ValueProps) {
 }
 
 function TypedCard({ obj, depth, budget }: { obj: Record<string, unknown>; depth: number; budget: CardBudget }) {
-  // Strip the metadata keys so they don't render as data rows.
-  const { $type, $id: _id, $state, ...rest } = obj;
-  void _id;
+  // Strip the system-level metadata keys so they don't render as data
+  // rows. Versioning identity ($timeline_id / $version / $tombstone)
+  // lives in the NodeDetail header chip; timestamps render below via
+  // their own styled row.
+  const {
+    $type,
+    $id: _id,
+    $state,
+    $timeline_id: _tid,
+    $version: _ver,
+    $tombstone: _tomb,
+    $created_at,
+    $updated_at,
+    ...rest
+  } = obj;
+  void _id; void _tid; void _ver; void _tomb;
   return (
     <div className="bg-cream-100 border border-cream-200 rounded-lg p-3 space-y-2 animate-fade-up">
       <div className="flex items-baseline justify-between gap-2">
@@ -110,6 +124,39 @@ function TypedCard({ obj, depth, budget }: { obj: Record<string, unknown>; depth
         )}
       </div>
       <ObjectRows obj={rest} depth={depth + 1} budget={budget} />
+      {($created_at != null || $updated_at != null) && (
+        <TimestampsRow createdAt={$created_at} updatedAt={$updated_at} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Subdued metadata row at the bottom of every named-type card showing
+ * the node's `$created_at` / `$updated_at` without the `$` prefix, with
+ * dates formatted in the user's local timezone (no `T` separator). A
+ * thin top border anchors it visually as out-of-band metadata, not a
+ * field value.
+ */
+function TimestampsRow({
+  createdAt,
+  updatedAt,
+}: {
+  createdAt: unknown;
+  updatedAt: unknown;
+}) {
+  return (
+    <div className="pt-2 border-t border-cream-200 flex flex-wrap gap-x-4 gap-y-1 text-[10px] italic font-mono text-roast-light">
+      {createdAt != null && (
+        <span>
+          created_at <span className="text-roast-medium not-italic">{formatLocalTimestamp(createdAt)}</span>
+        </span>
+      )}
+      {updatedAt != null && (
+        <span>
+          updated_at <span className="text-roast-medium not-italic">{formatLocalTimestamp(updatedAt)}</span>
+        </span>
+      )}
     </div>
   );
 }

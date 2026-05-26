@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
-import type { NodeDebugInfo } from '../api/client';
+import type { NodeDebugInfo, NodeDetailResponse } from '../api/client';
 import { useUi } from '../state/store';
 import { Card } from './Cards';
 import { JsonView } from './JsonView';
@@ -65,9 +65,12 @@ export function NodeDetail() {
           <span className="text-[11px] uppercase tracking-widest text-roast-light">{data?.typeName ?? '—'}</span>
           <span className="font-mono text-xs text-roast-medium truncate">{id}</span>
         </div>
-        <div className="flex items-center gap-1">
-          <Tab active={tab === 'cards'} onClick={() => setTab('cards')}>Cards</Tab>
-          <Tab active={tab === 'json'} onClick={() => setTab('json')}>JSON</Tab>
+        <div className="flex items-center gap-3">
+          {data && <VersionNav data={data} currentId={id} />}
+          <div className="flex items-center gap-1">
+            <Tab active={tab === 'cards'} onClick={() => setTab('cards')}>Cards</Tab>
+            <Tab active={tab === 'json'} onClick={() => setTab('json')}>JSON</Tab>
+          </div>
         </div>
       </div>
 
@@ -105,6 +108,95 @@ export function NodeDetail() {
       </div>
     </div>
   );
+}
+
+/**
+ * Header-right widget that surfaces the timeline a versioned node belongs
+ * to, plus `←` / `→` arrows to step between versions. Renders nothing for
+ * unversioned nodes (where `versions.length === 1`) so the chip never
+ * shows for plain types like `Assumption` / `UserInput`.
+ *
+ * Clicking an arrow calls `setSelected(otherVersionId)`; the URL-state
+ * subscription in `store.ts` + `urlState.ts` pushes a new history entry
+ * automatically, so browser back/forward walks the version history.
+ */
+function VersionNav({
+  data,
+  currentId,
+}: {
+  data: NodeDetailResponse;
+  currentId: string;
+}) {
+  const setSelected = useUi(s => s.setSelected);
+  const versions = data.versions;
+  if (!versions || versions.length <= 1) return null;
+
+  const idx = versions.findIndex(v => v.id === currentId);
+  if (idx === -1) return null;
+  const current = versions[idx]!;
+  const prev = idx > 0 ? versions[idx - 1] : null;
+  const next = idx < versions.length - 1 ? versions[idx + 1] : null;
+
+  // Read the timeline slug from `data.node` if formatDeepNode dropped a
+  // `$timeline_id` key. Fall back to deriving from any version row's id
+  // (every row in `versions` shares the same `timeline_id`, but the row
+  // doesn't ship it — see TimelineVersionRow). For the short-prefix
+  // display we just use the current row's timeline anchor via the node
+  // payload.
+  const timelineId = readTimelineId(data.node);
+
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        onClick={() => prev && setSelected(prev.id)}
+        disabled={!prev}
+        title={prev ? `Go to v${prev.version}` : 'Already at oldest version'}
+        className="px-1.5 py-0.5 text-roast-medium hover:text-roast-dark disabled:text-cream-300 disabled:cursor-not-allowed"
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="15 18 9 12 15 6" />
+        </svg>
+      </button>
+      <span
+        title={timelineId ?? ''}
+        className="select-none font-mono text-[11px] text-roast-medium bg-cream-50 border border-cream-200 rounded px-2 py-0.5"
+      >
+        v{current.version}
+        {timelineId && (
+          <>
+            <span className="text-roast-light"> · </span>
+            <span>{timelineId.slice(0, 8)}</span>
+          </>
+        )}
+      </span>
+      <button
+        onClick={() => next && setSelected(next.id)}
+        disabled={!next}
+        title={next ? `Go to v${next.version}` : 'Already at latest version'}
+        className="px-1.5 py-0.5 text-roast-medium hover:text-roast-dark disabled:text-cream-300 disabled:cursor-not-allowed"
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="9 6 15 12 9 18" />
+        </svg>
+      </button>
+      {current.tombstone && (
+        <span
+          title="This version is tombstoned — hidden from search."
+          className="font-mono text-[10px] uppercase tracking-wider text-status-warning border border-dashed border-status-warning/60 rounded px-1.5 py-0.5"
+        >
+          deleted
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Pull `$timeline_id` out of a formatDeepNode object (top-level only —
+ *  the timeline id of a deep tree's root). */
+function readTimelineId(node: unknown): string | null {
+  if (!node || typeof node !== 'object') return null;
+  const v = (node as Record<string, unknown>)['$timeline_id'];
+  return typeof v === 'string' ? v : null;
 }
 
 function Tab({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {

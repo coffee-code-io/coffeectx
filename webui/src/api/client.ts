@@ -50,6 +50,17 @@ export type NodeDebugInfo =
       filePaths: string[];
     };
 
+/** One row of `db.listTimelineVersions(timelineId)` — every version of a
+ *  timeline ordered ascending. Always present in `NodeDetailResponse`
+ *  (length 1 for unversioned types, where the node's `timeline_id`
+ *  equals its `id`). */
+export interface TimelineVersionRow {
+  id: string;
+  version: number;
+  createdAt: number | null;
+  tombstone: boolean;
+}
+
 export interface NodeDetailResponse {
   id: string;
   typeName: string | null;
@@ -58,6 +69,9 @@ export interface NodeDetailResponse {
   state: string | null;
   node: unknown;
   raw: unknown;
+  /** All versions of the timeline this node belongs to. Length === 1
+   *  means the node is unversioned (no nav arrows). */
+  versions: TimelineVersionRow[];
   /** Optional aux-table payload; populated only when the server's
    * `debug` flag is on. Renderable iff present. */
   debug?: NodeDebugInfo;

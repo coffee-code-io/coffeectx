@@ -222,12 +222,20 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
         const debug = loadConfig().debug
           ? collectDebugInfo(db, req.params.id, typeName, node)
           : undefined;
+        // Always include the timeline's version list — the UI uses
+        // length > 1 to decide whether to render version arrows. For
+        // unversioned types the list is a single row (the node's own
+        // self-timeline), so the chip stays hidden client-side.
+        const versions = node.kind === 'map' && node.timelineId
+          ? db.listTimelineVersions(node.timelineId)
+          : [];
         return {
           id: req.params.id,
           typeName,
           state,
           node: formatDeepNode(node),
           raw: node,
+          versions,
           debug,
         };
       } catch (err) {
