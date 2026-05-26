@@ -181,6 +181,15 @@ export interface CoffeectxConfig {
   };
   /** Optional global secrets integration. */
   secrets?: SecretsSettings;
+  /**
+   * Global debug switch. When true, surfaces normally-hidden diagnostic
+   * data (aux-table rows on NodeDetail, etc.) across the UI. Default
+   * false. Single boolean today — every consumer just checks
+   * `cfg.debug === true`; if we later want per-area toggles this can
+   * become `debug?: { ui?: boolean; indexer?: boolean }` without
+   * breaking the YAML.
+   */
+  debug?: boolean;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
@@ -199,6 +208,7 @@ type RawConfig = Partial<{
   projects: Record<string, ProjectEntry>;
   types: CoffeectxConfig['types'];
   secrets: SecretsSettings;
+  debug: boolean;
 }>;
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -220,7 +230,7 @@ export function loadConfig(): CoffeectxConfig {
 
   const types: CoffeectxConfig['types'] = { ...(raw.types ?? {}) };
 
-  return { active: raw.active, projects, types, secrets: raw.secrets };
+  return { active: raw.active, projects, types, secrets: raw.secrets, debug: raw.debug };
 }
 
 /** Save the full config back to ~/.coffeecode/config.yaml. */

@@ -51,6 +51,9 @@ export function FilterRail() {
     queryKey: ['types', project],
     queryFn: () => (project ? api.listTypes(project) : Promise.resolve([])),
     enabled: !!project,
+    // Type catalog only changes on `sync-types` runs — pin a long stale
+    // window so opening/closing the filter rail doesn't refetch.
+    staleTime: 5 * 60_000,
   });
 
   const submit = (e?: React.FormEvent) => {

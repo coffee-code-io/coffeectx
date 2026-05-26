@@ -36,6 +36,20 @@ export interface NodesResponse {
 
 export type RefsBatchResponse = Record<string, RefsResponse>;
 
+/**
+ * Aux-table payload the server attaches to the node-detail response when
+ * the global `debug` flag is on. Discriminated by `kind`. Absent when
+ * the flag's off or when the node type has no aux data to surface.
+ * Mirror of `NodeDebugInfo` in indexer/src/ui/debugInfo.ts.
+ */
+export type NodeDebugInfo =
+  | { kind: 'event'; filePaths: string[] }
+  | {
+      kind: 'plan';
+      acceptances: { sessionId: string; timestamp: string }[];
+      filePaths: string[];
+    };
+
 export interface NodeDetailResponse {
   id: string;
   typeName: string | null;
@@ -44,6 +58,9 @@ export interface NodeDetailResponse {
   state: string | null;
   node: unknown;
   raw: unknown;
+  /** Optional aux-table payload; populated only when the server's
+   * `debug` flag is on. Renderable iff present. */
+  debug?: NodeDebugInfo;
 }
 
 export interface NodeRef {
@@ -116,6 +133,10 @@ async function http<T>(input: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listProjects: () => http<ProjectInfo[]>('/api/projects'),
+
+  /** Global debug flag from ~/.coffeecode/config.yaml. Fetched once on
+   *  bootstrap; the result lives in zustand for synchronous reads. */
+  getDebug: () => http<{ debug: boolean }>('/api/debug'),
   setProjectEnabled: (name: string, enabled: boolean) =>
     http<{ name: string; enabled: boolean }>(`/api/projects/${encodeURIComponent(name)}/enabled`, {
       method: 'POST',

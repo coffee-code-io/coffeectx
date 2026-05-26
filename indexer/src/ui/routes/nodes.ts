@@ -3,9 +3,10 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { parseQuery, executeQuery, formatDeepNode } from '@coffeectx/core';
+import { parseQuery, executeQuery, formatDeepNode, loadConfig } from '@coffeectx/core';
 import type { Db } from '@coffeectx/core';
 import { getDb } from '../dbPool.js';
+import { collectDebugInfo } from '../debugInfo.js';
 
 type SearchMode = 'query' | 'search' | 'regex' | 'exact';
 
@@ -214,12 +215,20 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
         const node = db.loadNodeDeep(req.params.id, depth);
         const typeName = db.getNodeTypeName(req.params.id);
         const state = node.kind === 'map' ? node.state ?? null : null;
+        // Only attach the aux-table payload when the global flag is on.
+        // Server is the source of truth — the client renders iff the
+        // field is present, so flipping the YAML setting to false
+        // immediately suppresses the panel without a UI reload.
+        const debug = loadConfig().debug
+          ? collectDebugInfo(db, req.params.id, typeName, node)
+          : undefined;
         return {
           id: req.params.id,
           typeName,
           state,
           node: formatDeepNode(node),
           raw: node,
+          debug,
         };
       } catch (err) {
         reply.code(404);

@@ -1,9 +1,14 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
+import type { NodeDebugInfo } from '../api/client';
 import { useUi } from '../state/store';
 import { Card } from './Cards';
 import { JsonView } from './JsonView';
+
+// Named-type nodes mutate rarely from the UI's perspective. Bump the
+// stale window so flipping tabs / drilling between nodes doesn't refetch.
+const NODE_QUERY_OPTS = { staleTime: 5 * 60_000, gcTime: 60 * 60_000 };
 
 type Tab = 'cards' | 'json';
 
@@ -15,10 +20,13 @@ export function NodeDetail() {
 
   // Cards tab uses depth=3 — anything deeper renders as a drill-in chip via
   // formatDeepNode's `{$id}` placeholders. Keeps DOM small on busy nodes.
+  const debugOn = useUi(s => s.debug);
+
   const { data, error, isLoading } = useQuery({
     queryKey: ['node', project, id, 'cards'],
     queryFn: () => (project && id ? api.loadNode(project, id, 3) : Promise.resolve(null)),
     enabled: !!(project && id),
+    ...NODE_QUERY_OPTS,
   });
 
   // JSON tab fetches a fuller tree, but only when the user actually clicks it.
@@ -26,12 +34,14 @@ export function NodeDetail() {
     queryKey: ['node', project, id, 'json'],
     queryFn: () => (project && id ? api.loadNode(project, id, 12) : Promise.resolve(null)),
     enabled: !!(project && id) && tab === 'json',
+    ...NODE_QUERY_OPTS,
   });
 
   const refs = useQuery({
     queryKey: ['refs', project, id],
     queryFn: () => (project && id ? api.loadRefs(project, id) : Promise.resolve(null)),
     enabled: !!(project && id),
+    ...NODE_QUERY_OPTS,
   });
 
   if (!id) return null;
@@ -77,6 +87,8 @@ export function NodeDetail() {
             ) : (
               <JsonView value={data.node} />
             )}
+
+            {debugOn && data.debug && <DebugSection info={data.debug} />}
 
             {refs.data && (refs.data.in.length > 0 || refs.data.out.length > 0) && (
               <div className="space-y-3">
@@ -149,6 +161,89 @@ function NotANodeBanner({ id, message }: { id: string; message: string }) {
         >
           Back
         </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Aux-table panel rendered on NodeDetail when the global `debug` flag is
+ * on AND the server attached a payload (i.e. the node's type has aux
+ * data — events or plans today). Dashed amber tint marks it as
+ * out-of-band diagnostic info, not part of the normal graph view.
+ */
+function DebugSection({ info }: { info: NodeDebugInfo }) {
+  return (
+    <div className="border border-dashed border-status-warning/60 bg-status-warning/5 rounded-lg p-4 space-y-3">
+      <div className="text-[10px] uppercase tracking-widest text-status-warning">Debug · aux tables</div>
+      {info.kind === 'event' && (
+        <EventDebugBody filePaths={info.filePaths} />
+      )}
+      {info.kind === 'plan' && (
+        <PlanDebugBody acceptances={info.acceptances} filePaths={info.filePaths} />
+      )}
+    </div>
+  );
+}
+
+function EventDebugBody({ filePaths }: { filePaths: string[] }) {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] text-roast-medium">
+        Recorded file context ({filePaths.length}) — from <code className="font-mono">event_file_context</code>:
+      </div>
+      {filePaths.length === 0 ? (
+        <div className="text-[11px] italic text-roast-light">(none — indexer didn't map any file paths to this event)</div>
+      ) : (
+        <ul className="space-y-0.5">
+          {filePaths.map(p => (
+            <li key={p} className="font-mono text-[11px] text-roast-dark break-all">{p}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function PlanDebugBody({
+  acceptances,
+  filePaths,
+}: {
+  acceptances: { sessionId: string; timestamp: string }[];
+  filePaths: string[];
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <div className="text-[11px] text-roast-medium">
+          Accepting sessions ({acceptances.length}) — from <code className="font-mono">plan_acceptances</code>:
+        </div>
+        {acceptances.length === 0 ? (
+          <div className="text-[11px] italic text-roast-light">(none — no session ran ExitPlanMode against this plan)</div>
+        ) : (
+          <ul className="space-y-0.5">
+            {acceptances.map(a => (
+              <li key={a.sessionId} className="font-mono text-[11px] text-roast-dark break-all flex gap-2">
+                <span>{a.sessionId}</span>
+                <span className="text-roast-light">@ {a.timestamp}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="space-y-1.5">
+        <div className="text-[11px] text-roast-medium">
+          Touched files ({filePaths.length}) — union of <code className="font-mono">FileOperation.path</code> across accepting sessions:
+        </div>
+        {filePaths.length === 0 ? (
+          <div className="text-[11px] italic text-roast-light">(none)</div>
+        ) : (
+          <ul className="space-y-0.5">
+            {filePaths.map(p => (
+              <li key={p} className="font-mono text-[11px] text-roast-dark break-all">{p}</li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

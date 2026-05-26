@@ -45,7 +45,10 @@ createRoot(root).render(
         dehydrateOptions: {
           shouldDehydrateQuery: ({ queryKey }) => {
             const k = String(queryKey[0] ?? '');
-            return k !== 'agent-sessions' && k !== 'cite';
+            // `debug` is a one-shot bootstrap fetch — re-fetch on each
+            // load so flipping the server-side flag takes effect on the
+            // next page open without manually clearing storage.
+            return k !== 'agent-sessions' && k !== 'cite' && k !== 'debug';
           },
         },
       }}

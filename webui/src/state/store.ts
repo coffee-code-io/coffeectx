@@ -25,12 +25,19 @@ interface UiState {
    * exists.
    */
   activeAgentSessionByProject: Record<string, string>;
+  /**
+   * Global debug flag, mirrored from `~/.coffeecode/config.yaml` via
+   * `GET /api/debug`. Fetched once on app bootstrap. UI surfaces gated
+   * on this read it synchronously from the store.
+   */
+  debug: boolean;
   setProject: (p: string | null) => void;
   setTab: (t: Tab) => void;
   setViewMode: (v: GraphViewMode) => void;
   setSelected: (id: string | null) => void;
   setFilter: (patch: Partial<UiState['filter']>) => void;
   rememberAgentSession: (project: string, sessionPath: string | undefined) => void;
+  setDebug: (debug: boolean) => void;
 }
 
 export const useUi = create<UiState>()(
@@ -48,6 +55,7 @@ export const useUi = create<UiState>()(
         includeHidden: false,
       },
       activeAgentSessionByProject: {},
+      debug: false,
       setProject: p => set({ project: p, selectedNodeId: null }),
       setTab: t => set({ tab: t }),
       setViewMode: v => set({ viewMode: v }),
@@ -58,6 +66,7 @@ export const useUi = create<UiState>()(
         if (sessionPath) next[project] = sessionPath; else delete next[project];
         return { activeAgentSessionByProject: next };
       }),
+      setDebug: debug => set({ debug }),
     }),
     {
       name: 'coffeectx.ui.v1',

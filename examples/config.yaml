@@ -23,6 +23,15 @@ types:
 secrets:
   loadIntoAgents: false
 
+# Global debug switch. When true, the NodeDetail page surfaces aux-table
+# rows that are normally hidden from the graph view:
+#   - event_file_context for agent-log events (UserInput / FileOperation /
+#     ShellExecution / AgentQuestion / AgentMessage / AgentSummary)
+#   - plan_acceptances + touched FileOperation paths for Plan nodes
+# Default: false. The UI fetches this once per page load via /api/debug,
+# so flipping it requires a UI-server restart (or a browser reload).
+debug: false
+
 projects:
   my-project:
     # Created and updated by `retrival-index init` / `use`. Both fields

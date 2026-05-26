@@ -1,4 +1,7 @@
 import { useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { api } from './api/client';
+import { decodeUrlState, installPopStateBridge, pushUrlState } from './state/urlState';
 import { ProjectSelector } from './components/ProjectSelector';
 import { FilterRail } from './components/FilterRail';
 import { GraphView } from './components/GraphView';
@@ -16,7 +19,21 @@ export function App() {
   const setTab = useUi(s => s.setTab);
   const selected = useUi(s => s.selectedNodeId);
   const setSelected = useUi(s => s.setSelected);
+  const setDebug = useUi(s => s.setDebug);
   const viewMode = useUi(s => s.viewMode);
+
+  // Bootstrap the global debug flag from the server. Stays in zustand
+  // after this so every consumer reads it synchronously. `staleTime:
+  // Infinity` because the only way the flag flips is editing config.yaml
+  // — that's a server restart anyway.
+  const debugQuery = useQuery({
+    queryKey: ['debug'],
+    queryFn: api.getDebug,
+    staleTime: Infinity,
+  });
+  useEffect(() => {
+    if (debugQuery.data) setDebug(debugQuery.data.debug);
+  }, [debugQuery.data, setDebug]);
 
   // Esc closes detail overlay.
   useEffect(() => {
@@ -25,6 +42,31 @@ export function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [selected, setSelected]);
+
+  // One-shot URL ↔ store bridge bootstrap. On mount:
+  //   1. If the URL has any nav params, hydrate the store from it (URL
+  //      is canonical when present; deep links / shared links Just Work).
+  //      Otherwise keep whatever zustand restored from localStorage.
+  //   2. Install a `popstate` listener so browser back/forward applies
+  //      the URL back onto the store.
+  //   3. Subscribe to store changes so every navigation-shape mutation
+  //      pushes a new history entry. `pushUrlState` short-circuits when
+  //      the encoded URL is identical, so this stays cheap.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    if ([...sp.keys()].length > 0) {
+      const decoded = decodeUrlState(sp);
+      const current = useUi.getState();
+      useUi.setState({
+        ...current,
+        ...decoded,
+        filter: { ...current.filter, ...(decoded.filter ?? {}) },
+      });
+    }
+    installPopStateBridge(useUi);
+    const unsub = useUi.subscribe(state => pushUrlState(state));
+    return () => { unsub(); };
+  }, []);
 
   return (
     <div className="h-screen flex flex-col text-roast-dark bg-cream-50">
