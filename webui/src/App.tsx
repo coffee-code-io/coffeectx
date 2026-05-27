@@ -9,6 +9,7 @@ import { ListView } from './components/ListView';
 import { NodeDetail } from './components/NodeDetail';
 import { SchedulerView } from './components/SchedulerView';
 import { SkillsView } from './components/SkillsView';
+import { SecretsView } from './components/SecretsView';
 import { RunsView } from './components/RunsView';
 import { SchedulerDot } from './components/SchedulerDot';
 import { AgentChatPanel } from './components/AgentChatPanel';
@@ -96,6 +97,8 @@ export function App() {
             <RunsView />
           ) : tab === 'skills' ? (
             <SkillsView />
+          ) : tab === 'secrets' ? (
+            <SecretsView />
           ) : (
             <SchedulerView />
           )}
@@ -116,6 +119,7 @@ function Tabs({ current, onChange }: { current: Tab; onChange: (t: Tab) => void 
     { value: 'runs', label: 'Runs' },
     { value: 'scheduler', label: 'Scheduler' },
     { value: 'skills', label: 'Skills' },
+    { value: 'secrets', label: 'Secrets' },
   ];
   return (
     <nav className="flex bg-cream-50 border border-cream-200 rounded overflow-hidden">

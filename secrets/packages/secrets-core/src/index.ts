@@ -2,6 +2,7 @@ export {
   DEFAULT_CONFIG_PATH,
   expandHome,
   loadSecretsConfig,
+  saveSecretsConfig,
   normalizeConfig,
   resolvePath,
   resolveProject,

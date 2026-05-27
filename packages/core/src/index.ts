@@ -9,6 +9,7 @@ export {
   resolveProjectTools,
   resolveJobAuth,
   resolveAgentAuth,
+  resolveSecretsProjectName,
   resolveJobParameters,
   resolveJobEnv,
   resolveSkillFilter,

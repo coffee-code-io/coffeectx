@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@coffeectx/core": "^0.1.0",
+    "@coffeectx/secrets-core": "^0.1.0",
     "@coffeectx/secrets-pi": "^0.1.0",
     "@coffeectx/server": "^0.1.0",
     "@coffeectx/tools": "^0.1.0",

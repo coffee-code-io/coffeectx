@@ -38,7 +38,7 @@ import {
 import { buildResourceLoader } from '../agentRun/skillResourceLoader.js';
 import { buildPiAuth } from '../agentRun/auth.js';
 import { buildGraphTools, buildNavigateTool } from '../agentRun/piTools.js';
-import { maybeExecElevatedTool } from '../agentRun/secretsTool.js';
+import { maybeExecElevatedTool, setSecretsProjectEnv } from '../agentRun/secretsTool.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SESSION_ROOT = join(homedir(), '.coffeecode', 'sessions');
@@ -367,6 +367,8 @@ interface BuildArgs {
 }
 
 async function buildState(args: BuildArgs): Promise<PerProjectState> {
+  // Resolve secrets project into env so `exec_elevated` can pick it up.
+  setSecretsProjectEnv(args.projectName);
   const piAuth = buildPiAuth(args.auth);
 
   // Pre-allocate so the tools' closures see the eventual state object.

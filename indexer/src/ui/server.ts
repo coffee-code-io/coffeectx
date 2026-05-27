@@ -13,6 +13,7 @@ import { registerNodesRoutes } from './routes/nodes.js';
 import { registerJobsRoutes } from './routes/jobs.js';
 import { registerAgentRoutes } from './routes/agent.js';
 import { registerSkillsRoutes } from './routes/skills.js';
+import { registerSecretsRoutes } from './routes/secrets.js';
 import { registerDebugRoutes } from './routes/debug.js';
 import { closeAll } from './dbPool.js';
 import { disposeAll as disposeAllAgents } from './agentSessions.js';
@@ -36,6 +37,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   await registerJobsRoutes(app);
   await registerAgentRoutes(app);
   await registerSkillsRoutes(app);
+  await registerSecretsRoutes(app);
   await registerDebugRoutes(app);
 
   // ── Static SPA serving ────────────────────────────────────────────────────

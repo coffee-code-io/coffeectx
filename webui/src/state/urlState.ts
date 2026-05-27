@@ -43,7 +43,7 @@ export function encodeUrlState(state: UiState): URLSearchParams {
 export function decodeUrlState(sp: URLSearchParams): Partial<UiState> {
   const out: Partial<UiState> = {};
   const tab = sp.get('tab');
-  if (tab === 'graph' || tab === 'runs' || tab === 'scheduler' || tab === 'skills') {
+  if (tab === 'graph' || tab === 'runs' || tab === 'scheduler' || tab === 'skills' || tab === 'secrets') {
     out.tab = tab;
   } else if (tab === null) {
     out.tab = 'graph';

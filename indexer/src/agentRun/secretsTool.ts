@@ -16,7 +16,7 @@
  *     (literally or via a glob) for it to be exposed.
  */
 
-import { loadConfig } from '@coffeectx/core';
+import { loadConfig, resolveSecretsProjectName } from '@coffeectx/core';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { buildExecElevatedTool } from '@coffeectx/secrets-pi';
 
@@ -33,4 +33,21 @@ export function secretsEnabled(): boolean {
 export function maybeExecElevatedTool(): ToolDefinition[] {
   if (!secretsEnabled()) return [];
   return [buildExecElevatedTool() as unknown as ToolDefinition];
+}
+
+/**
+ * Set `process.env.COFFEECTX_SECRETS_PROJECT` so the in-process
+ * `exec_elevated` tool resolves to this coffeectx project's secrets project
+ * (per `ProjectEntry.secretsProject`, defaulting to the project name).
+ * Pi sessions are in-process, so we mutate the host env once at session boot;
+ * the secrets-core resolver reads `process.env` at every call. Concurrent
+ * sessions for different projects would race — accepted for now since the UI
+ * agent runs one session per project at a time.
+ */
+export function setSecretsProjectEnv(projectName: string): void {
+  if (!secretsEnabled()) return;
+  try {
+    const cfg = loadConfig();
+    process.env['COFFEECTX_SECRETS_PROJECT'] = resolveSecretsProjectName(cfg, projectName);
+  } catch { /* config unreadable — leave env alone */ }
 }

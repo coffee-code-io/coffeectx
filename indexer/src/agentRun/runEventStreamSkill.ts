@@ -33,7 +33,7 @@ import type { AuthSettings, Db } from '@coffeectx/core';
 import { buildPiAuth } from './auth.js';
 import { buildGraphTools } from './piTools.js';
 import { buildResourceLoader } from './skillResourceLoader.js';
-import { maybeExecElevatedTool } from './secretsTool.js';
+import { maybeExecElevatedTool, setSecretsProjectEnv } from './secretsTool.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -127,6 +127,9 @@ export async function runSkillInteractive(
 
   // ── 1. Per-job pi auth ────────────────────────────────────────────────────
   const { model, authStorage } = buildPiAuth(auth);
+
+  // Resolve secrets project into env so `exec_elevated` can pick it up.
+  setSecretsProjectEnv(projectName);
 
   // ── 2. Session persistence (one dir per (skill, source) pair) ─────────────
   const sessionDir = sessionDirFor(projectName, skillName, sourceId);

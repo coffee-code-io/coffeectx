@@ -33,7 +33,7 @@ import {
   PI_BUILTIN_TOOL_NAMES,
   resolveAllowedTools,
 } from './toolPolicy.js';
-import { maybeExecElevatedTool } from './secretsTool.js';
+import { maybeExecElevatedTool, setSecretsProjectEnv } from './secretsTool.js';
 
 const SESSION_ROOT = join(homedir(), '.coffeecode', 'sessions');
 
@@ -92,6 +92,9 @@ export async function runUserJob(opts: RunUserJobOptions): Promise<RunUserJobRes
   const { model, authStorage } = buildPiAuth(auth);
 
   // One JSONL per run, timestamped — easy to grep / wipe.
+  // Resolve secrets project into env so `exec_elevated` can pick it up.
+  setSecretsProjectEnv(projectName);
+
   const sessionDir = sessionDirFor(projectName, jobName);
   mkdirSync(sessionDir, { recursive: true });
   const sessionManager = SessionManager.create(PROJECT_ROOT, sessionDir);

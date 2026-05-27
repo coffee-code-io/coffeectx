@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parse } from 'yaml';
+import { parse, stringify } from 'yaml';
 import type { ProjectConfig, SecretProviderConfig, SecretsConfig, WhitelistRule } from './types.js';
 
 export const DEFAULT_CONFIG_PATH = '~/.coffeecode/secrets.yaml';
@@ -23,6 +23,38 @@ export function loadSecretsConfig(configPath = DEFAULT_CONFIG_PATH): SecretsConf
   const raw = fs.readFileSync(file, 'utf8');
   const parsed = parse(raw) as unknown;
   return normalizeConfig(parsed);
+}
+
+/**
+ * Persist a normalized config to disk. Atomic via tmp+rename. Creates the
+ * parent directory if missing. Empty `whitelist`/`secrets`/`allowed_env`
+ * fields are dropped to keep the YAML tidy.
+ */
+export function saveSecretsConfig(config: SecretsConfig, configPath = DEFAULT_CONFIG_PATH): void {
+  const file = resolvePath(configPath);
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const projects: Record<string, unknown> = {};
+  for (const [name, project] of Object.entries(config.projects)) {
+    const out: Record<string, unknown> = { directory: project.directory };
+    if (project.whitelist && project.whitelist.length > 0) {
+      out['whitelist'] = project.whitelist.map(rule => {
+        const r: Record<string, unknown> = { command: rule.command };
+        if (rule.file_hashes && Object.keys(rule.file_hashes).length > 0) r['file_hashes'] = rule.file_hashes;
+        if (rule.allowed_env && rule.allowed_env.length > 0) r['allowed_env'] = rule.allowed_env;
+        if (rule.secrets && rule.secrets.length > 0) r['secrets'] = rule.secrets;
+        return r;
+      });
+    }
+    if (project.secrets && Object.keys(project.secrets).length > 0) out['secrets'] = project.secrets;
+    projects[name] = out;
+  }
+
+  const yamlText = stringify({ projects });
+  const tmp = `${file}.tmp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  fs.writeFileSync(tmp, yamlText, 'utf8');
+  fs.renameSync(tmp, file);
 }
 
 export function normalizeConfig(value: unknown): SecretsConfig {

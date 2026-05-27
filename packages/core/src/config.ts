@@ -154,6 +154,13 @@ export interface ProjectEntry {
    * "not configured" hint instead of attempting to spawn a session.
    */
   agent?: { auth?: AuthSettings };
+  /**
+   * Name of the project entry in `~/.coffeecode/secrets.yaml` that
+   * `exec_elevated` should resolve to for this coffeectx project. When unset,
+   * defaults to the coffeectx project name itself. Propagated to the pi
+   * runtime via `COFFEECTX_SECRETS_PROJECT` env var at session start.
+   */
+  secretsProject?: string;
 }
 
 /** Global secrets integration switch. */
@@ -294,6 +301,11 @@ export function resolveJobAuth(cfg: CoffeectxConfig, projectName: string, jobNam
 /** Effective auth for the UI agent: project.agent.auth. */
 export function resolveAgentAuth(cfg: CoffeectxConfig, projectName: string): AuthSettings {
   return cfg.projects[projectName]?.agent?.auth ?? {};
+}
+
+/** Secrets project name for this coffeectx project — `secretsProject` override or the project name itself. */
+export function resolveSecretsProjectName(cfg: CoffeectxConfig, projectName: string): string {
+  return cfg.projects[projectName]?.secretsProject ?? projectName;
 }
 
 /** Per-job parameters (whole bag) with empty fallback. */

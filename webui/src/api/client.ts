@@ -263,6 +263,38 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+
+  // ── Secrets ──────────────────────────────────────────────────────────────
+  getSecrets: (project: string) =>
+    http<SecretsResponse>(`/api/p/${encodeURIComponent(project)}/secrets`),
+  setSecretsProject: (project: string, secretsProject: string | null) =>
+    http<SecretsResponse>(`/api/p/${encodeURIComponent(project)}/secrets/secretsProject`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secretsProject }),
+    }),
+  createWhitelist: (project: string, body: WhitelistRuleInput) =>
+    http<SecretsResponse>(`/api/p/${encodeURIComponent(project)}/secrets/whitelist`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  updateWhitelist: (project: string, index: number, body: WhitelistRuleInput) =>
+    http<SecretsResponse>(`/api/p/${encodeURIComponent(project)}/secrets/whitelist/${index}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  deleteWhitelist: (project: string, index: number) =>
+    http<SecretsResponse>(`/api/p/${encodeURIComponent(project)}/secrets/whitelist/${index}`, {
+      method: 'DELETE',
+    }),
+  hashFile: (project: string, path: string) =>
+    http<HashResponse>(`/api/p/${encodeURIComponent(project)}/secrets/hash`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
 };
 
 export type SkillFilterTarget = 'uiAgent' | 'indexingAgents' | 'jobs';
@@ -333,4 +365,49 @@ export interface UiAgentSessionInfo {
   messageCount: number;
   firstMessage: string;
   isActive: boolean;
+}
+
+// ── Secrets ────────────────────────────────────────────────────────────────
+
+export interface FileEntryView {
+  path: string;
+  hash: string;
+  exists: boolean;
+  currentHash?: string;
+  matches?: boolean;
+}
+
+export interface WhitelistRuleView {
+  command: string;
+  files: FileEntryView[];
+  allowed_env: string[];
+  secrets: string[];
+}
+
+export interface SecretsResponse {
+  /** Effective secrets-project name — `ProjectEntry.secretsProject` if set,
+   *  else the coffeectx project name itself. */
+  secretsProject: string;
+  /** True iff `secretsProject` exists in `~/.coffeecode/secrets.yaml`. */
+  exists: boolean;
+  directory?: string;
+  /** Names of secrets defined under the project. Values stay in YAML. */
+  secretNames: string[];
+  whitelist: WhitelistRuleView[];
+  /** Absolute path of `~/.coffeecode/secrets.yaml` (for the empty-state hint). */
+  configPath: string;
+}
+
+export interface WhitelistRuleInput {
+  command: string;
+  /** Paths only — server computes hashes authoritatively on save. */
+  files: { path: string }[];
+  allowed_env: string[];
+  secrets: string[];
+}
+
+export interface HashResponse {
+  path: string;
+  exists: boolean;
+  hash?: string;
 }
