@@ -39,7 +39,10 @@ import { indexPlans } from '../plans/indexPlans.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = resolve(__dirname, '../../prompts');
 
-const DEFAULT_LSP_INTERVAL_MS = 10 * 60_000;
+// Snapshot supervisor drains incrementally now — each LSP run only handles
+// files that changed since the last consumed ts, so a short interval keeps
+// the graph close to the working tree without re-walking the whole repo.
+const DEFAULT_LSP_INTERVAL_MS = 60_000;
 const DEFAULT_AGENTLOG_INTERVAL_MS = 30_000;
 const DEFAULT_PLANS_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_SKILL_FALLBACK_INTERVAL_MS = 10 * 60_000;

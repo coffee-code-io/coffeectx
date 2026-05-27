@@ -405,8 +405,12 @@ export async function indexWithLsp(
       const { relPath, snapshots } = planned[idx]!;
       progress.tick(idx, relPath);
 
-      // Pick the most-recent snapshot that successfully parses. Snapshots
-      // are ordered ascending; walk from newest to oldest.
+      // Pick the most-recent snapshot the LSP server can read. Snapshots
+      // are ordered ascending; walk from newest to oldest. A zero-symbol
+      // result is a valid parse — re-export-only `index.ts`, comment-only
+      // headers, etc. all legitimately yield no DocumentSymbols. Only an
+      // exception (thrown by `documentSymbols`) is treated as a failed
+      // parse worth walking back from.
       let picked: { entry: SnapshotEntry; rawSymbols: (DocumentSymbol | SymbolInformation)[]; sourceLines: string[] } | null = null;
       for (let s = snapshots.length - 1; s >= 0; s--) {
         const entry = snapshots[s]!;
@@ -414,15 +418,6 @@ export async function indexWithLsp(
           if (!existsSync(entry.snapshotPath)) continue;
           const sourceText = readFileSync(entry.snapshotPath, 'utf-8');
           const rawSymbols = await client.documentSymbols(entry.snapshotPath);
-          if (rawSymbols.length === 0) {
-            // Empty result is ambiguous (could be a parseable empty file).
-            // Treat empty as a valid parse iff the file actually has content.
-            if (sourceText.trim().length === 0) {
-              picked = { entry, rawSymbols, sourceLines: sourceText.split('\n') };
-              break;
-            }
-            continue;
-          }
           picked = { entry, rawSymbols, sourceLines: sourceText.split('\n') };
           break;
         } catch {
