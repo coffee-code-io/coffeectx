@@ -7,6 +7,7 @@
  */
 
 import type { Db, CoffeectxConfig, ProjectEntry } from '@coffeectx/core';
+import type { SnapshotSupervisor } from '../lsp/snapshotSupervisor.js';
 
 export type JobTrigger =
   | { kind: 'timer'; intervalMs: number }
@@ -34,6 +35,9 @@ export interface JobContext {
   parameters: Record<string, unknown>;
   signal: AbortSignal;
   log: (msg: string) => void;
+  /** File-snapshot supervisor — set by the scheduler when LSP jobs are
+   *  registered. LSP jobs drain & GC through it; other jobs ignore. */
+  snapshotSupervisor?: SnapshotSupervisor;
 }
 
 export interface JobRunResult {

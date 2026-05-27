@@ -260,38 +260,15 @@ function NotANodeBanner({ id, message }: { id: string; message: string }) {
 
 /**
  * Aux-table panel rendered on NodeDetail when the global `debug` flag is
- * on AND the server attached a payload (i.e. the node's type has aux
- * data — events or plans today). Dashed amber tint marks it as
- * out-of-band diagnostic info, not part of the normal graph view.
+ * on AND the server attached a payload. Only Plan nodes carry one today.
+ * Dashed amber tint marks it as out-of-band diagnostic info.
  */
 function DebugSection({ info }: { info: NodeDebugInfo }) {
   return (
     <div className="border border-dashed border-status-warning/60 bg-status-warning/5 rounded-lg p-4 space-y-3">
       <div className="text-[10px] uppercase tracking-widest text-status-warning">Debug · aux tables</div>
-      {info.kind === 'event' && (
-        <EventDebugBody filePaths={info.filePaths} />
-      )}
       {info.kind === 'plan' && (
         <PlanDebugBody acceptances={info.acceptances} filePaths={info.filePaths} />
-      )}
-    </div>
-  );
-}
-
-function EventDebugBody({ filePaths }: { filePaths: string[] }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="text-[11px] text-roast-medium">
-        Recorded file context ({filePaths.length}) — from <code className="font-mono">event_file_context</code>:
-      </div>
-      {filePaths.length === 0 ? (
-        <div className="text-[11px] italic text-roast-light">(none — indexer didn't map any file paths to this event)</div>
-      ) : (
-        <ul className="space-y-0.5">
-          {filePaths.map(p => (
-            <li key={p} className="font-mono text-[11px] text-roast-dark break-all">{p}</li>
-          ))}
-        </ul>
       )}
     </div>
   );

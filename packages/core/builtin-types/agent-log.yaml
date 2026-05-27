@@ -9,89 +9,87 @@ types:
       model: Symbol        # e.g. "claude-sonnet-4-6", "gpt-5-codex", "qwen/qwen3-32b"
       provider: Symbol     # "claude" | "codex" | "pi"
 
+  # Per-event types below carry no `states` and no `comment`. Linking now
+  # happens at the Span level (see `Span.touchedSymbols`); analyst
+  # annotations live on (Local)Decision / Lsp* nodes instead.
+
   UserInput:
     description: A message typed by the user to the coding agent — the user's intent or feedback.
     hidden: true
-    states: [extracted, linked]   # extracted by the agent-log indexer; bumped to `linked` after LSP enrichment
     kind: Map
     fields:
       sessionId: Symbol
       uuid: Symbol         # message UUID
-      text: Symbol         # verbatim user message — Symbol (not Meaning) so it doesn't go into the vector store; UI renders markdown via length/markdown heuristic
-      comment: Meaning?    # optional analyst annotation
-      relatedFiles:        # file paths mentioned or implied by the user (empty = none)
-        kind: List
-        item: Symbol
-      relatedSymbols:      # LSP symbol nodes mentioned by the user — populated during LSP indexing
-        kind: List
-        item: AnyLspSymbol
+      text: Symbol         # verbatim user message
 
   FileOperation:
     description: A file creation or edit performed by the coding agent — captures what changed and where.
     hidden: true
-    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
       uuid: Symbol
       operation: Symbol    # "create" | "edit"
       path: Symbol         # absolute file path
-      content: Symbol      # FULL content (Write) or new_string (Edit) — Symbol so it doesn't embed; used for name-match enrichment
-      comment: Meaning?    # optional analyst annotation
-      touchedSymbols:      # LSP symbol nodes whose name appears in `content` and whose file_path == `path` — populated during LSP indexing
-        kind: List
-        item: AnyLspSymbol
+      content: Symbol      # FULL content (Write) or new_string (Edit)
 
   ShellExecution:
     description: A shell command executed by the coding agent — build steps, test runs, git ops, etc.
     hidden: true
-    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
       uuid: Symbol
       command: Symbol
       description: Symbol  # agent-supplied description of what the command does
-      comment: Meaning?    # optional analyst annotation
 
   AgentQuestion:
     description: A clarifying question asked by the coding agent to the user before proceeding.
     hidden: true
-    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
       uuid: Symbol
-      question: Symbol     # verbatim agent question — Symbol so it doesn't embed
-      comment: Meaning?    # optional analyst annotation
-      relatedSymbols:      # LSP symbol nodes mentioned in the question — populated during LSP indexing
-        kind: List
-        item: AnyLspSymbol
+      question: Symbol     # verbatim agent question
 
   AgentMessage:
-    description: A plain-text reply from the coding agent to the user — status updates, explanations, summaries of what was done.
+    description: A plain-text reply from the coding agent to the user — status updates, explanations, or end-of-span summaries (flagged via isSummary).
     hidden: true
-    states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
       uuid: Symbol
-      text: Symbol         # assistant in-progress narration — Symbol so it doesn't embed (UI still renders markdown)
-      comment: Meaning?    # optional analyst annotation
-      relatedSymbols:      # LSP symbol nodes mentioned in the message — populated during LSP indexing
-        kind: List
-        item: AnyLspSymbol
+      text: Symbol         # message text — Symbol so it doesn't embed (UI renders markdown)
+      isSummary: Symbol?   # "true" iff this is the terminating summary of a Span; absent otherwise
 
-  AgentSummary:
-    description: A wrap-up message the agent emits at the end of a turn — explains what was done after tool calls completed.
+  Span:
+    description: A contiguous run of agent activity within a session — kind is 'planning' or 'execution'. Closed spans terminate in an AgentMessage with isSummary="true". `filesChanged` is the union of FileOperation paths in the span; `touchedSymbols` are the latest-at-endedAt LSP symbol versions in those files.
     hidden: true
     states: [extracted, linked]
     kind: Map
     fields:
       sessionId: Symbol
-      uuid: Symbol
-      text: Symbol         # wrap-up narrative — Symbol so it doesn't embed
-      comment: Meaning?    # optional analyst annotation
-      relatedSymbols:      # LSP symbol nodes mentioned in the summary — populated during LSP indexing
+      kind: Symbol                 # 'planning' | 'execution'
+      startedAt: Symbol            # unix ms as string
+      endedAt: Symbol
+      messages:                    # ordered $id refs to events in this span
+        kind: List
+        item: AnyLogEvent
+      summary: AgentMessage?       # terminating AgentMessage with isSummary="true"
+      filesChanged:                # union of FileOperation.path values in this span
+        kind: List
+        item: Symbol
+      touchedSymbols:              # latest-at-endedAt LSP symbol $ids for files in filesChanged
         kind: List
         item: AnyLspSymbol
+      comment: Meaning?            # optional analyst annotation on the span as a whole
+
+  AnyLogEvent:
+    description: A reference to any indexed agent-log node — user input, message, file op, shell exec, question.
+    kind: Or
+    types:
+      - UserInput
+      - AgentMessage
+      - AgentQuestion
+      - FileOperation
+      - ShellExecution

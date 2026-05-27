@@ -1,76 +1,76 @@
-types:
-  Decision:
-    description: A deliberate architectural or design choice that shaped the codebase — what was decided and why.
-    withHistory: true         # opts the type into version bumps + soft-delete via upsertEntries' tool flags
-    kind: Map
-    fields:
-      title: Symbol           # short imperative phrase, e.g. "Use SQLite for storage"
-      rationale: Meaning      # why this was the right choice at this scale
-      symbols:                # LSP symbol nodes most directly affected (use { "$id": "uuid" })
-        kind: List
-        item: AnyLspSymbol
+# types:
+#   Decision:
+#     description: A deliberate architectural or design choice that shaped the codebase — what was decided and why.
+#     withHistory: true         # opts the type into version bumps + soft-delete via upsertEntries' tool flags
+#     kind: Map
+#     fields:
+#       title: Symbol           # short imperative phrase, e.g. "Use SQLite for storage"
+#       rationale: Meaning      # why this was the right choice at this scale
+#       symbols:                # LSP symbol nodes most directly affected (use { "$id": "uuid" })
+#         kind: List
+#         item: AnyLspSymbol
 
-  Assumption:
-    description: A belief about the environment, users, or system that has not been verified.
-    kind: Map
-    fields:
-      description: Meaning    # the assumption itself
-      risk: Meaning           # what breaks if the assumption is wrong
-      symbols:                # LSP symbol nodes whose behaviour depends on this assumption (use { "$id": "uuid" })
-        kind: List
-        item: AnyLspSymbol
+#   Assumption:
+#     description: A belief about the environment, users, or system that has not been verified.
+#     kind: Map
+#     fields:
+#       description: Meaning    # the assumption itself
+#       risk: Meaning           # what breaks if the assumption is wrong
+#       symbols:                # LSP symbol nodes whose behaviour depends on this assumption (use { "$id": "uuid" })
+#         kind: List
+#         item: AnyLspSymbol
 
-  ChangeEvent:
-    description: A significant change to architecture, behaviour, or dependencies that occurred at a point in time.
-    kind: Map
-    fields:
-      name: Symbol            # short event name, e.g. "Switched embed model to text-embedding-3-small"
-      description: Meaning    # what changed and why
-      symbols:                # LSP symbol nodes renamed, replaced, or substantially modified (use { "$id": "uuid" })
-        kind: List
-        item: AnyLspSymbol
+#   ChangeEvent:
+#     description: A significant change to architecture, behaviour, or dependencies that occurred at a point in time.
+#     kind: Map
+#     fields:
+#       name: Symbol            # short event name, e.g. "Switched embed model to text-embedding-3-small"
+#       description: Meaning    # what changed and why
+#       symbols:                # LSP symbol nodes renamed, replaced, or substantially modified (use { "$id": "uuid" })
+#         kind: List
+#         item: AnyLspSymbol
 
-skills:
-  ArchitecturalDecisionIndexing:
-    description: Extract architectural decisions, assumptions, and notable change events from agent logs.
-    prompt: |
-      Read the agent log events below and extract broader design and architecture decisions.
-      Focus on choices that affect multiple components, cross-cutting concerns, or long-term structure.
-      Only extract entries you are confident about from the event data.
+# skills:
+#   ArchitecturalDecisionIndexing:
+#     description: Extract architectural decisions, assumptions, and notable change events from agent logs.
+#     prompt: |
+#       Read the agent log events below and extract broader design and architecture decisions.
+#       Focus on choices that affect multiple components, cross-cutting concerns, or long-term structure.
+#       Only extract entries you are confident about from the event data.
 
-      ── Decision ──────────────────────────────────────────────────────────────
-      A deliberate architectural or design choice.
-      Distinct from LocalDecision — these affect the whole system or multiple modules.
-        title   — short imperative phrase describing what was decided
-        rationale — why this choice was made; be specific
-        symbols — list of { "$id": "<uuid>" } for LSP symbol nodes most directly affected (use exact/raw_query to find IDs; omit if none found)
+#       ── Decision ──────────────────────────────────────────────────────────────
+#       A deliberate architectural or design choice.
+#       Distinct from LocalDecision — these affect the whole system or multiple modules.
+#         title   — short imperative phrase describing what was decided
+#         rationale — why this choice was made; be specific
+#         symbols — list of { "$id": "<uuid>" } for LSP symbol nodes most directly affected (use exact/raw_query to find IDs; omit if none found)
 
-      Examples:
-        { "$type": "Decision", "title": "Use SQLite over PostgreSQL", "rationale": "Embedded, no server process required; fits CLI tool distribution model", "symbols": [{ "$id": "uuid-of-Db-class" }] }
-        { "$type": "Decision", "title": "Use RefType for named type references", "rationale": "Avoids O(types^depth) row explosion; supports circular type definitions naturally", "symbols": [] }
+#       Examples:
+#         { "$type": "Decision", "title": "Use SQLite over PostgreSQL", "rationale": "Embedded, no server process required; fits CLI tool distribution model", "symbols": [{ "$id": "uuid-of-Db-class" }] }
+#         { "$type": "Decision", "title": "Use RefType for named type references", "rationale": "Avoids O(types^depth) row explosion; supports circular type definitions naturally", "symbols": [] }
 
-      ── Assumption ────────────────────────────────────────────────────────────
-      A belief taken for granted but not verified — about environment, users, or code behaviour.
-      Extract when you see "we assume", "assuming", or an implicit constraint that could break.
-        description — the assumption itself
-        risk        — what breaks if it is wrong
-        symbols     — list of { "$id": "<uuid>" } for LSP nodes whose behaviour depends on this assumption
+#       ── Assumption ────────────────────────────────────────────────────────────
+#       A belief taken for granted but not verified — about environment, users, or code behaviour.
+#       Extract when you see "we assume", "assuming", or an implicit constraint that could break.
+#         description — the assumption itself
+#         risk        — what breaks if it is wrong
+#         symbols     — list of { "$id": "<uuid>" } for LSP nodes whose behaviour depends on this assumption
 
-      Examples:
-        { "$type": "Assumption", "description": "Embed dimension matches the vec table dimension in the existing DB", "risk": "sqlite-vec will reject inserts if dimensions differ", "symbols": [{ "$id": "uuid-of-insertEntries" }] }
-        { "$type": "Assumption", "description": "Users run a single MCP server per project", "risk": "Multiple servers would write to the same DB without locking", "symbols": [] }
+#       Examples:
+#         { "$type": "Assumption", "description": "Embed dimension matches the vec table dimension in the existing DB", "risk": "sqlite-vec will reject inserts if dimensions differ", "symbols": [{ "$id": "uuid-of-insertEntries" }] }
+#         { "$type": "Assumption", "description": "Users run a single MCP server per project", "risk": "Multiple servers would write to the same DB without locking", "symbols": [] }
 
-      ── ChangeEvent ───────────────────────────────────────────────────────────
-      A concrete architectural change: refactor, migration, renamed interface, removed dependency.
-      Extract when a structural change was completed, not just planned.
-        name        — short label for the change
-        description — what changed and why
-        symbols     — list of { "$id": "<uuid>" } for LSP nodes renamed, replaced, or substantially modified
+#       ── ChangeEvent ───────────────────────────────────────────────────────────
+#       A concrete architectural change: refactor, migration, renamed interface, removed dependency.
+#       Extract when a structural change was completed, not just planned.
+#         name        — short label for the change
+#         description — what changed and why
+#         symbols     — list of { "$id": "<uuid>" } for LSP nodes renamed, replaced, or substantially modified
 
-      Examples:
-        { "$type": "ChangeEvent", "name": "Unified annotateNode into insertEntries", "description": "annotateNode now delegates to insertEntries, removing duplicate validation logic", "symbols": [{ "$id": "uuid-of-insertEntries" }] }
-        { "$type": "ChangeEvent", "name": "Replaced Alternative type with Choice", "description": "Alternative only stored the rejected option; Choice also records what was chosen", "symbols": [] }
-    types:
-      - Decision
-      - Assumption
-      - ChangeEvent
+#       Examples:
+#         { "$type": "ChangeEvent", "name": "Unified annotateNode into insertEntries", "description": "annotateNode now delegates to insertEntries, removing duplicate validation logic", "symbols": [{ "$id": "uuid-of-insertEntries" }] }
+#         { "$type": "ChangeEvent", "name": "Replaced Alternative type with Choice", "description": "Alternative only stored the rejected option; Choice also records what was chosen", "symbols": [] }
+#     types:
+#       - Decision
+#       - Assumption
+#       - ChangeEvent

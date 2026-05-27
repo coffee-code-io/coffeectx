@@ -1,123 +1,123 @@
-types:
-  Endpoint:
-    description: An HTTP route handler — method, path, handler function, and purpose.
-    kind: Map
-    fields:
-      path: Symbol            # URL pattern, e.g. "/api/v1/users/:id"
-      method: Symbol          # "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS"
-      description: Meaning
-      handler: Symbol         # function or controller name
-      tags:
-        kind: List
-        item: Symbol          # grouping tags (e.g. "auth", "admin")
-      symbol:                 # the LspFunction/LspMethod implementing this handler (use { "$id": "uuid" })
-        kind: Or
-        types: [LspFunction, LspMethod]
+# types:
+#   Endpoint:
+#     description: An HTTP route handler — method, path, handler function, and purpose.
+#     kind: Map
+#     fields:
+#       path: Symbol            # URL pattern, e.g. "/api/v1/users/:id"
+#       method: Symbol          # "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS"
+#       description: Meaning
+#       handler: Symbol         # function or controller name
+#       tags:
+#         kind: List
+#         item: Symbol          # grouping tags (e.g. "auth", "admin")
+#       symbol:                 # the LspFunction/LspMethod implementing this handler (use { "$id": "uuid" })
+#         kind: Or
+#         types: [LspFunction, LspMethod]
 
-  CliCommand:
-    description: A command-line command or subcommand — name, flags, and what it does.
-    kind: Map
-    fields:
-      name: Symbol            # command name, e.g. "index" or "retrival-index init"
-      description: Meaning    # what the command does
-      args:
-        kind: List
-        item: Symbol          # positional argument names
-      flags:
-        kind: List
-        item: Symbol          # flag names including leading dashes (e.g. "--project", "--dry-run")
-      symbol:                 # the LspFunction node implementing this command (use { "$id": "uuid" })
-        kind: Or
-        types: [LspFunction, LspMethod]
+#   CliCommand:
+#     description: A command-line command or subcommand — name, flags, and what it does.
+#     kind: Map
+#     fields:
+#       name: Symbol            # command name, e.g. "index" or "retrival-index init"
+#       description: Meaning    # what the command does
+#       args:
+#         kind: List
+#         item: Symbol          # positional argument names
+#       flags:
+#         kind: List
+#         item: Symbol          # flag names including leading dashes (e.g. "--project", "--dry-run")
+#       symbol:                 # the LspFunction node implementing this command (use { "$id": "uuid" })
+#         kind: Or
+#         types: [LspFunction, LspMethod]
 
-  InterfaceMethod:
-    description: A public method on a class or interface that forms part of its API contract.
-    kind: Map
-    fields:
-      interface: Symbol       # class or interface name
-      name: Symbol            # method name
-      signature: Symbol       # e.g. "(id: string): Promise<User>"
-      description: Meaning
-      symbol:                 # the LspMethod node for this method (use { "$id": "uuid" })
-        kind: Or
-        types: [LspMethod, LspFunction]
+#   InterfaceMethod:
+#     description: A public method on a class or interface that forms part of its API contract.
+#     kind: Map
+#     fields:
+#       interface: Symbol       # class or interface name
+#       name: Symbol            # method name
+#       signature: Symbol       # e.g. "(id: string): Promise<User>"
+#       description: Meaning
+#       symbol:                 # the LspMethod node for this method (use { "$id": "uuid" })
+#         kind: Or
+#         types: [LspMethod, LspFunction]
 
-  McpTool:
-    description: An MCP tool exposed by this server — name, description, and input schema summary.
-    kind: Map
-    fields:
-      name: Symbol            # tool name as registered, e.g. "search"
-      description: Meaning    # what the tool does
-      inputSchema: Symbol?    # Zod schema or type name describing the input
-      symbol:                 # the LspFunction/LspMethod implementing this tool (use { "$id": "uuid" })
-        kind: Or
-        types: [LspFunction, LspMethod]
+#   McpTool:
+#     description: An MCP tool exposed by this server — name, description, and input schema summary.
+#     kind: Map
+#     fields:
+#       name: Symbol            # tool name as registered, e.g. "search"
+#       description: Meaning    # what the tool does
+#       inputSchema: Symbol?    # Zod schema or type name describing the input
+#       symbol:                 # the LspFunction/LspMethod implementing this tool (use { "$id": "uuid" })
+#         kind: Or
+#         types: [LspFunction, LspMethod]
 
-  ApiSchema:
-    description: A named data schema or DTO — the contract shape shared between components.
-    kind: Map
-    fields:
-      name: Symbol
-      description: Meaning
-      symbol:                 # the LspInterface/LspClass node defining this schema (use { "$id": "uuid" })
-        kind: Or
-        types: [LspInterface, LspClass]
+#   ApiSchema:
+#     description: A named data schema or DTO — the contract shape shared between components.
+#     kind: Map
+#     fields:
+#       name: Symbol
+#       description: Meaning
+#       symbol:                 # the LspInterface/LspClass node defining this schema (use { "$id": "uuid" })
+#         kind: Or
+#         types: [LspInterface, LspClass]
 
-skills:
-  ApiSurfaceIndexing:
-    description: Extract the local API surface — HTTP endpoints, CLI commands, class interfaces, and MCP tools.
-    prompt: |
-      When analysing route handlers, CLI entry points, class interfaces, or MCP server definitions, extract:
+# skills:
+#   ApiSurfaceIndexing:
+#     description: Extract the local API surface — HTTP endpoints, CLI commands, class interfaces, and MCP tools.
+#     prompt: |
+#       When analysing route handlers, CLI entry points, class interfaces, or MCP server definitions, extract:
 
-      Endpoint — one per HTTP route or WebSocket handler:
-        path: URL pattern (e.g. "/api/v1/users/:id")
-        method: HTTP verb in uppercase ("GET", "POST", "PUT", "DELETE", "PATCH", "WS")
-        description: what this endpoint does
-        handler: name of the handler function or controller method
-        tags: grouping tags (feature area, auth level, etc.)
-        symbol: { "$id": "<uuid>" } of the LspFunction/LspMethod node — find via exact search on handler name
+#       Endpoint — one per HTTP route or WebSocket handler:
+#         path: URL pattern (e.g. "/api/v1/users/:id")
+#         method: HTTP verb in uppercase ("GET", "POST", "PUT", "DELETE", "PATCH", "WS")
+#         description: what this endpoint does
+#         handler: name of the handler function or controller method
+#         tags: grouping tags (feature area, auth level, etc.)
+#         symbol: { "$id": "<uuid>" } of the LspFunction/LspMethod node — find via exact search on handler name
 
-      Examples:
-        { "$type": "Endpoint", "path": "/api/users/:id", "method": "GET", "description": "Fetch a user by ID", "handler": "getUser", "tags": ["users"], "symbol": { "$id": "uuid-of-getUser" } }
+#       Examples:
+#         { "$type": "Endpoint", "path": "/api/users/:id", "method": "GET", "description": "Fetch a user by ID", "handler": "getUser", "tags": ["users"], "symbol": { "$id": "uuid-of-getUser" } }
 
-      CliCommand — one per CLI subcommand:
-        name: command name as invoked (e.g. "init", "index", "sync-types")
-        description: what the command does
-        args: positional argument names
-        flags: flag names with leading dashes (e.g. "--project", "--dry-run")
-        symbol: { "$id": "<uuid>" } of the implementing LspFunction node
+#       CliCommand — one per CLI subcommand:
+#         name: command name as invoked (e.g. "init", "index", "sync-types")
+#         description: what the command does
+#         args: positional argument names
+#         flags: flag names with leading dashes (e.g. "--project", "--dry-run")
+#         symbol: { "$id": "<uuid>" } of the implementing LspFunction node
 
-      Examples:
-        { "$type": "CliCommand", "name": "init", "description": "Create a new project DB and register it", "args": [], "flags": ["--name"], "symbol": { "$id": "uuid-of-initProject" } }
+#       Examples:
+#         { "$type": "CliCommand", "name": "init", "description": "Create a new project DB and register it", "args": [], "flags": ["--name"], "symbol": { "$id": "uuid-of-initProject" } }
 
-      InterfaceMethod — for public methods that form the API of a class or interface:
-        interface: class or interface name
-        name: method name
-        signature: full TypeScript signature string
-        description: what the method does
-        symbol: { "$id": "<uuid>" } of the LspMethod node
+#       InterfaceMethod — for public methods that form the API of a class or interface:
+#         interface: class or interface name
+#         name: method name
+#         signature: full TypeScript signature string
+#         description: what the method does
+#         symbol: { "$id": "<uuid>" } of the LspMethod node
 
-      Examples:
-        { "$type": "InterfaceMethod", "interface": "Db", "name": "insertEntries", "signature": "(entries: InsertEntry[]): Promise<InsertResult>", "description": "Batch-insert typed nodes into the knowledge graph", "symbol": { "$id": "uuid-of-insertEntries" } }
+#       Examples:
+#         { "$type": "InterfaceMethod", "interface": "Db", "name": "insertEntries", "signature": "(entries: InsertEntry[]): Promise<InsertResult>", "description": "Batch-insert typed nodes into the knowledge graph", "symbol": { "$id": "uuid-of-insertEntries" } }
 
-      McpTool — for tools registered in an MCP server:
-        name: tool name as registered
-        description: what the tool does
-        inputSchema: Zod schema or type name for the input
-        symbol: { "$id": "<uuid>" } of the implementing LspFunction/LspMethod node
+#       McpTool — for tools registered in an MCP server:
+#         name: tool name as registered
+#         description: what the tool does
+#         inputSchema: Zod schema or type name for the input
+#         symbol: { "$id": "<uuid>" } of the implementing LspFunction/LspMethod node
 
-      Examples:
-        { "$type": "McpTool", "name": "search", "description": "Semantic similarity search over the knowledge graph", "inputSchema": "SearchInput", "symbol": { "$id": "uuid-of-search-handler" } }
+#       Examples:
+#         { "$type": "McpTool", "name": "search", "description": "Semantic similarity search over the knowledge graph", "inputSchema": "SearchInput", "symbol": { "$id": "uuid-of-search-handler" } }
 
-      ApiSchema — for named DTOs, request/response shapes, or config types:
-        name: schema/type name
-        description: what data this shape represents
-        symbol: { "$id": "<uuid>" } of the LspInterface or LspClass node
+#       ApiSchema — for named DTOs, request/response shapes, or config types:
+#         name: schema/type name
+#         description: what data this shape represents
+#         symbol: { "$id": "<uuid>" } of the LspInterface or LspClass node
 
-      Use exact search to find symbol IDs before inserting. Omit symbol fields if no match is found.
-    types:
-      - Endpoint
-      - CliCommand
-      - InterfaceMethod
-      - McpTool
-      - ApiSchema
+#       Use exact search to find symbol IDs before inserting. Omit symbol fields if no match is found.
+#     types:
+#       - Endpoint
+#       - CliCommand
+#       - InterfaceMethod
+#       - McpTool
+#       - ApiSchema

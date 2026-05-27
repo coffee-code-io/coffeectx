@@ -42,13 +42,11 @@ export type RefsBatchResponse = Record<string, RefsResponse>;
  * the flag's off or when the node type has no aux data to surface.
  * Mirror of `NodeDebugInfo` in indexer/src/ui/debugInfo.ts.
  */
-export type NodeDebugInfo =
-  | { kind: 'event'; filePaths: string[] }
-  | {
-      kind: 'plan';
-      acceptances: { sessionId: string; timestamp: string }[];
-      filePaths: string[];
-    };
+export type NodeDebugInfo = {
+  kind: 'plan';
+  acceptances: { sessionId: string; timestamp: string }[];
+  filePaths: string[];
+};
 
 /** One row of `db.listTimelineVersions(timelineId)` — every version of a
  *  timeline ordered ascending. Always present in `NodeDetailResponse`

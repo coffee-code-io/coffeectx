@@ -4,18 +4,21 @@ types:
   #   name: Symbol          — the short identifier (e.g. "createUser")
   #   containerName: Symbol — fully qualified parent (e.g. "UserService"), empty if top-level
   #   detail: Symbol        — type signature or other detail string from the server
-  #   file_path: Symbol     — repo-relative path of the source file (one indexed lookup)
+  #   file_path: Symbol     — repo-relative path of the source file
   #   line: Symbol          — 1-based line number, stored as a string for symbol-key uniformity
   #   column: Symbol        — 1-based column
   #   comment: Meaning?     — optional analyst/agent annotation
   #
-  # `location` / `file` / `folder` are gone: deeply-nested map joins for what is
-  # really a primary-key lookup. `file_path` is now the single column we index on.
+  # Container types (Module / Namespace / Class) carry `children` — REAL $id refs
+  # to nested LspMethod / LspConstructor / LspFunction / LspClass — filled by a
+  # second pass once leaf $ids are known. Enum / Interface keep `members` as
+  # plain string names (their members aren't standalone nodes).
   # ─────────────────────────────────────────────────────────────────────────────
 
   LspModule:
     description: A module symbol (SymbolKind 2) — a source file treated as a named module.
     kind: Map
+    withHistory: true
     fields:
       name: Symbol
       containerName: Symbol
@@ -23,11 +26,15 @@ types:
       file_path: Symbol
       line: Symbol
       column: Symbol
+      children:             # $id refs to nested LSP symbols
+        kind: List
+        item: AnyLspSymbol
       comment: Meaning?
 
   LspNamespace:
     description: A namespace or package symbol (SymbolKind 3) — a named scope grouping related declarations.
     kind: Map
+    withHistory: true
     fields:
       name: Symbol
       containerName: Symbol
@@ -35,11 +42,15 @@ types:
       file_path: Symbol
       line: Symbol
       column: Symbol
+      children:             # $id refs to nested LSP symbols
+        kind: List
+        item: AnyLspSymbol
       comment: Meaning?
 
   LspClass:
-    description: A class declaration (SymbolKind 5) — a named type with fields and methods. Property/field names are flattened into `members` rather than emitted as separate nodes; methods stay as standalone LspMethod entries.
+    description: A class declaration (SymbolKind 5) — a named type with fields and methods. Child methods/constructors are referenced via `children`. Property/field names are not surfaced separately.
     kind: Map
+    withHistory: true
     fields:
       name: Symbol
       containerName: Symbol
@@ -47,14 +58,15 @@ types:
       file_path: Symbol
       line: Symbol
       column: Symbol
-      members:              # property/field names owned by this class (plain strings, not node refs)
+      children:             # $id refs to LspMethod / LspConstructor / nested LspClass
         kind: List
-        item: Symbol
+        item: AnyLspSymbol
       comment: Meaning?
 
   LspMethod:
     description: A method on a class or object (SymbolKind 6) — a named function scoped to a class.
     kind: Map
+    withHistory: true
     fields:
       name: Symbol
       containerName: Symbol  # owning class name
@@ -62,16 +74,13 @@ types:
       file_path: Symbol
       line: Symbol
       column: Symbol
+      source: Symbol         # raw function body sliced from the snapshot file
       comment: Meaning?
-
-  # LspProperty and LspField are intentionally not indexed as standalone nodes:
-  # their names live in the parent class/interface's `members` symbol list. This
-  # cuts thousands of low-value leaf rows out of the graph without losing the
-  # "what fields does class X have" question.
 
   LspConstructor:
     description: A constructor function (SymbolKind 9) — the initializer for a class.
     kind: Map
+    withHistory: true
     fields:
       name: Symbol           # usually the class name
       containerName: Symbol
@@ -79,11 +88,13 @@ types:
       file_path: Symbol
       line: Symbol
       column: Symbol
+      source: Symbol         # raw constructor body sliced from the snapshot file
       comment: Meaning?
 
   LspEnum:
-    description: An enum declaration (SymbolKind 10) — a named set of constant members.
+    description: An enum declaration (SymbolKind 10) — a named set of constant members. Member names are flattened into `members` (plain strings, not refs).
     kind: Map
+    withHistory: true
     fields:
       name: Symbol
       containerName: Symbol
@@ -91,11 +102,15 @@ types:
       file_path: Symbol
       line: Symbol
       column: Symbol
+      members:              # enum entry names
+        kind: List
+        item: Symbol
       comment: Meaning?
 
   LspInterface:
-    description: An interface declaration (SymbolKind 11) — a structural type contract without implementation. Property/field names are flattened into `members` rather than emitted as separate nodes.
+    description: An interface declaration (SymbolKind 11) — a structural type contract without implementation. Method/property/entry names are flattened into `members` (plain strings, not refs).
     kind: Map
+    withHistory: true
     fields:
       name: Symbol
       containerName: Symbol
@@ -103,7 +118,7 @@ types:
       file_path: Symbol
       line: Symbol
       column: Symbol
-      members:              # property/field names owned by this interface (plain strings, not node refs)
+      members:              # method/property/entry names
         kind: List
         item: Symbol
       comment: Meaning?
@@ -111,6 +126,7 @@ types:
   LspFunction:
     description: A top-level or module-scoped function (SymbolKind 12) — not a method.
     kind: Map
+    withHistory: true
     fields:
       name: Symbol
       containerName: Symbol
@@ -118,50 +134,16 @@ types:
       file_path: Symbol
       line: Symbol
       column: Symbol
+      source: Symbol         # raw function body sliced from the snapshot file
       comment: Meaning?
 
-  # LspVariable is intentionally not indexed: nearly all such symbols are
-  # local-scope bindings (already filtered by the LSP indexer's anonymous /
-  # local-scope rules) or low-value module-level mutables. If a module-level
-  # binding matters, it'll usually appear as LspConstant or LspFunction.
+  # LspConstant / LspEnumMember / LspTypeParameter / LspVariable are intentionally
+  # NOT indexed. Variables are nearly all local-scope; constants are usually
+  # uninteresting module-level mutables (when they matter they appear as
+  # LspFunction); enum members live inside LspEnum.members; type parameters
+  # are name-only and rarely worth following.
 
-  LspConstant:
-    description: An immutable constant binding (SymbolKind 14) — const declaration or enum-like value.
-    kind: Map
-    fields:
-      name: Symbol
-      containerName: Symbol
-      detail: Symbol
-      file_path: Symbol
-      line: Symbol
-      column: Symbol
-      comment: Meaning?
-
-  LspEnumMember:
-    description: A single member of an enum (SymbolKind 22) — a named constant within an LspEnum.
-    kind: Map
-    fields:
-      name: Symbol
-      containerName: Symbol  # parent LspEnum name
-      detail: Symbol         # numeric or string value
-      file_path: Symbol
-      line: Symbol
-      column: Symbol
-      comment: Meaning?
-
-  LspTypeParameter:
-    description: A generic type parameter (SymbolKind 26) — e.g. the T in Array<T>.
-    kind: Map
-    fields:
-      name: Symbol
-      containerName: Symbol  # owning class/function name
-      detail: Symbol         # constraint, e.g. "extends object"
-      file_path: Symbol
-      line: Symbol
-      column: Symbol
-      comment: Meaning?
-
-  # ── Union type covering every LSP symbol kind ────────────────────────────────
+  # ── Union type covering every indexed LSP symbol kind ────────────────────────
   # Use this as a field type when you want a reference to any indexed code symbol.
   # Example in data: { "$id": "<existing-node-uuid>" }
   AnyLspSymbol:
@@ -176,6 +158,3 @@ types:
       - LspFunction
       - LspMethod
       - LspConstructor
-      - LspConstant
-      - LspEnumMember
-      - LspTypeParameter

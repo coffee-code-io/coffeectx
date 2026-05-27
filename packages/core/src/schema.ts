@@ -162,22 +162,9 @@ CREATE TABLE IF NOT EXISTS plan_acceptances (
 );
 CREATE INDEX IF NOT EXISTS idx_plan_acceptances_session ON plan_acceptances(session_id);
 
--- Per-event file context — hidden from the MCP/UI graph. For each text event
--- (UserInput / AgentMessage / AgentSummary / AgentQuestion), records the
--- file path(s) the event is "about" in its session, computed from the nearby
--- Write/Edit tool calls. The enricher and the LSP reverse pass consult this
--- table to restrict identifier resolution and reverse-linking to symbols
--- whose source file is in the event's allowed set.
-CREATE TABLE IF NOT EXISTS event_file_context (
-  event_id   TEXT NOT NULL,    -- node id of the event (UserInput/AgentMessage/etc.)
-  file_path  TEXT NOT NULL,    -- file path from the nearest Edit/Write boundary
-  PRIMARY KEY (event_id, file_path)
-);
-CREATE INDEX IF NOT EXISTS idx_event_file_context_path ON event_file_context(file_path);
-
 -- Materialized edge index between named-type nodes.
--- Populated by insertEntries / rebuildNodeRefs; read by findReferencingNamedNodes
--- and collectOutgoingNamedRefs to power the graph view and detail-page "refs".
+-- Populated by insertEntries; read by findReferencingNamedNodes and
+-- collectOutgoingNamedRefs to power the graph view and detail-page "refs".
 -- One row per (src, dst, field_path); src/dst are both named-type node IDs.
 CREATE TABLE IF NOT EXISTS node_refs (
   src_id     TEXT NOT NULL,

@@ -11,10 +11,13 @@
  *   - a single global mutex: at most one job runs at a time
  */
 
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { loadConfig, resolveJobEnv, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry, type NodeEvent } from '@coffeectx/core';
 import { CronExpressionParser } from 'cron-parser';
 import type { Job, JobContext, JobTrigger } from './types.js';
 import { withRunLog } from './runLog.js';
+import { SnapshotSupervisor } from '../lsp/snapshotSupervisor.js';
 
 // Wrapper to keep the call-site name short. Returning the parsed iterator
 // (which has `.next()`) is all the scheduler needs.
@@ -67,6 +70,7 @@ export class Scheduler {
   private heartbeatHandle: NodeJS.Timeout | null = null;
   private stopping = false;
   private hardKillHandle: NodeJS.Timeout | null = null;
+  private snapshotSupervisor: SnapshotSupervisor | null = null;
 
   constructor(opts: SchedulerOptions) {
     this.db = opts.db;
@@ -102,6 +106,15 @@ export class Scheduler {
       try { this.db.writeHeartbeat(process.pid); }
       catch (err) { this.log(`heartbeat write failed: ${(err as Error).message}`); }
     }, HEARTBEAT_MS);
+
+    // 1c. Build the snapshot supervisor for LSP jobs. Watches every repoPath
+    //     declared by an enabled LSP job, copies changed source files into
+    //     ~/.coffeecode/snapshots/<project>/. Drained + GC'd by the LSP run.
+    this.snapshotSupervisor = this.buildSnapshotSupervisor();
+    if (this.snapshotSupervisor) {
+      try { await this.snapshotSupervisor.start(); }
+      catch (err) { this.log(`snapshot supervisor failed to start: ${(err as Error).message}`); }
+    }
 
     // 2. Register every job in the DB; reconcile enabled from project config.
     const projectJobs = this.config.projects[this.project.name]?.jobs ?? {};
@@ -187,6 +200,33 @@ export class Scheduler {
     } else {
       this.log(`job "${this.currentJob}" still running after grace; deferring db.close to watchdog`);
     }
+
+    if (this.snapshotSupervisor) {
+      try { await this.snapshotSupervisor.stop(); } catch { /* idempotent */ }
+      this.snapshotSupervisor = null;
+    }
+  }
+
+  /**
+   * Collect every distinct repoPath declared by an enabled LSP job for this
+   * project. Returns null if none — the supervisor is only worth starting
+   * when at least one LSP job will consume its output.
+   */
+  private buildSnapshotSupervisor(): SnapshotSupervisor | null {
+    const projectJobs = this.config.projects[this.project.name]?.jobs ?? {};
+    const seen = new Set<string>();
+    for (const job of this.jobs.values()) {
+      if (job.name !== 'lsp' && !job.name.startsWith('lsp:')) continue;
+      const cfg = projectJobs[job.name];
+      const enabled = cfg?.enabled ?? job.defaultEnabled;
+      if (!enabled) continue;
+      const params = cfg?.parameters ?? {};
+      const raw = typeof params['repoPath'] === 'string' ? (params['repoPath'] as string) : undefined;
+      const repoPath = raw ? expandTilde(raw) : this.project.repoPath;
+      if (repoPath) seen.add(repoPath);
+    }
+    if (seen.size === 0) return null;
+    return new SnapshotSupervisor({ projectName: this.project.name, repoPaths: Array.from(seen) });
   }
 
   // ── Trigger plumbing ──────────────────────────────────────────────────────
@@ -368,6 +408,7 @@ export class Scheduler {
       parameters: resolveJobParameters(this.config, this.project.name, job.name),
       signal: this.abortController.signal,
       log: (msg) => this.log(`[${job.name}] ${msg}`),
+      snapshotSupervisor: this.snapshotSupervisor ?? undefined,
     };
     this.log(`[${job.name}] start (${triggerKind})`);
 
@@ -450,6 +491,12 @@ function writeCatchupCursor(db: Db, jobName: string, cursor: number): void {
  * a single run. Safe because the scheduler holds a single-job-at-a-time
  * mutex — concurrent jobs would race on `process.env`.
  */
+function expandTilde(p: string): string {
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  return p;
+}
+
 async function withScopedEnv<T>(env: Record<string, string>, fn: () => Promise<T>): Promise<T> {
   const keys = Object.keys(env);
   if (keys.length === 0) return fn();

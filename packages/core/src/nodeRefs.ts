@@ -21,31 +21,6 @@ interface MapRow { key: string; value_id: string }
 interface ListRow { item_id: string }
 interface NamedRow { name: string }
 
-/** Walk every named-type node in the DB and rebuild the entire index. */
-export function rebuildNodeRefs(raw: Database.Database): { rows: number } {
-  raw.exec('DELETE FROM node_refs');
-  const insert = raw.prepare(
-    `INSERT OR IGNORE INTO node_refs(src_id, dst_id, field_path, src_type, dst_type)
-     VALUES(?,?,?,?,?)`,
-  );
-
-  const roots = raw
-    .prepare(
-      `SELECT n.id AS id, nt.name AS typeName
-       FROM nodes n JOIN named_types nt ON nt.type_id = n.type_id`,
-    )
-    .all() as Array<{ id: string; typeName: string }>;
-
-  let rows = 0;
-  const txn = raw.transaction(() => {
-    for (const root of roots) {
-      rows += populateForRoot(raw, insert, root.id, root.typeName);
-    }
-  });
-  txn();
-  return { rows };
-}
-
 /**
  * Populate node_refs for a set of recently-inserted/patched root node IDs.
  * Each root's subtree is walked once.

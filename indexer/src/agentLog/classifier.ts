@@ -7,32 +7,40 @@ export type EventKind =
   | 'shell_exec'
   | 'agent_question'
   | 'agent_message'
-  | 'agent_summary'
-  | 'plan_accepted';
+  | 'plan_accepted'
+  | 'todo_write';
 
 export interface ClassifiedEvent {
   kind: EventKind;
   sessionId: string;
   uuid: string;
   timestamp: string;
-  text?: string;         // user_input | agent_message | agent_summary
+  text?: string;         // user_input | agent_message
   path?: string;         // file_create | file_edit
-  content?: string;      // file_create | file_edit — full text (no longer truncated)
+  content?: string;      // file_create | file_edit
   command?: string;      // shell_exec
   description?: string;  // shell_exec
   question?: string;     // agent_question
   planSlug?: string;     // plan_accepted — filename slug (no extension)
   planPath?: string;     // plan_accepted — absolute path the agent passed
+  /** True iff this `agent_message` event was emitted in a turn that
+   *  followed a `tool_result`. Carried for the span detector's benefit;
+   *  no DB persistence. */
+  postToolResult?: boolean;
+  /** Parsed todo list at the moment of a `todo_write` event. Each entry
+   *  carries the `content` text and `status` (pending|in_progress|completed).
+   *  Used by the span detector; never persisted as a node. */
+  todos?: Array<{ content: string; status: string }>;
 }
 
 /** Tool names whose uses are never interesting enough to index. */
 const SKIP_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'ToolSearch',
-  'TaskOutput', 'TodoWrite',
+  'TaskOutput',
   'NotebookEdit', 'EnterPlanMode',
   'EnterWorktree', 'CronCreate', 'CronDelete', 'CronList',
   'WebSearch', 'WebFetch', 'Skill',
-  // ExitPlanMode is handled separately — it becomes a `plan_accepted` event.
+  // ExitPlanMode → plan_accepted; TodoWrite → todo_write. Handled below.
 ]);
 
 const TRIVIAL_BASH_FIRST_TOKENS = new Set([
@@ -43,7 +51,6 @@ const TRIVIAL_BASH_FIRST_TOKENS = new Set([
 
 const INTERESTING_BASH_RE = /\b(test|spec|jest|vitest|mocha|jasmine|karma|pytest|rspec|build|compile|tsc|webpack|rollup|vite|esbuild|lint|eslint|prettier|typecheck|type-check|check|deploy|publish|run\s+(?:test|build|lint|check|dev)|cargo\s+(?:test|build|check)|go\s+(?:test|build|vet)|make|cmake|bazel|buck)\b/i;
 
-/** Return the filename without extension, e.g. `/a/b/foo.md` → `foo`. */
 function basenameNoExt(p: string): string {
   const base = p.split('/').pop() ?? p;
   const dot = base.lastIndexOf('.');
@@ -70,7 +77,6 @@ function isSystemInjection(text: string): boolean {
   return false;
 }
 
-/** A text block is worth keeping iff it isn't a system injection and has substance. */
 function isMeaningfulAgentText(text: string): boolean {
   if (isSystemInjection(text)) return false;
   return text.trim().length > 0;
@@ -79,26 +85,9 @@ function isMeaningfulAgentText(text: string): boolean {
 /**
  * Classify a deduplicated list of raw log messages into structured events.
  *
- * Modern LLM providers no longer expose chain-of-thought, so we no longer
- * track `thinking` blocks. Plain assistant `text` blocks split into two
- * categories based on what *just happened* in the conversation:
- *
- *   - the same turn contains tool_use blocks → `agent_message`
- *     (mid-work narration, "I'll edit foo.ts next")
- *   - the previous message in the log is a user `tool_result` → `agent_summary`
- *     (the agent got tool output back and is now wrapping up / reporting)
- *   - otherwise → `agent_message`
- *     (acknowledgment of a user text turn before any work starts)
- *
- * Recall over precision:
- * - KEEP user text                            → UserInput
- * - KEEP assistant text after tool_result     → AgentSummary
- * - KEEP other assistant text                 → AgentMessage
- * - KEEP Write tool uses                      → FileOperation create
- * - KEEP Edit tool uses                       → FileOperation edit
- * - KEEP non-trivial Bash                     → ShellExecution
- * - KEEP AskUserQuestion                      → AgentQuestion
- * - SKIP thinking, reads, searches, internal tooling
+ * Recall over precision — see SKIP_TOOLS for what's filtered. Assistant text
+ * blocks all become `agent_message`; the span detector decides where summary
+ * boundaries actually fall and which AgentMessage carries `isSummary="true"`.
  */
 export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
   const events: ClassifiedEvent[] = [];
@@ -119,15 +108,12 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
 
     if (type !== 'assistant') continue;
 
-    const hasAnyToolUse = content.some(c => c.type === 'tool_use');
     const hasQuestion = content.some(
       c => c.type === 'tool_use' && (c as { name?: string }).name === 'AskUserQuestion',
     );
 
-    // Did the most recent prior message in the same session contain a
-    // tool_result? If so, this assistant turn is a "wrap-up after work"
-    // (AgentSummary). We walk backwards skipping unrelated sessions just in
-    // case the input was interleaved.
+    // Did the most recent prior message in this session contain a tool_result?
+    // Used as the `postToolResult` hint for span signals.
     const followsToolResult = (() => {
       for (let j = i - 1; j >= 0; j--) {
         const prev = messages[j]!;
@@ -137,7 +123,7 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
           if (!Array.isArray(prevContent)) return false;
           return prevContent.some(c => c && typeof c === 'object' && (c as { type?: string }).type === 'tool_result');
         }
-        return false; // an assistant message in between blocks the signal
+        return false;
       }
       return false;
     })();
@@ -146,28 +132,39 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
       if (item.type === 'thinking') continue;
 
       if (item.type === 'text') {
-        if (hasQuestion) continue;        // AgentQuestion carries the payload
+        if (hasQuestion) continue;
         const text = item.text;
         if (!isMeaningfulAgentText(text)) continue;
-        const kind: EventKind =
-          hasAnyToolUse ? 'agent_message'
-          : followsToolResult ? 'agent_summary'
-          : 'agent_message';
-        events.push({ kind, sessionId, uuid, timestamp, text: text.trim() });
+        events.push({
+          kind: 'agent_message',
+          sessionId, uuid, timestamp,
+          text: text.trim(),
+          postToolResult: followsToolResult,
+        });
         continue;
       }
 
       if (item.type !== 'tool_use') continue;
 
       const { name, input } = item as { type: 'tool_use'; name: string; input: Record<string, unknown> };
+
+      if (name === 'TodoWrite') {
+        const todos = (input.todos as Array<{ content?: string; status?: string }> | undefined) ?? [];
+        events.push({
+          kind: 'todo_write',
+          sessionId, uuid, timestamp,
+          todos: todos
+            .filter(t => typeof t?.content === 'string')
+            .map(t => ({ content: String(t.content ?? ''), status: String(t.status ?? '') })),
+        });
+        continue;
+      }
+
       if (SKIP_TOOLS.has(name)) continue;
 
       if (name === 'Write') {
         const path = (input.file_path as string | undefined) ?? '';
         const rawContent = (input.content as string | undefined) ?? '';
-        // Full content (not truncated) — the LSP reverse pass uses it for
-        // name-match enrichment, and Symbol storage doesn't embed it so the
-        // cost is purely the row's TEXT bytes.
         events.push({ kind: 'file_create', sessionId, uuid, timestamp, path, content: rawContent });
       } else if (name === 'Edit') {
         const path = (input.file_path as string | undefined) ?? '';
@@ -183,19 +180,12 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
         if (!question.trim()) continue;
         events.push({ kind: 'agent_question', sessionId, uuid, timestamp, question });
       } else if (name === 'ExitPlanMode') {
-        // Claude Plan Mode tool — the agent presents a plan and the user
-        // accepts/rejects. The `input` carries the full plan markdown and
-        // the path it was saved to. We turn this into a `plan_accepted`
-        // event so the plans indexer can link the Plan node back to the
-        // session and the LSP reverse pass can scope plan symbol-links to
-        // the session's actual edits.
         const planPath = (input.planFilePath as string | undefined) ?? '';
         if (!planPath) continue;
         const planSlug = basenameNoExt(planPath);
         if (!planSlug) continue;
         events.push({ kind: 'plan_accepted', sessionId, uuid, timestamp, planSlug, planPath });
       }
-      // All other tool names (Agent, custom MCP tools, etc.) are skipped.
     }
   }
 

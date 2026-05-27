@@ -28,6 +28,7 @@ import { runUserJob } from '../agentRun/runUserJob.js';
 import type { Job, JobTrigger } from './types.js';
 import { indexWithLsp } from '../lsp/indexSymbols.js';
 import { indexAgentSessions } from '../agentLog/indexLogs.js';
+import { linkSpans } from '../agentLog/spanLink.js';
 import { ClaudeProvider } from '../agentLog/providers/claude.js';
 import { CodexProvider } from '../agentLog/providers/codex.js';
 import { PiProvider } from '../agentLog/providers/pi.js';
@@ -47,16 +48,14 @@ const DEFAULT_PLANS_DIR = join(homedir(), '.claude', 'plans');
 const DEFAULT_CODEX_STATE_PATH = join(homedir(), '.codex', 'state_5.sqlite');
 
 /**
- * Event types whose transition to the `linked` state should trigger agent
- * skill jobs. Skill agents need post-LSP enrichment to see Plan/AgentMessage
- * etc. with `relatedSymbols` populated, so jobs fire on the LSP-driven
- * `extracted → linked` bump, not on raw insertion. The fallback timer below
- * is the safety net for state-machine misses.
+ * Named types whose transition to the `linked` state should fan out to the
+ * indexing skill jobs (`local-decisions`, `lsp-enrichment`). Per-event
+ * agent-log types are out — they no longer carry a state machine, since
+ * symbol attribution now happens at the Span level. Spans + Plans are the
+ * only kinds that travel `extracted → linked`. The fallback timer on each
+ * job is the safety net for state-machine misses.
  */
-const SKILL_TRIGGER_TYPES = [
-  'UserInput', 'FileOperation', 'ShellExecution',
-  'AgentQuestion', 'AgentMessage', 'AgentSummary', 'Plan',
-];
+const SKILL_TRIGGER_TYPES = ['Span', 'Plan'];
 
 interface SkillJobState {
   processedEventIds?: string[];
@@ -99,13 +98,17 @@ function discoverLspJobNames(config: CoffeectxConfig, projectName: string): stri
   return names;
 }
 
-function buildLspJob(jobName: string, config: CoffeectxConfig, projectName: string): Job {
-  const params = projectJobParams(config, projectName, jobName);
+interface LspJobState {
+  /** High-water mark — snapshot ts already consumed. */
+  lastConsumedTs?: number;
+}
+
+function buildLspJob(jobName: string, _config: CoffeectxConfig, _projectName: string): Job {
   return {
     name: jobName,
     description: 'Index repository source files via Language Server Protocol.',
     defaultEnabled: false,
-    triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_LSP_INTERVAL_MS) }],
+    triggers: [{ kind: 'timer', intervalMs: readIntervalMs({}, DEFAULT_LSP_INTERVAL_MS) }],
     async run(ctx) {
       const repoPath = readString(ctx.parameters, 'repoPath') ?? ctx.project.repoPath;
       if (!repoPath) return { message: 'no repoPath configured — skipped' };
@@ -115,15 +118,25 @@ function buildLspJob(jobName: string, config: CoffeectxConfig, projectName: stri
       if (!lspBin) throw new Error(`invalid lspCommand: "${lspCmd}"`);
       const lspBinPath = lspBin.startsWith('~/') ? `${homedir()}/${lspBin.slice(2)}` : lspBin;
 
-      const hashes = loadFileHashes();
-      const r = await indexWithLsp(ctx.db, resolve(repoPath), lspBinPath, lspArgs, { hashes });
+      const state = (ctx.db.getJobState<LspJobState>(jobName)) ?? {};
+      const r = await indexWithLsp(ctx.db, resolve(repoPath), lspBinPath, lspArgs, {
+        supervisor: ctx.snapshotSupervisor,
+        lastConsumedTs: state.lastConsumedTs ?? 0,
+      });
+
+      if (r.consumedTs !== undefined && r.consumedTs > (state.lastConsumedTs ?? 0)) {
+        ctx.db.setJobState(jobName, { ...state, lastConsumedTs: r.consumedTs });
+      }
 
       if (r.skipped) return { message: 'no source files changed' };
       if (r.errors.length > 0) {
         const first = r.errors[0]!;
         throw new Error(`${r.errors.length} file error(s); first: ${first.file}: ${first.error}`);
       }
-      return { message: `${r.files} files, ${r.nodes} nodes`, metrics: { files: r.files, nodes: r.nodes } };
+      return {
+        message: `${r.files} files, ${r.nodes} new, ${r.bumped} bumped, ${r.deleted} deleted`,
+        metrics: { files: r.files, nodes: r.nodes, bumped: r.bumped, deleted: r.deleted },
+      };
     },
   };
 }
@@ -336,6 +349,30 @@ function buildLocalDecisionsJob(config: CoffeectxConfig, projectName: string): J
   });
 }
 
+function buildSpanLinkJob(): Job {
+  return {
+    name: 'span-link',
+    description: 'Link Spans to LSP symbols based on filesChanged at endedAt.',
+    defaultEnabled: true,
+    triggers: [
+      { kind: 'onNodeState', typeNames: ['Span'], state: 'extracted' },
+      // Fallback timer so a missed state-change still gets caught up.
+      { kind: 'timer', intervalMs: DEFAULT_SKILL_FALLBACK_INTERVAL_MS },
+    ],
+    async run(ctx) {
+      const r = await linkSpans(ctx.db);
+      if (r.errors.length > 0) {
+        const first = r.errors[0]!;
+        throw new Error(`${r.errors.length} span error(s); first: ${first.spanId}: ${first.error}`);
+      }
+      return {
+        message: `${r.scanned} scanned, ${r.linked} linked, ${r.symbols} symbol refs`,
+        metrics: { scanned: r.scanned, linked: r.linked, symbols: r.symbols },
+      };
+    },
+  };
+}
+
 function buildLspEnrichmentJob(config: CoffeectxConfig, projectName: string): Job {
   const params = projectJobParams(config, projectName, 'lsp-enrichment');
   return buildAgentLogJob({
@@ -462,6 +499,7 @@ export function buildJobs(_db: Db, config: CoffeectxConfig, projectName: string)
   jobs.push(buildPlansJob(config, projectName));
   jobs.push(buildLocalDecisionsJob(config, projectName));
   jobs.push(buildLspEnrichmentJob(config, projectName));
+  jobs.push(buildSpanLinkJob());
 
   // User skills + jobs. Skills from `~/.coffeecode/skills/` are
   // agent-loadable only (no job registration here — pi's ResourceLoader

@@ -1,24 +1,27 @@
 /**
  * Provider-agnostic agent-session indexer.
  *
- * Takes an `AgentLogProvider` that hands us normalised sessions + messages
- * (see [provider.ts](provider.ts)), then runs the shared classify → enrich →
- * upsert pipeline. This pipeline used to be hard-wired to Claude Code's JSONL
- * format; the abstraction lets Codex CLI and pi.dev sessions land as the same
- * AgentSession / UserInput / FileOperation / ShellExecution / AgentQuestion /
- * AgentMessage / AgentSummary node types without code duplication.
+ * Pipeline: provider.scan → classify → segment into spans → upsert nodes.
+ *
+ *  - Sessions become `AgentSession` nodes.
+ *  - Persisted events (user_input / agent_message / file_create / file_edit /
+ *    shell_exec / agent_question) become per-type nodes. The terminating
+ *    AgentMessage of each span gets `isSummary="true"` set.
+ *  - Each span becomes a `Span` node referencing its events. Detection-only
+ *    events (`plan_accepted`, `todo_write`) feed segmentation but are not
+ *    persisted as nodes. `plan_accepted` still flows into the
+ *    `plan_acceptances` hidden table so plans can backref to sessions.
+ *
+ * Span ↔ LSP linking is handled by `spanLink.ts` (separate scheduler job)
+ * once the span row exists.
  */
 
 import type { Db, InsertEntry } from '@coffeectx/core';
-import { classifyMessages } from './classifier.js';
-import { enrichEvents } from './enricher.js';
-import type { EnrichedEvent } from './enricher.js';
+import { classifyMessages, type ClassifiedEvent } from './classifier.js';
+import { computeSpans, type ComputedSpan } from './spans.js';
 import type { AgentLogProvider, ProviderScanOptions } from './provider.js';
 import { Progress } from '../jobs/progress.js';
-import { computeFileContext } from './sessionContext.js';
 
-/** Parse an ISO-8601 timestamp into Unix ms; falls back to `Date.now()`
- *  if the input is unparseable so we never insert NaN into the DB. */
 function parseMs(iso: string | undefined): number {
   if (!iso) return Date.now();
   const ms = Date.parse(iso);
@@ -26,36 +29,27 @@ function parseMs(iso: string | undefined): number {
 }
 
 export interface IndexLogsOptions extends ProviderScanOptions {
-  /**
-   * Project's repo root. When supplied, every file path written to
-   * `event_file_context` is also recorded in its repo-relative form (when it
-   * lives under repoPath) so the enricher's `lspSymbolsByFilePaths` lookup
-   * matches LSP nodes regardless of whether the source provider used an
-   * absolute or relative path.
-   */
+  /** Reserved for future LSP-linking convenience. Currently unused. */
   repoPath?: string;
 }
 
 export interface IndexLogsResult {
-  files: number;       // kept for back-compat with run-log messages
-  skipped: number;     // kept for back-compat
+  files: number;
+  skipped: number;
   sessions: number;
   events: number;
+  spans: number;
   inserted: number;
   errors: Array<{ file: string; error: string; stack?: string }>;
 }
 
-/**
- * Run the agent-log indexer for one provider against an open DB.
- * Returns a small summary suitable for the scheduler's run-log line.
- */
 export async function indexAgentSessions(
   db: Db,
   provider: AgentLogProvider,
   options: IndexLogsOptions = {},
 ): Promise<IndexLogsResult> {
   const result: IndexLogsResult = {
-    files: 0, skipped: 0, sessions: 0, events: 0, inserted: 0, errors: [],
+    files: 0, skipped: 0, sessions: 0, events: 0, spans: 0, inserted: 0, errors: [],
   };
 
   let scanned;
@@ -72,8 +66,6 @@ export async function indexAgentSessions(
 
   result.sessions = scanned.sessions.size;
 
-  // Classify + filter by newerThan (per-event, not per-session — late events in
-  // an old session still get indexed).
   const allEvents = classifyMessages(scanned.messages);
   const events = options.newerThan
     ? allEvents.filter(e => new Date(e.timestamp) >= options.newerThan!)
@@ -83,55 +75,31 @@ export async function indexAgentSessions(
     `from ${scanned.messages.length} messages (${scanned.sessions.size} sessions)`,
   );
 
-  // Compute per-event file context (which file each text event is "about" in
-  // its session, based on nearby Edit/Write tool calls). Drives the enricher's
-  // filter and gets persisted to event_file_context after insert.
-  //
-  // The raw paths come from FileOperation.path which is often absolute (Claude
-  // and Codex both use absolute paths). LSP symbols are indexed by repo-relative
-  // path. So we expand each context to include BOTH forms when the path lives
-  // under the project's repoPath — that way the enricher's
-  // `lspSymbolsByFilePaths` lookup matches either side.
-  const rawContext = computeFileContext(events);
-  const repoPrefix = options.repoPath
-    ? (options.repoPath.endsWith('/') ? options.repoPath : `${options.repoPath}/`)
-    : null;
-  const fileContextByUuid = new Map<string, string[]>();
-  for (const [uuid, paths] of rawContext) {
-    const expanded = new Set<string>();
-    for (const p of paths) {
-      expanded.add(p);
-      if (repoPrefix && p.startsWith(repoPrefix)) expanded.add(p.slice(repoPrefix.length));
-    }
-    fileContextByUuid.set(uuid, [...expanded]);
+  // ── Span segmentation ──────────────────────────────────────────────────────
+  // Group events by session so segmentation only sees one session at a time —
+  // a long quiet gap *between* sessions shouldn't count as inactivity.
+  const eventsBySession = new Map<string, ClassifiedEvent[]>();
+  for (const ev of events) {
+    const arr = eventsBySession.get(ev.sessionId) ?? [];
+    arr.push(ev);
+    eventsBySession.set(ev.sessionId, arr);
   }
-  console.log(
-    `[${provider.name}] file-context: ${fileContextByUuid.size} text events scoped to a file ` +
-    `(${events.length - fileContextByUuid.size} unscoped — will get no relatedSymbols)`,
-  );
+  const spansBySession = new Map<string, ComputedSpan[]>();
+  for (const [sid, evs] of eventsBySession) {
+    spansBySession.set(sid, computeSpans(evs));
+  }
+  const totalSpans = [...spansBySession.values()].reduce((a, b) => a + b.length, 0);
+  console.log(`[${provider.name}] computed ${totalSpans} span(s)`);
 
-  // Enrichment is the slow phase — does one findNamedParent per identifier per
-  // event. Driving the Progress reporter from inside the loop is the only way
-  // to tell whether the job is running or hung.
-  const enrichProgress = new Progress(`${provider.name}:enrich`, events.length);
-  const enriched = await enrichEvents(events, db, {
-    onTick: (i) => enrichProgress.tick(i),
-    fileContextByUuid,
-  });
-  enrichProgress.done();
-  result.events = enriched.length;
-
-  if (enriched.length === 0 && scanned.sessions.size === 0) return result;
-
-  // Preload existing UUIDs / sessionIds once.
+  // ── Existing-row preload ───────────────────────────────────────────────────
   const existingUuids = loadExistingUuids(db);
   const existingSessionIds = loadExistingSessionIds(db);
 
-  const entries: InsertEntry[] = [];
-  // Track the source-uuid of each event entry by its position in `entries` so
-  // we can map the inserted node id back to its file-context after the insert.
-  const eventUuidByEntryIdx: Array<string | null> = [];
+  if (events.length === 0 && scanned.sessions.size === 0) return result;
 
+  // ── Build the entry batch ──────────────────────────────────────────────────
+  // 1) AgentSession rows.
+  const entries: InsertEntry[] = [];
   for (const meta of scanned.sessions.values()) {
     if (existingSessionIds.has(meta.sessionId)) continue;
     entries.push({
@@ -142,38 +110,84 @@ export async function indexAgentSessions(
         model: meta.model ?? '',
         provider: meta.provider,
       },
-      // The session's first-message timestamp becomes the node's created_at
-      // so range queries like `IsType "AgentSession", CreatedAfter "..."`
-      // mean "session started after". Date.parse handles ISO and falls back
-      // to NaN — anchor on `Date.now()` for unparseable values.
       createdAt: parseMs(meta.startTime),
     });
-    eventUuidByEntryIdx.push(null);
     existingSessionIds.add(meta.sessionId);
   }
 
-  // plan_accepted events don't get their own node — they're written to the
-  // hidden `plan_acceptances` table. Collect them now, write after the
-  // session inserts (the table doesn't depend on node ids).
+  // 2) Event rows. Track per-event entry index so we can resolve $ids on Span
+  //    construction. Use uuid as the cross-reference key.
+  const eventIndexByUuid = new Map<string, number>();
   const planAcceptances: Array<{ planSlug: string; sessionId: string; timestamp: string }> = [];
 
-  for (const event of enriched) {
-    if (existingUuids.has(event.uuid)) continue;
-    if (event.kind === 'plan_accepted') {
-      if (event.planSlug) {
-        planAcceptances.push({
-          planSlug: event.planSlug,
-          sessionId: event.sessionId,
-          timestamp: event.timestamp,
-        });
-      }
-      continue;
+  // Build a map of "which UUIDs need isSummary=true". Computed across all
+  // spans before emission so the corresponding UserInput/etc. entries don't
+  // pick up the flag — only AgentMessage rows do.
+  const summaryUuids = new Set<string>();
+  for (const spans of spansBySession.values()) {
+    for (const span of spans) {
+      const ev = span.events[span.summaryIndex];
+      if (ev && ev.kind === 'agent_message') summaryUuids.add(ev.uuid);
     }
-    const entry = eventToInsertEntry(event);
-    if (entry) {
-      entries.push(entry);
-      eventUuidByEntryIdx.push(event.uuid);
-      existingUuids.add(event.uuid);
+  }
+
+  // Stream events in their session-ordered position so AgentMessage rows
+  // land in the same order they appear in the log.
+  for (const [, sessionEvents] of eventsBySession) {
+    for (const event of sessionEvents) {
+      if (event.kind === 'plan_accepted') {
+        if (event.planSlug) {
+          planAcceptances.push({
+            planSlug: event.planSlug,
+            sessionId: event.sessionId,
+            timestamp: event.timestamp,
+          });
+        }
+        continue;
+      }
+      if (event.kind === 'todo_write') continue;
+      if (existingUuids.has(event.uuid)) continue;
+      const entry = eventToInsertEntry(event, summaryUuids.has(event.uuid));
+      if (entry) {
+        eventIndexByUuid.set(event.uuid, entries.length);
+        entries.push(entry);
+        existingUuids.add(event.uuid);
+      }
+    }
+  }
+
+  // 3) Span rows. Reference the event rows by $ref in this same batch.
+  for (const spans of spansBySession.values()) {
+    for (const span of spans) {
+      const messageRefs: Array<{ $ref: number } | { $id: string }> = [];
+      for (const ev of span.events) {
+        const idx = eventIndexByUuid.get(ev.uuid);
+        if (idx !== undefined) messageRefs.push({ $ref: idx });
+      }
+      if (messageRefs.length === 0) continue;
+      const summaryRef = (() => {
+        const ev = span.events[span.summaryIndex];
+        if (!ev || ev.kind !== 'agent_message') return undefined;
+        const idx = eventIndexByUuid.get(ev.uuid);
+        return idx !== undefined ? { $ref: idx } : undefined;
+      })();
+      const filesChanged = new Set<string>();
+      for (const ev of span.events) {
+        if (ev.kind === 'file_create' || ev.kind === 'file_edit') {
+          if (ev.path) filesChanged.add(ev.path);
+        }
+      }
+      const data: Record<string, unknown> = {
+        sessionId: span.events[0]!.sessionId,
+        kind: span.kind,
+        startedAt: String(span.startedAtMs),
+        endedAt: String(span.endedAtMs),
+        messages: messageRefs,
+        filesChanged: [...filesChanged],
+        touchedSymbols: [],
+      };
+      if (summaryRef) data.summary = summaryRef;
+      entries.push({ type: 'Span', data, createdAt: span.startedAtMs });
     }
   }
 
@@ -182,64 +196,33 @@ export async function indexAgentSessions(
     return result;
   }
 
-  // Insert in batches of 200 to keep transactions bounded.
-  const BATCH = 200;
-  const totalBatches = Math.ceil(entries.length / BATCH);
-  const insertProgress = new Progress(`${provider.name}:insert`, entries.length);
-  const contextRows: Array<{ eventId: string; filePath: string }> = [];
-  for (let i = 0; i < entries.length; i += BATCH) {
-    const batch = entries.slice(i, i + BATCH);
-    insertProgress.tick(i, `batch ${i / BATCH + 1}/${totalBatches}`);
-    const insertResult = await db.insertEntries(batch);
-    result.inserted += insertResult.ids.filter(id => id !== null).length;
-    for (const err of insertResult.errors) {
-      const errorMsg = `Batch ${i / BATCH + 1}, entry ${err.index}${err.path ? `.${err.path}` : ''}: ${err.message}`;
-      console.error(`[${provider.name}] ${errorMsg}`);
-    }
-    // Map inserted node ids back to their source event uuids so we can write
-    // the file-context rows once the node ids are known. Each path is also
-    // recorded in its repo-relative form (when applicable) so the enricher's
-    // file_path lookup matches LSP nodes' relative paths.
-    const repoPrefix = options.repoPath
-      ? (options.repoPath.endsWith('/') ? options.repoPath : `${options.repoPath}/`)
-      : null;
-    for (let k = 0; k < insertResult.ids.length; k++) {
-      const nodeId = insertResult.ids[k];
-      const uuid = eventUuidByEntryIdx[i + k];
-      if (!nodeId || !uuid) continue;
-      const paths = fileContextByUuid.get(uuid);
-      if (!paths) continue;
-      for (const p of paths) {
-        contextRows.push({ eventId: nodeId, filePath: p });
-        if (repoPrefix && p.startsWith(repoPrefix)) {
-          contextRows.push({ eventId: nodeId, filePath: p.slice(repoPrefix.length) });
-        }
-      }
-    }
+  // ── Insert in batches ──────────────────────────────────────────────────────
+  // Spans cross-reference their events via $ref, so we can't split spans into
+  // a separate batch — keep the whole payload together. Batches stay small by
+  // chunking sessions, but here we insert in one go to preserve $ref indices.
+  const insertResult = await db.insertEntries(entries);
+  result.inserted = insertResult.ids.filter(id => id !== null).length;
+  result.spans = entries.filter(e => e.type === 'Span').length;
+  result.events = eventIndexByUuid.size;
+  for (const err of insertResult.errors) {
+    const msg = `entry ${err.index}${err.path ? `.${err.path}` : ''}: ${err.message}`;
+    console.error(`[${provider.name}] ${msg}`);
   }
-  insertProgress.done(`${result.inserted} inserted`);
 
-  if (contextRows.length > 0) {
-    db.writeEventFileContext(contextRows);
-    console.log(`[${provider.name}] wrote ${contextRows.length} event_file_context rows`);
-  }
+  // Print a tiny progress line for parity with the previous output.
+  new Progress(`${provider.name}:insert`, entries.length).done(`${result.inserted} inserted`);
 
   if (planAcceptances.length > 0) {
     for (const pa of planAcceptances) {
       db.writePlanAcceptance(pa.planSlug, pa.sessionId, pa.timestamp);
     }
-    console.log(
-      `[${provider.name}] wrote ${planAcceptances.length} plan_acceptances rows`,
-    );
+    console.log(`[${provider.name}] wrote ${planAcceptances.length} plan_acceptances rows`);
   }
 
   return result;
 }
 
-function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
-  // Every event's wall-clock anchor maps to the node's created_at — the
-  // type-level `timestamp` symbol fields are gone now that the column is
-  // first-class.
+function eventToInsertEntry(event: ClassifiedEvent, isSummary: boolean): InsertEntry | null {
   const createdAt = parseMs(event.timestamp);
   switch (event.kind) {
     case 'user_input':
@@ -249,8 +232,6 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           sessionId: event.sessionId,
           uuid: event.uuid,
           text: event.text ?? '',
-          relatedFiles: [],
-          relatedSymbols: event.linkedRefs,
         },
         createdAt,
       };
@@ -265,7 +246,6 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           operation: event.kind === 'file_create' ? 'create' : 'edit',
           path: event.path ?? '',
           content: event.content ?? '',
-          touchedSymbols: [],
         },
         createdAt,
       };
@@ -289,43 +269,27 @@ function eventToInsertEntry(event: EnrichedEvent): InsertEntry | null {
           sessionId: event.sessionId,
           uuid: event.uuid,
           question: event.question ?? '',
-          relatedSymbols: event.linkedRefs,
         },
         createdAt,
       };
 
-    case 'agent_message':
-      return {
-        type: 'AgentMessage',
-        data: {
-          sessionId: event.sessionId,
-          uuid: event.uuid,
-          text: event.text ?? '',
-          relatedSymbols: event.linkedRefs,
-        },
-        createdAt,
+    case 'agent_message': {
+      const data: Record<string, unknown> = {
+        sessionId: event.sessionId,
+        uuid: event.uuid,
+        text: event.text ?? '',
       };
-
-    case 'agent_summary':
-      return {
-        type: 'AgentSummary',
-        data: {
-          sessionId: event.sessionId,
-          uuid: event.uuid,
-          text: event.text ?? '',
-          relatedSymbols: event.linkedRefs,
-        },
-        createdAt,
-      };
+      if (isSummary) data.isSummary = 'true';
+      return { type: 'AgentMessage', data, createdAt };
+    }
 
     default:
       return null;
   }
 }
 
-const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentMessage', 'AgentSummary'];
+const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentMessage'];
 
-/** Load all existing event UUIDs from the DB in one pass. */
 function loadExistingUuids(db: Db): Set<string> {
   const uuids = new Set<string>();
   for (const id of db.queryByNamedType(EVENT_TYPES)) {
@@ -337,7 +301,6 @@ function loadExistingUuids(db: Db): Set<string> {
   return uuids;
 }
 
-/** Load all existing AgentSession sessionIds from the DB in one pass. */
 function loadExistingSessionIds(db: Db): Set<string> {
   const ids = new Set<string>();
   for (const mapId of db.queryByNamedType(['AgentSession'])) {
