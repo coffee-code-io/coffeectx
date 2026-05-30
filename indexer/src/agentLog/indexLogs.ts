@@ -36,6 +36,13 @@ function parseMs(iso: string | undefined): number {
 export interface IndexLogsOptions extends ProviderScanOptions {
   /** Reserved for future LSP-linking convenience. Currently unused. */
   repoPath?: string;
+  /**
+   * Wall-clock anchor for the hard-break gate inside `computeSpans`.
+   * Defaults to `Date.now()` for production daemon runs; replay/test
+   * harnesses override it so spans close deterministically regardless of
+   * how much real time has passed since the captured session.
+   */
+  closeBeforeMs?: number;
 }
 
 export interface IndexLogsResult {
@@ -89,7 +96,7 @@ export async function indexAgentSessions(
     arr.push(ev);
     eventsBySession.set(ev.sessionId, arr);
   }
-  const closeBeforeMs = Date.now();
+  const closeBeforeMs = options.closeBeforeMs ?? Date.now();
   const spansBySession = new Map<string, ComputedSpan[]>();
   for (const [sid, evs] of eventsBySession) {
     spansBySession.set(sid, computeSpans(evs, closeBeforeMs));

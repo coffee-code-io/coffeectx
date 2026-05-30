@@ -1,0 +1,33 @@
+{
+  "name": "@coffeectx/test-utils",
+  "version": "0.1.0",
+  "description": "Record / backup / replay harness for tuning agent-log span heuristics and the LSP pipeline.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "coffeectx-replay": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "start": "node ./dist/cli.js"
+  },
+  "dependencies": {
+    "@coffeectx/core": "^0.1.0",
+    "@coffeectx/indexer": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
