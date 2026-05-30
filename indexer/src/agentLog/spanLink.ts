@@ -50,16 +50,24 @@ export async function linkSpans(db: Db): Promise<SpanLinkResult> {
       for (const relPath of filesChanged) {
         const symbols = byFile.get(relPath);
         if (!symbols) continue;
-        // Group by timeline; pick the largest createdAt ≤ endedAt; include
-        // iff that row isn't tombstoned.
+        // Group by timeline; pick the largest createdAt ≤ endedAt. The
+        // tombstone flag here means "superseded later" — only treat it as
+        // a real delete when the picked version is also the timeline head
+        // (no newer version exists at all). Otherwise the version was alive
+        // as-of endedAt and the tombstone is just bookkeeping from a later
+        // bump landing post-hoc.
         const byTimeline = new Map<string, LspIndexed>();
+        const headVersion = new Map<string, number>();
         for (const s of symbols) {
+          const prevHead = headVersion.get(s.timelineId) ?? -Infinity;
+          if (s.version > prevHead) headVersion.set(s.timelineId, s.version);
           if (s.createdAt == null || s.createdAt > endedAt) continue;
           const prev = byTimeline.get(s.timelineId);
           if (!prev || s.createdAt > (prev.createdAt ?? -Infinity)) byTimeline.set(s.timelineId, s);
         }
         for (const s of byTimeline.values()) {
-          if (s.tombstone) continue;
+          const isHead = s.version === headVersion.get(s.timelineId);
+          if (s.tombstone && isHead) continue;  // true delete
           symbolIds.add(s.id);
         }
       }
@@ -84,6 +92,7 @@ export async function linkSpans(db: Db): Promise<SpanLinkResult> {
 interface LspIndexed {
   id: string;
   timelineId: string;
+  version: number;
   createdAt: number | null;
   tombstone: boolean;
 }
@@ -114,6 +123,7 @@ function buildLspIndexByFile(db: Db): Map<string, LspIndexed[]> {
         bucket.push({
           id: row.id,
           timelineId,
+          version: row.version,
           createdAt: row.createdAt,
           tombstone: row.tombstone,
         });

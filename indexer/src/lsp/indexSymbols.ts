@@ -65,6 +65,11 @@ export interface IndexWithLspOptions {
   /** Watermark from job state — drain snapshots with ts > this. Required when
    *  supervisor is provided; ignored otherwise. */
   lastConsumedTs?: number;
+  /** Upper bound on snapshot ts to consider — typically the most recent
+   *  finalised `Span.endedAt`. Snapshots with `ts > cutoffMs` are deferred
+   *  until a later span close pushes the cutoff forward. `undefined` means
+   *  "no cutoff" (bootstrap / manual trigger). */
+  cutoffMs?: number;
 }
 
 export interface IndexResultWithCursor extends IndexResult {
@@ -363,7 +368,7 @@ export async function indexWithLsp(
     files: 0, nodes: 0, bumped: 0, deleted: 0, skipped: false, errors: [],
   };
 
-  const { supervisor, lastConsumedTs = 0 } = options;
+  const { supervisor, lastConsumedTs = 0, cutoffMs } = options;
   const existingIndex = buildExistingIndex(db);
 
   // Build the (relPath, snapshots) list. With a supervisor we drain its
@@ -371,13 +376,20 @@ export async function indexWithLsp(
   // populates a snapshot per source file on daemon start, so even a
   // fresh DB has snapshots to consume). Without a supervisor — manual CLI
   // runs of indexWithLsp — we fall back to a direct disk walk.
+  //
+  // When `cutoffMs` is set we drop snapshots with `ts > cutoffMs` from each
+  // file's candidate list. A file with NO snapshot ≤ cutoff is deferred:
+  // its newer snapshots stay in the supervisor's index, untouched, until
+  // the next span close pushes the cutoff forward.
   const planned: Array<{ relPath: string; snapshots: SnapshotEntry[] }> = [];
   let maxTs = lastConsumedTs;
   if (supervisor) {
     const drained = supervisor.drainSince(repoPath, lastConsumedTs);
     for (const [relPath, entries] of drained) {
-      planned.push({ relPath, snapshots: entries });
-      for (const e of entries) if (e.ts > maxTs) maxTs = e.ts;
+      const eligible = cutoffMs == null ? entries : entries.filter(e => e.ts <= cutoffMs);
+      if (eligible.length === 0) continue;
+      planned.push({ relPath, snapshots: eligible });
+      for (const e of eligible) if (e.ts > maxTs) maxTs = e.ts;
     }
     if (planned.length === 0) {
       result.skipped = true;
@@ -445,7 +457,7 @@ export async function indexWithLsp(
       }
 
       reindexedFiles.add(relPath);
-      await applyFileRecords(db, relPath, records, existingIndex, result);
+      await applyFileRecords(db, relPath, records, existingIndex, result, picked.entry.ts);
     }
     progress.done(`${result.nodes} new, ${result.bumped} bumped, ${result.deleted} deleted`);
   } finally {
@@ -476,6 +488,7 @@ async function applyFileRecords(
   records: SymbolRecord[],
   existingIndex: ExistingIndex,
   result: IndexResult,
+  createdAt: number,
 ): Promise<void> {
   // Partition records — leaves/enum-likes first, containers second.
   const leaves: SymbolRecord[] = [];
@@ -501,8 +514,10 @@ async function applyFileRecords(
     }
     const data = buildEntryData(rec, relPath);
     if (existing) {
-      // bump — same timeline, new version.
-      const r = await db.insertEntries([{ id: existing.id, type: rec.typeName, data, bumpVersion: true } as InsertEntry]);
+      // bump — same timeline, new version. `createdAt` is the picked
+      // snapshot's ts so the version's "as of" time matches when that
+      // source state existed on disk (drives span-link picking).
+      const r = await db.insertEntries([{ id: existing.id, type: rec.typeName, data, bumpVersion: true, createdAt } as InsertEntry]);
       pushErrors(result, relPath, r.errors);
       const newId = r.ids[0];
       if (newId) {
@@ -515,7 +530,7 @@ async function applyFileRecords(
       }
       remainingInFile.delete(existing.id);
     } else {
-      const r = await db.insertEntries([{ type: rec.typeName, data }]);
+      const r = await db.insertEntries([{ type: rec.typeName, data, createdAt }]);
       pushErrors(result, relPath, r.errors);
       const newId = r.ids[0];
       if (newId) {
@@ -556,7 +571,7 @@ async function applyFileRecords(
     const data = buildEntryData(rec, relPath);
     data['children'] = childIds.map(id => ({ $id: id }));
     if (existing) {
-      const r = await db.insertEntries([{ id: existing.id, type: rec.typeName, data, bumpVersion: true } as InsertEntry]);
+      const r = await db.insertEntries([{ id: existing.id, type: rec.typeName, data, bumpVersion: true, createdAt } as InsertEntry]);
       pushErrors(result, relPath, r.errors);
       const newId = r.ids[0];
       if (newId) {
@@ -567,7 +582,7 @@ async function applyFileRecords(
       }
       remainingInFile.delete(existing.id);
     } else {
-      const r = await db.insertEntries([{ type: rec.typeName, data }]);
+      const r = await db.insertEntries([{ type: rec.typeName, data, createdAt }]);
       pushErrors(result, relPath, r.errors);
       const newId = r.ids[0];
       if (newId) {

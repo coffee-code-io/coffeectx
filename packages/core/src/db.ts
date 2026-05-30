@@ -2246,6 +2246,136 @@ export class Db implements QueryDb {
   }
 
   /**
+   * Largest `endedAt` value among non-tombstoned `Span` rows, parsed from
+   * its string `Symbol` storage to a Unix-millisecond integer. Returns null
+   * when no Spans exist. Used by the LSP job to gate snapshot extraction —
+   * only snapshots whose ts is ≤ this cutoff are processed, so LSP versions
+   * never appear ahead of a finalised span boundary.
+   */
+  getMaxClosedSpanEndedAt(): number | null {
+    const row = this.raw
+      .prepare(
+        `SELECT MAX(CAST(child.symbol_value AS INTEGER)) AS maxMs
+           FROM map_entries me
+           JOIN nodes parent ON parent.id = me.map_id
+           JOIN named_types nt ON nt.type_id = parent.type_id
+           JOIN nodes child ON child.id = me.value_id
+           WHERE nt.name = 'Span'
+             AND me.key = 'endedAt'
+             AND parent.tombstone = 0
+             AND child.kind = 'symbol'`,
+      )
+      .get() as { maxMs: number | null } | undefined;
+    const v = row?.maxMs;
+    return v == null || !Number.isFinite(v) ? null : v;
+  }
+
+  /**
+   * Walk every event-type row currently at `state='unspanned'` and return
+   * a minimal "raw event" tuple per row, ordered by `(sessionId, created_at)`.
+   *
+   * Used by the agent-log indexer's catch-up pass — when the JSONL file
+   * hasn't changed since the last crawl, the classifier produces no input,
+   * but the trailing tail of an earlier conversation may have aged past
+   * `HARD_BREAK_MS` and is now ready to be finalised into a Span. This
+   * helper makes those rows visible without re-reading the JSONL.
+   *
+   * `kind` mirrors the classifier's discriminator so callers can wire
+   * results back into `computeSpans` without re-classifying. Text-bearing
+   * fields are read where applicable; unused fields are empty strings.
+   */
+  findUnspannedEvents(): Array<{
+    id: string;
+    sessionId: string;
+    uuid: string;
+    createdAt: number;
+    typeName: string;
+    kind: 'user_input' | 'agent_message' | 'file_create' | 'file_edit' | 'shell_exec' | 'agent_question';
+    text: string;
+    path: string;
+    content: string;
+    command: string;
+    description: string;
+    question: string;
+  }> {
+    const rows = this.raw
+      .prepare(
+        `SELECT n.id, n.created_at AS createdAt, nt.name AS typeName,
+                sid_atom.symbol_value AS sessionId,
+                uuid_atom.symbol_value AS uuid,
+                op_atom.symbol_value   AS operation,
+                text_atom.symbol_value AS textVal,
+                path_atom.symbol_value AS pathVal,
+                content_atom.symbol_value AS contentVal,
+                command_atom.symbol_value AS commandVal,
+                desc_atom.symbol_value AS descriptionVal,
+                question_atom.symbol_value AS questionVal
+           FROM nodes n
+           JOIN named_types nt ON nt.type_id = n.type_id
+           LEFT JOIN map_entries sid_me   ON sid_me.map_id = n.id   AND sid_me.key   = 'sessionId'
+           LEFT JOIN nodes        sid_atom ON sid_atom.id  = sid_me.value_id
+           LEFT JOIN map_entries uuid_me   ON uuid_me.map_id = n.id  AND uuid_me.key  = 'uuid'
+           LEFT JOIN nodes        uuid_atom ON uuid_atom.id = uuid_me.value_id
+           LEFT JOIN map_entries op_me     ON op_me.map_id   = n.id  AND op_me.key    = 'operation'
+           LEFT JOIN nodes        op_atom   ON op_atom.id    = op_me.value_id
+           LEFT JOIN map_entries text_me   ON text_me.map_id = n.id  AND text_me.key  = 'text'
+           LEFT JOIN nodes        text_atom ON text_atom.id  = text_me.value_id
+           LEFT JOIN map_entries path_me   ON path_me.map_id = n.id  AND path_me.key  = 'path'
+           LEFT JOIN nodes        path_atom ON path_atom.id  = path_me.value_id
+           LEFT JOIN map_entries content_me ON content_me.map_id = n.id AND content_me.key = 'content'
+           LEFT JOIN nodes        content_atom ON content_atom.id = content_me.value_id
+           LEFT JOIN map_entries command_me ON command_me.map_id = n.id AND command_me.key = 'command'
+           LEFT JOIN nodes        command_atom ON command_atom.id = command_me.value_id
+           LEFT JOIN map_entries desc_me    ON desc_me.map_id    = n.id AND desc_me.key    = 'description'
+           LEFT JOIN nodes        desc_atom  ON desc_atom.id     = desc_me.value_id
+           LEFT JOIN map_entries question_me ON question_me.map_id = n.id AND question_me.key = 'question'
+           LEFT JOIN nodes        question_atom ON question_atom.id = question_me.value_id
+          WHERE n.state = 'unspanned'
+            AND n.tombstone = 0
+            AND nt.name IN ('UserInput','AgentMessage','FileOperation','ShellExecution','AgentQuestion')
+          ORDER BY sid_atom.symbol_value, n.created_at`,
+      )
+      .all() as Array<{
+        id: string;
+        createdAt: number;
+        typeName: string;
+        sessionId: string | null;
+        uuid: string | null;
+        operation: string | null;
+        textVal: string | null;
+        pathVal: string | null;
+        contentVal: string | null;
+        commandVal: string | null;
+        descriptionVal: string | null;
+        questionVal: string | null;
+      }>;
+    return rows
+      .filter(r => r.sessionId && r.uuid)
+      .map(r => {
+        const kind: 'user_input' | 'agent_message' | 'file_create' | 'file_edit' | 'shell_exec' | 'agent_question' =
+          r.typeName === 'UserInput'      ? 'user_input'
+        : r.typeName === 'AgentMessage'   ? 'agent_message'
+        : r.typeName === 'FileOperation'  ? (r.operation === 'create' ? 'file_create' : 'file_edit')
+        : r.typeName === 'ShellExecution' ? 'shell_exec'
+        :                                   'agent_question';
+        return {
+          id: r.id,
+          sessionId: r.sessionId!,
+          uuid: r.uuid!,
+          createdAt: r.createdAt,
+          typeName: r.typeName,
+          kind,
+          text: r.textVal ?? '',
+          path: r.pathVal ?? '',
+          content: r.contentVal ?? '',
+          command: r.commandVal ?? '',
+          description: r.descriptionVal ?? '',
+          question: r.questionVal ?? '',
+        };
+      });
+  }
+
+  /**
    * Overwrite the ordered state machine for a named type. Pass an empty array
    * to clear (which restores the default `['ready']` behaviour at read time).
    */

@@ -1,0 +1,36 @@
+{
+  "name": "@coffeectx/coffeeenv",
+  "version": "0.1.0",
+  "description": "Virtual environments for AI coding setups — declarative profiles for tools, AGENTS.md, and MCP wiring",
+  "type": "module",
+  "main": "./dist/cli.js",
+  "bin": {
+    "coffeeenv": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "yaml": "^2.7.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

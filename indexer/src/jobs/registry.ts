@@ -39,10 +39,6 @@ import { indexPlans } from '../plans/indexPlans.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = resolve(__dirname, '../../prompts');
 
-// Snapshot supervisor drains incrementally now — each LSP run only handles
-// files that changed since the last consumed ts, so a short interval keeps
-// the graph close to the working tree without re-walking the whole repo.
-const DEFAULT_LSP_INTERVAL_MS = 60_000;
 const DEFAULT_AGENTLOG_INTERVAL_MS = 30_000;
 const DEFAULT_PLANS_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_SKILL_FALLBACK_INTERVAL_MS = 10 * 60_000;
@@ -111,7 +107,12 @@ function buildLspJob(jobName: string, _config: CoffeectxConfig, _projectName: st
     name: jobName,
     description: 'Index repository source files via Language Server Protocol.',
     defaultEnabled: false,
-    triggers: [{ kind: 'timer', intervalMs: readIntervalMs({}, DEFAULT_LSP_INTERVAL_MS) }],
+    // LSP extraction is gated by closed Spans — when a Span flips to
+    // `extracted`, every file whose latest snapshot is ≤ that span's
+    // `endedAt` gets one symbol-extraction pass. Snapshots after the
+    // cutoff (in-progress conversations) defer to the next span close.
+    // For bootstrap (no spans yet) the user triggers manually.
+    triggers: [{ kind: 'onNodeState', typeNames: ['Span'], state: 'extracted' }],
     async run(ctx) {
       const repoPath = readString(ctx.parameters, 'repoPath') ?? ctx.project.repoPath;
       if (!repoPath) return { message: 'no repoPath configured — skipped' };
@@ -122,9 +123,11 @@ function buildLspJob(jobName: string, _config: CoffeectxConfig, _projectName: st
       const lspBinPath = lspBin.startsWith('~/') ? `${homedir()}/${lspBin.slice(2)}` : lspBin;
 
       const state = (ctx.db.getJobState<LspJobState>(jobName)) ?? {};
+      const cutoffMs = ctx.db.getMaxClosedSpanEndedAt();
       const r = await indexWithLsp(ctx.db, resolve(repoPath), lspBinPath, lspArgs, {
         supervisor: ctx.snapshotSupervisor,
         lastConsumedTs: state.lastConsumedTs ?? 0,
+        cutoffMs: cutoffMs ?? undefined,
       });
 
       if (r.consumedTs !== undefined && r.consumedTs > (state.lastConsumedTs ?? 0)) {
@@ -356,7 +359,11 @@ function buildSpanLinkJob(): Job {
   return {
     name: 'span-link',
     description: 'Link Spans to LSP symbols based on filesChanged at endedAt.',
-    defaultEnabled: true,
+    // Every system job defaults to disabled — the project's config.yaml is
+    // the source of truth. The UI surfaces a warning when system jobs are
+    // off so the user knows to turn them on. Later: project init flips all
+    // system jobs to enabled automatically.
+    defaultEnabled: false,
     triggers: [
       { kind: 'onNodeState', typeNames: ['Span'], state: 'extracted' },
       // Fallback timer so a missed state-change still gets caught up.

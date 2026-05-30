@@ -19,9 +19,11 @@
  * the Skills tab.
  */
 
+import { useQuery } from '@tanstack/react-query';
 import { SchedulerDot } from './SchedulerDot';
 import { JobsPanel } from './JobsPanel';
 import { useUi } from '../state/store';
+import { api, type JobRow } from '../api/client';
 
 export function SchedulerView() {
   const project = useUi(s => s.project);
@@ -39,6 +41,8 @@ export function SchedulerView() {
           </div>
           <SchedulerDot verbose />
         </header>
+
+        <DisabledSystemJobsWarning />
 
         <section>
           <div className="flex items-baseline justify-between mb-2">
@@ -61,6 +65,42 @@ export function SchedulerView() {
           </div>
           <JobsPanel filter="available" />
         </section>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Warning banner that lists every `category: 'system'` job whose
+ * `enabled === false`. System jobs (claude / codex / lsp / pi / plans /
+ * span-link / local-decisions / lsp-enrichment) form the indexing pipeline
+ * — leaving them off means the graph stops capturing new data. Defaults
+ * are intentionally disabled today (project.yaml is the source of truth)
+ * so this nudges the user to flip them on the first time they open a
+ * project; later we'll auto-enable in project-init.
+ */
+function DisabledSystemJobsWarning() {
+  const project = useUi(s => s.project);
+  const { data: jobs } = useQuery({
+    queryKey: ['jobs', project],
+    queryFn: () => (project ? api.listJobs(project) : Promise.resolve<JobRow[]>([])),
+    enabled: !!project,
+    refetchInterval: 2_000,
+  });
+  if (!jobs) return null;
+  const disabled = jobs.filter(j => j.category === 'system' && !j.enabled);
+  if (disabled.length === 0) return null;
+  return (
+    <div className="border border-dashed border-status-warning/60 bg-status-warning/5 rounded-lg p-3 text-sm flex items-start gap-2">
+      <span className="text-status-warning mt-0.5">⚠</span>
+      <div className="flex-1">
+        <div className="text-roast-dark">
+          {disabled.length} system job{disabled.length === 1 ? '' : 's'} disabled — the indexing
+          pipeline is not running end-to-end.
+        </div>
+        <div className="text-[11px] text-roast-light mt-0.5 font-mono break-words">
+          {disabled.map(j => j.name).join(', ')}
+        </div>
       </div>
     </div>
   );

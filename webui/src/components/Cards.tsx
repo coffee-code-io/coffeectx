@@ -26,6 +26,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const CARD_BFS_CAP = 30;
 const CARD_DEPTH_CAP = 2;
+/** Show at most this many array items inline; the rest get a "+N more" chip. */
+const LIST_INLINE_CAP = 8;
 
 interface CardBudget {
   /** How many named-type cards have already been rendered in this Card tree. */
@@ -47,12 +49,15 @@ interface ValueProps {
   value: unknown;
   depth: number;
   budget: CardBudget;
+  /** Name of the map key this value was rendered under, when known. Drives
+   *  field-aware rendering (e.g. `source` gets fenced as a code block). */
+  fieldName?: string;
 }
 
-function ValueView({ value, depth, budget }: ValueProps) {
+function ValueView({ value, depth, budget, fieldName }: ValueProps) {
   if (value == null) return <span className="text-roast-light italic">∅</span>;
 
-  if (typeof value === 'string') return <StringView text={value} />;
+  if (typeof value === 'string') return <StringView text={value} fieldName={fieldName} />;
 
   if (typeof value === 'number' || typeof value === 'boolean') {
     return <span className="font-mono text-roast-dark">{String(value)}</span>;
@@ -60,13 +65,22 @@ function ValueView({ value, depth, budget }: ValueProps) {
 
   if (Array.isArray(value)) {
     if (value.length === 0) return <span className="text-roast-light italic">[]</span>;
+    // Render only the first LIST_INLINE_CAP items inline; collapse the
+    // remainder behind a non-interactive count chip. Stops a Span with 30+
+    // AgentMessage children from feeding ReactMarkdown 30 times in one
+    // render pass.
+    const visible = value.slice(0, LIST_INLINE_CAP);
+    const overflow = value.length - visible.length;
     return (
       <ol className="list-decimal list-inside space-y-1 marker:text-roast-light">
-        {value.map((item, i) => (
+        {visible.map((item, i) => (
           <li key={i} className="text-roast-dark">
             <ValueView value={item} depth={depth} budget={budget} />
           </li>
         ))}
+        {overflow > 0 && (
+          <li className="text-roast-light italic list-none ml-4">… +{overflow} more</li>
+        )}
       </ol>
     );
   }
@@ -170,7 +184,7 @@ function ObjectRows({ obj, depth, budget }: { obj: Record<string, unknown>; dept
         <div key={k} className="flex flex-col gap-1">
           <div className="text-[11px] text-roast-light font-mono">{k}</div>
           <div className="pl-2 border-l-2 border-cream-200">
-            <ValueView value={obj[k]} depth={depth} budget={budget} />
+            <ValueView value={obj[k]} depth={depth} budget={budget} fieldName={k} />
           </div>
         </div>
       ))}
@@ -198,9 +212,21 @@ function RefChip({ id, kind, typeName }: { id: string; kind: 'node' | 'uuid'; ty
   );
 }
 
-function StringView({ text }: { text: string }) {
+function StringView({ text, fieldName }: { text: string; fieldName?: string }) {
   if (UUID_RE.test(text.trim())) {
     return <RefChip id={text.trim()} kind="uuid" />;
+  }
+  // Code-block fields (e.g. LspMethod.source) — wrap in markdown fences so
+  // the existing prose path renders them as a syntax-styled code block
+  // instead of a paragraph wall.
+  const isCodeField = fieldName === 'source';
+  if (isCodeField) {
+    const body = '```\n' + text + '\n```';
+    return (
+      <div className="prose prose-sm max-w-none prose-pre:bg-cream-200 prose-pre:text-roast-dark prose-pre:p-2 prose-pre:rounded prose-pre:overflow-x-auto">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+      </div>
+    );
   }
   const long = text.length > 80 || /[\n#*`>_\[\]]/.test(text);
   if (!long) {

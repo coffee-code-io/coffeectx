@@ -66,7 +66,6 @@ export interface NodeDetailResponse {
    * pre-state-machine nodes. Surfaced in the header chip. */
   state: string | null;
   node: unknown;
-  raw: unknown;
   /** All versions of the timeline this node belongs to. Length === 1
    *  means the node is unversioned (no nav arrows). */
   versions: TimelineVersionRow[];

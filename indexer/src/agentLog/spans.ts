@@ -20,7 +20,7 @@
 
 import type { ClassifiedEvent } from './classifier.js';
 import {
-  SPLIT_WEIGHTS, JOIN_WEIGHTS, SMALL_BATCH, CUT_THRESHOLD,
+  SPLIT_WEIGHTS, JOIN_WEIGHTS, SMALL_BATCH, CUT_THRESHOLD, HARD_BREAK_MS,
   DONE_KEYWORD_RE, TEST_CMD_RE, IDENT_RE,
 } from './spanHeuristics.js';
 
@@ -41,8 +41,19 @@ export interface ComputedSpan {
  * `events` is the full ordered list of classified events for the session,
  * including detection-only kinds (`plan_accepted`, `todo_write`). They feed
  * the boundary scorer but are stripped before emission.
+ *
+ * `closeBeforeMs` (default `Date.now()`) is the upper bound for a span's
+ * `endedAt` to qualify as finalised. Any computed span whose final event
+ * happened within `HARD_BREAK_MS` of `closeBeforeMs` is treated as still
+ * in-progress and omitted — its events stay un-attributed (state
+ * `unspanned` upstream) until the hard break elapses. Only the trailing
+ * span of the session is at risk; interior spans by construction have a
+ * later span after them and are always finalised.
  */
-export function computeSpans(events: ClassifiedEvent[]): ComputedSpan[] {
+export function computeSpans(
+  events: ClassifiedEvent[],
+  closeBeforeMs: number = Date.now(),
+): ComputedSpan[] {
   if (events.length === 0) return [];
 
   // ── Score boundaries ───────────────────────────────────────────────────────
@@ -146,6 +157,11 @@ export function computeSpans(events: ClassifiedEvent[]): ComputedSpan[] {
 
     const startedAtMs = parseMs(persisted[0]!.timestamp);
     const endedAtMs = parseMs(persisted[persisted.length - 1]!.timestamp);
+
+    // Hard-break gate: a span isn't finalised until HARD_BREAK_MS of
+    // inactivity follows its last event. The trailing span of a still-warm
+    // session fails this check and is held back until a future crawl.
+    if (endedAtMs > closeBeforeMs - HARD_BREAK_MS) continue;
 
     out.push({ events: persisted, kind, startedAtMs, endedAtMs, summaryIndex });
   }

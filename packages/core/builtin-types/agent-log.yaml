@@ -9,13 +9,18 @@ types:
       model: Symbol        # e.g. "claude-sonnet-4-6", "gpt-5-codex", "qwen/qwen3-32b"
       provider: Symbol     # "claude" | "codex" | "pi"
 
-  # Per-event types below carry no `states` and no `comment`. Linking now
-  # happens at the Span level (see `Span.touchedSymbols`); analyst
-  # annotations live on (Local)Decision / Lsp* nodes instead.
+  # Per-event types below carry no `comment` (analyst annotations live on
+  # (Local)Decision / Lsp* nodes instead) but DO carry a state machine
+  # [unspanned, spanned]. An event is `unspanned` until a finalised Span
+  # claims it via its `messages` list; at that point the span indexer
+  # bumps the event to `spanned`. Trailing events in an in-progress
+  # conversation stay `unspanned` until the next crawl closes a Span
+  # over them.
 
   UserInput:
     description: A message typed by the user to the coding agent — the user's intent or feedback.
     hidden: true
+    states: [unspanned, spanned]
     kind: Map
     fields:
       sessionId: Symbol
@@ -25,6 +30,7 @@ types:
   FileOperation:
     description: A file creation or edit performed by the coding agent — captures what changed and where.
     hidden: true
+    states: [unspanned, spanned]
     kind: Map
     fields:
       sessionId: Symbol
@@ -36,6 +42,7 @@ types:
   ShellExecution:
     description: A shell command executed by the coding agent — build steps, test runs, git ops, etc.
     hidden: true
+    states: [unspanned, spanned]
     kind: Map
     fields:
       sessionId: Symbol
@@ -46,6 +53,7 @@ types:
   AgentQuestion:
     description: A clarifying question asked by the coding agent to the user before proceeding.
     hidden: true
+    states: [unspanned, spanned]
     kind: Map
     fields:
       sessionId: Symbol
@@ -55,6 +63,7 @@ types:
   AgentMessage:
     description: A plain-text reply from the coding agent to the user — status updates, explanations, or end-of-span summaries (flagged via isSummary).
     hidden: true
+    states: [unspanned, spanned]
     kind: Map
     fields:
       sessionId: Symbol

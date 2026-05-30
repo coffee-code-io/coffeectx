@@ -47,6 +47,15 @@ export const SMALL_BATCH = {
 /** Boundary kept iff `score > CUT_THRESHOLD`. */
 export const CUT_THRESHOLD = 0;
 
+/**
+ * A span whose last message is newer than `closeBeforeMs - HARD_BREAK_MS`
+ * is treated as still in-progress and held back from emission. The next
+ * crawl that runs after the hard break elapses with no further activity
+ * closes the span. Anchors the user-facing invariant: a finalised Span
+ * always has at least HARD_BREAK_MS of trailing inactivity.
+ */
+export const HARD_BREAK_MS = 5 * 60_000;
+
 /** Done-keyword regex. Word-boundary; case-insensitive. */
 export const DONE_KEYWORD_RE = /\b(done|implemented|fixed|shipped|merged|resolved)\b/i;
 

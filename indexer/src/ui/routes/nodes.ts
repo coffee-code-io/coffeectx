@@ -210,7 +210,12 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
       try { db = getDb(req.params.p); }
       catch (err) { reply.code(404); return { error: (err as Error).message }; }
 
-      const depth = clampInt(req.query.depth, 10, 0, 30);
+      // depth=5 is enough for the Cards view of every type in the schema —
+      // each named-type level consumes one tick, so 5 hops past the root
+      // surfaces refs as `{ $id: ... }` chips without recursively
+      // expanding huge subtrees (Spans pulled ~30 nested AgentMessages at
+      // depth=10 and stalled the renderer).
+      const depth = clampInt(req.query.depth, 5, 0, 30);
       try {
         const node = db.loadNodeDeep(req.params.id, depth);
         const typeName = db.getNodeTypeName(req.params.id);
@@ -229,12 +234,17 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
         const versions = node.kind === 'map' && node.timelineId
           ? db.listTimelineVersions(node.timelineId)
           : [];
+        // Note: do NOT include `raw: node` here. The resolved Type graph on
+        // a DeepNode contains the named-type schema, which is cyclic for
+        // containers whose `children` list is `List<AnyLspSymbol>` (the Or
+        // includes the container's own type). JSON.stringify would throw
+        // "Converting circular structure to JSON" and return a 500. The UI
+        // only consumes `node` (the formatDeepNode output) anyway.
         return {
           id: req.params.id,
           typeName,
           state,
           node: formatDeepNode(node),
-          raw: node,
           versions,
           debug,
         };

@@ -5,12 +5,17 @@
  *
  *  - Sessions become `AgentSession` nodes.
  *  - Persisted events (user_input / agent_message / file_create / file_edit /
- *    shell_exec / agent_question) become per-type nodes. The terminating
- *    AgentMessage of each span gets `isSummary="true"` set.
- *  - Each span becomes a `Span` node referencing its events. Detection-only
- *    events (`plan_accepted`, `todo_write`) feed segmentation but are not
+ *    shell_exec / agent_question) become per-type nodes carrying a
+ *    `[unspanned, spanned]` state machine. They land as `unspanned` and
+ *    transition to `spanned` once a finalised Span claims them.
+ *  - Each finalised span becomes a `Span` node referencing its events.
+ *    Spans whose trailing event is within HARD_BREAK_MS of `Date.now()`
+ *    are deferred (still in-progress). Detection-only events
+ *    (`plan_accepted`, `todo_write`) feed segmentation but are not
  *    persisted as nodes. `plan_accepted` still flows into the
  *    `plan_acceptances` hidden table so plans can backref to sessions.
+ *  - Span dedup is keyed on `(sessionId, startedAt)` — finalised spans
+ *    don't reshape across crawls, so re-running the indexer is idempotent.
  *
  * Span ↔ LSP linking is handled by `spanLink.ts` (separate scheduler job)
  * once the span row exists.
@@ -84,22 +89,31 @@ export async function indexAgentSessions(
     arr.push(ev);
     eventsBySession.set(ev.sessionId, arr);
   }
+  const closeBeforeMs = Date.now();
   const spansBySession = new Map<string, ComputedSpan[]>();
   for (const [sid, evs] of eventsBySession) {
-    spansBySession.set(sid, computeSpans(evs));
+    spansBySession.set(sid, computeSpans(evs, closeBeforeMs));
   }
   const totalSpans = [...spansBySession.values()].reduce((a, b) => a + b.length, 0);
-  console.log(`[${provider.name}] computed ${totalSpans} span(s)`);
+  console.log(`[${provider.name}] computed ${totalSpans} finalised span(s)`);
 
   // ── Existing-row preload ───────────────────────────────────────────────────
-  const existingUuids = loadExistingUuids(db);
+  // For events we map UUID → node id so spans can reference already-inserted
+  // events via `$id` (cross-crawl case: events landed unspanned in an earlier
+  // crawl, span finalises in a later one).
+  const existingEventIdByUuid = loadExistingEventIds(db);
   const existingSessionIds = loadExistingSessionIds(db);
+  // Dedup spans by `(sessionId, startedAt)`. Finalised spans don't reshape
+  // across crawls so this is sufficient — never re-emit a span whose key is
+  // already in DB.
+  const existingSpanKeys = loadExistingSpanKeys(db);
 
   if (events.length === 0 && scanned.sessions.size === 0) return result;
 
   // ── Build the entry batch ──────────────────────────────────────────────────
-  // 1) AgentSession rows.
   const entries: InsertEntry[] = [];
+
+  // 1) AgentSession rows.
   for (const meta of scanned.sessions.values()) {
     if (existingSessionIds.has(meta.sessionId)) continue;
     entries.push({
@@ -115,14 +129,13 @@ export async function indexAgentSessions(
     existingSessionIds.add(meta.sessionId);
   }
 
-  // 2) Event rows. Track per-event entry index so we can resolve $ids on Span
-  //    construction. Use uuid as the cross-reference key.
-  const eventIndexByUuid = new Map<string, number>();
+  // 2) Event rows. Track per-uuid batch index so spans built in step 3 can
+  //    cross-reference newly-inserted events via `$ref`.
+  const newEventBatchIndexByUuid = new Map<string, number>();
   const planAcceptances: Array<{ planSlug: string; sessionId: string; timestamp: string }> = [];
 
-  // Build a map of "which UUIDs need isSummary=true". Computed across all
-  // spans before emission so the corresponding UserInput/etc. entries don't
-  // pick up the flag — only AgentMessage rows do.
+  // UUIDs of events that any finalised span claims — only these AgentMessage
+  // entries get isSummary, only these events get a state on insert.
   const summaryUuids = new Set<string>();
   for (const spans of spansBySession.values()) {
     for (const span of spans) {
@@ -131,8 +144,6 @@ export async function indexAgentSessions(
     }
   }
 
-  // Stream events in their session-ordered position so AgentMessage rows
-  // land in the same order they appear in the log.
   for (const [, sessionEvents] of eventsBySession) {
     for (const event of sessionEvents) {
       if (event.kind === 'plan_accepted') {
@@ -146,31 +157,46 @@ export async function indexAgentSessions(
         continue;
       }
       if (event.kind === 'todo_write') continue;
-      if (existingUuids.has(event.uuid)) continue;
+      if (existingEventIdByUuid.has(event.uuid)) continue;
       const entry = eventToInsertEntry(event, summaryUuids.has(event.uuid));
       if (entry) {
-        eventIndexByUuid.set(event.uuid, entries.length);
+        newEventBatchIndexByUuid.set(event.uuid, entries.length);
         entries.push(entry);
-        existingUuids.add(event.uuid);
       }
     }
   }
 
-  // 3) Span rows. Reference the event rows by $ref in this same batch.
+  // 3) Span rows. Skip ones whose `(sessionId, startedAt)` key is already in DB.
+  //    For each message, prefer the batch `$ref` (newly inserted in this run)
+  //    falling back to the existing node's `$id` (inserted in a previous run).
+  const spansBatchIndices: number[] = []; // entry indices that are Span entries
   for (const spans of spansBySession.values()) {
     for (const span of spans) {
+      const sid = span.events[0]!.sessionId;
+      const spanKey = `${sid}|${span.startedAtMs}`;
+      if (existingSpanKeys.has(spanKey)) continue;
+
       const messageRefs: Array<{ $ref: number } | { $id: string }> = [];
       for (const ev of span.events) {
-        const idx = eventIndexByUuid.get(ev.uuid);
-        if (idx !== undefined) messageRefs.push({ $ref: idx });
+        const newIdx = newEventBatchIndexByUuid.get(ev.uuid);
+        if (newIdx !== undefined) {
+          messageRefs.push({ $ref: newIdx });
+          continue;
+        }
+        const existingId = existingEventIdByUuid.get(ev.uuid);
+        if (existingId) messageRefs.push({ $id: existingId });
       }
       if (messageRefs.length === 0) continue;
+
       const summaryRef = (() => {
         const ev = span.events[span.summaryIndex];
         if (!ev || ev.kind !== 'agent_message') return undefined;
-        const idx = eventIndexByUuid.get(ev.uuid);
-        return idx !== undefined ? { $ref: idx } : undefined;
+        const newIdx = newEventBatchIndexByUuid.get(ev.uuid);
+        if (newIdx !== undefined) return { $ref: newIdx };
+        const existingId = existingEventIdByUuid.get(ev.uuid);
+        return existingId ? { $id: existingId } : undefined;
       })();
+
       const filesChanged = new Set<string>();
       for (const ev of span.events) {
         if (ev.kind === 'file_create' || ev.kind === 'file_edit') {
@@ -178,7 +204,7 @@ export async function indexAgentSessions(
         }
       }
       const data: Record<string, unknown> = {
-        sessionId: span.events[0]!.sessionId,
+        sessionId: sid,
         kind: span.kind,
         startedAt: String(span.startedAtMs),
         endedAt: String(span.endedAtMs),
@@ -187,7 +213,9 @@ export async function indexAgentSessions(
         touchedSymbols: [],
       };
       if (summaryRef) data.summary = summaryRef;
+      spansBatchIndices.push(entries.length);
       entries.push({ type: 'Span', data, createdAt: span.startedAtMs });
+      existingSpanKeys.add(spanKey);
     }
   }
 
@@ -196,14 +224,11 @@ export async function indexAgentSessions(
     return result;
   }
 
-  // ── Insert in batches ──────────────────────────────────────────────────────
-  // Spans cross-reference their events via $ref, so we can't split spans into
-  // a separate batch — keep the whole payload together. Batches stay small by
-  // chunking sessions, but here we insert in one go to preserve $ref indices.
+  // ── Insert in one batch (preserves $ref ordering) ─────────────────────────
   const insertResult = await db.insertEntries(entries);
   result.inserted = insertResult.ids.filter(id => id !== null).length;
-  result.spans = entries.filter(e => e.type === 'Span').length;
-  result.events = eventIndexByUuid.size;
+  result.spans = spansBatchIndices.length;
+  result.events = newEventBatchIndexByUuid.size;
   for (const err of insertResult.errors) {
     const msg = `entry ${err.index}${err.path ? `.${err.path}` : ''}: ${err.message}`;
     console.error(`[${provider.name}] ${msg}`);
@@ -211,6 +236,38 @@ export async function indexAgentSessions(
 
   // Print a tiny progress line for parity with the previous output.
   new Progress(`${provider.name}:insert`, entries.length).done(`${result.inserted} inserted`);
+
+  // ── State bumps: every event referenced by a freshly-emitted Span flips
+  //     `unspanned → spanned`. setNodeState is idempotent (no-op when
+  //     already at target) so re-running over a stable session is cheap.
+  //     We resolve event uuids → node ids via the combined map of
+  //     newly-inserted (from insertResult) plus pre-existing event ids.
+  const spannedNodeIds = new Set<string>();
+  for (const spanIdx of spansBatchIndices) {
+    if (insertResult.ids[spanIdx] == null) continue;
+    const data = (entries[spanIdx]!.data as Record<string, unknown>);
+    const refs = data.messages as Array<{ $ref?: number; $id?: string }>;
+    for (const ref of refs) {
+      let nodeId: string | undefined;
+      if (typeof ref.$ref === 'number') nodeId = insertResult.ids[ref.$ref] ?? undefined;
+      else if (typeof ref.$id === 'string') nodeId = ref.$id;
+      if (nodeId) spannedNodeIds.add(nodeId);
+    }
+  }
+  for (const nodeId of spannedNodeIds) {
+    try { db.setNodeState(nodeId, 'spanned'); } catch { /* node missing / no machine */ }
+  }
+
+  // ── Catch-up pass: re-segment unspanned tails already in DB ───────────────
+  //   The provider scans JSONL files via mtime/hash; when no new bytes are
+  //   appended (idle conversation) it returns nothing, so the main flow
+  //   above does no work — but a trailing tail may have aged past
+  //   HARD_BREAK_MS and is now ready to finalise. This pass operates
+  //   purely on `state='unspanned'` rows in DB, so it always runs.
+  const catchUpResult = await catchUpUnspannedTails(db, closeBeforeMs, existingSpanKeys, provider.name);
+  result.spans += catchUpResult.spans;
+  // `events` counter is incremented as we transition events to `spanned`;
+  // the row count change is reflected in `catchUpResult.eventsBumped`.
 
   if (planAcceptances.length > 0) {
     for (const pa of planAcceptances) {
@@ -224,6 +281,7 @@ export async function indexAgentSessions(
 
 function eventToInsertEntry(event: ClassifiedEvent, isSummary: boolean): InsertEntry | null {
   const createdAt = parseMs(event.timestamp);
+  const state = 'unspanned';
   switch (event.kind) {
     case 'user_input':
       return {
@@ -233,7 +291,7 @@ function eventToInsertEntry(event: ClassifiedEvent, isSummary: boolean): InsertE
           uuid: event.uuid,
           text: event.text ?? '',
         },
-        createdAt,
+        createdAt, state,
       };
 
     case 'file_create':
@@ -247,7 +305,7 @@ function eventToInsertEntry(event: ClassifiedEvent, isSummary: boolean): InsertE
           path: event.path ?? '',
           content: event.content ?? '',
         },
-        createdAt,
+        createdAt, state,
       };
 
     case 'shell_exec':
@@ -259,7 +317,7 @@ function eventToInsertEntry(event: ClassifiedEvent, isSummary: boolean): InsertE
           command: event.command ?? '',
           description: event.description ?? '',
         },
-        createdAt,
+        createdAt, state,
       };
 
     case 'agent_question':
@@ -270,7 +328,7 @@ function eventToInsertEntry(event: ClassifiedEvent, isSummary: boolean): InsertE
           uuid: event.uuid,
           question: event.question ?? '',
         },
-        createdAt,
+        createdAt, state,
       };
 
     case 'agent_message': {
@@ -280,7 +338,7 @@ function eventToInsertEntry(event: ClassifiedEvent, isSummary: boolean): InsertE
         text: event.text ?? '',
       };
       if (isSummary) data.isSummary = 'true';
-      return { type: 'AgentMessage', data, createdAt };
+      return { type: 'AgentMessage', data, createdAt, state };
     }
 
     default:
@@ -290,15 +348,16 @@ function eventToInsertEntry(event: ClassifiedEvent, isSummary: boolean): InsertE
 
 const EVENT_TYPES = ['UserInput', 'FileOperation', 'ShellExecution', 'AgentQuestion', 'AgentMessage'];
 
-function loadExistingUuids(db: Db): Set<string> {
-  const uuids = new Set<string>();
+/** uuid → node id for every persisted event currently in DB. */
+function loadExistingEventIds(db: Db): Map<string, string> {
+  const out = new Map<string, string>();
   for (const id of db.queryByNamedType(EVENT_TYPES)) {
     const fieldId = db.getMapFieldId(id, 'uuid');
     if (!fieldId) continue;
     const node = db.loadNode(fieldId);
-    if (node.kind === 'atom' && node.atom.kind === 'symbol') uuids.add(node.atom.value);
+    if (node.kind === 'atom' && node.atom.kind === 'symbol') out.set(node.atom.value, id);
   }
-  return uuids;
+  return out;
 }
 
 function loadExistingSessionIds(db: Db): Set<string> {
@@ -310,4 +369,131 @@ function loadExistingSessionIds(db: Db): Set<string> {
     if (node.kind === 'atom' && node.atom.kind === 'symbol') ids.add(node.atom.value);
   }
   return ids;
+}
+
+/**
+ * Re-segment any `unspanned` events still in DB and emit Spans for the
+ * batches that have aged past `HARD_BREAK_MS`. Operates independently of
+ * the JSONL provider — runs even when the file hasn't changed since the
+ * last crawl.
+ *
+ * Returns metrics for the run-log line. `existingSpanKeys` is mutated as
+ * we emit so the same span isn't queued twice in the same crawl.
+ */
+async function catchUpUnspannedTails(
+  db: Db,
+  closeBeforeMs: number,
+  existingSpanKeys: Set<string>,
+  providerName: string,
+): Promise<{ spans: number; eventsBumped: number }> {
+  const result = { spans: 0, eventsBumped: 0 };
+  const raw = db.findUnspannedEvents();
+  if (raw.length === 0) return result;
+
+  // Group rows by session and project to ClassifiedEvent shape so we can
+  // reuse computeSpans without re-classifying. Lost signals (postToolResult,
+  // todo_write, plan_accepted) aren't reconstructable from DB rows, but
+  // for trailing tails the primary cuts (UserInput, gaps, done-keywords)
+  // still trigger correctly.
+  const idByUuid = new Map<string, string>();
+  const eventsBySession = new Map<string, ClassifiedEvent[]>();
+  for (const r of raw) {
+    idByUuid.set(r.uuid, r.id);
+    const evt: ClassifiedEvent = {
+      kind: r.kind,
+      sessionId: r.sessionId,
+      uuid: r.uuid,
+      timestamp: new Date(r.createdAt).toISOString(),
+      ...(r.text ? { text: r.text } : {}),
+      ...(r.path ? { path: r.path } : {}),
+      ...(r.content ? { content: r.content } : {}),
+      ...(r.command ? { command: r.command } : {}),
+      ...(r.description ? { description: r.description } : {}),
+      ...(r.question ? { question: r.question } : {}),
+    };
+    const arr = eventsBySession.get(r.sessionId) ?? [];
+    arr.push(evt);
+    eventsBySession.set(r.sessionId, arr);
+  }
+
+  const entries: InsertEntry[] = [];
+  const spanBatchIndices: number[] = [];
+  for (const [sid, evs] of eventsBySession) {
+    const spans = computeSpans(evs, closeBeforeMs);
+    for (const span of spans) {
+      const spanKey = `${sid}|${span.startedAtMs}`;
+      if (existingSpanKeys.has(spanKey)) continue;
+      const messageRefs: Array<{ $id: string }> = [];
+      for (const ev of span.events) {
+        const nodeId = idByUuid.get(ev.uuid);
+        if (nodeId) messageRefs.push({ $id: nodeId });
+      }
+      if (messageRefs.length === 0) continue;
+      const summary = (() => {
+        const ev = span.events[span.summaryIndex];
+        if (!ev || ev.kind !== 'agent_message') return undefined;
+        const nodeId = idByUuid.get(ev.uuid);
+        return nodeId ? { $id: nodeId } : undefined;
+      })();
+      const filesChanged = new Set<string>();
+      for (const ev of span.events) {
+        if (ev.kind === 'file_create' || ev.kind === 'file_edit') {
+          if (ev.path) filesChanged.add(ev.path);
+        }
+      }
+      const data: Record<string, unknown> = {
+        sessionId: sid,
+        kind: span.kind,
+        startedAt: String(span.startedAtMs),
+        endedAt: String(span.endedAtMs),
+        messages: messageRefs,
+        filesChanged: [...filesChanged],
+        touchedSymbols: [],
+      };
+      if (summary) data.summary = summary;
+      spanBatchIndices.push(entries.length);
+      entries.push({ type: 'Span', data, createdAt: span.startedAtMs });
+      existingSpanKeys.add(spanKey);
+    }
+  }
+
+  if (entries.length === 0) return result;
+
+  const ir = await db.insertEntries(entries);
+  for (const err of ir.errors) {
+    console.error(`[${providerName}] catch-up: entry ${err.index}${err.path ? `.${err.path}` : ''}: ${err.message}`);
+  }
+  result.spans = spanBatchIndices.filter(i => ir.ids[i] != null).length;
+
+  // Transition every event that just got claimed by a Span.
+  for (const i of spanBatchIndices) {
+    if (ir.ids[i] == null) continue;
+    const data = entries[i]!.data as Record<string, unknown>;
+    const refs = data.messages as Array<{ $id: string }>;
+    for (const ref of refs) {
+      try { db.setNodeState(ref.$id, 'spanned'); result.eventsBumped++; }
+      catch { /* node missing / no machine */ }
+    }
+  }
+
+  if (result.spans > 0) {
+    console.log(`[${providerName}] catch-up: emitted ${result.spans} span(s), bumped ${result.eventsBumped} event(s) to spanned`);
+  }
+  return result;
+}
+
+/** "<sessionId>|<startedAtMs>" for every Span node currently in DB. */
+function loadExistingSpanKeys(db: Db): Set<string> {
+  const out = new Set<string>();
+  for (const mapId of db.queryByNamedType(['Span'])) {
+    const sidFieldId = db.getMapFieldId(mapId, 'sessionId');
+    const startedFieldId = db.getMapFieldId(mapId, 'startedAt');
+    if (!sidFieldId || !startedFieldId) continue;
+    const sidNode = db.loadNode(sidFieldId);
+    const startedNode = db.loadNode(startedFieldId);
+    if (sidNode.kind !== 'atom' || sidNode.atom.kind !== 'symbol') continue;
+    if (startedNode.kind !== 'atom' || startedNode.atom.kind !== 'symbol') continue;
+    out.add(`${sidNode.atom.value}|${startedNode.atom.value}`);
+  }
+  return out;
 }
