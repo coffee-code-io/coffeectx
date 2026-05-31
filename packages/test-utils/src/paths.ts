@@ -3,8 +3,9 @@
  * `~/.coffeecode/` (or `COFFEECODE_DIR` re-export from core).
  */
 
+import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { COFFEECODE_DIR, DB_DIR } from '@coffeectx/core';
 
 /** Where backups live. Sibling of `db/` and `snapshots/`. */
@@ -21,6 +22,22 @@ export const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
 export function projectDbPath(project: string): string {
   return join(DB_DIR, `${project}.db`);
+}
+
+/**
+ * Sibling files of a SQLite DB path that need to travel together. In WAL
+ * mode SQLite keeps `<db>-wal` and `<db>-shm` alongside the main file;
+ * leaving them behind during backup/restore/reset causes silent rollback
+ * to a stale state once SQLite re-opens the trio. Returns absolute paths
+ * for every `<basename>*` file that currently exists in the same dir.
+ */
+export function dbAndSiblings(dbPath: string): string[] {
+  const dir = dirname(dbPath);
+  const base = basename(dbPath);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter(name => name === base || name.startsWith(base))
+    .map(name => join(dir, name));
 }
 
 export function projectSnapshotDir(project: string): string {

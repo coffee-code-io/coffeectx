@@ -28,16 +28,21 @@ export interface SpanLinkResult {
   errors: Array<{ spanId: string; error: string }>;
 }
 
-export async function linkSpans(db: Db): Promise<SpanLinkResult> {
+export async function linkSpans(db: Db, opts: { repoPath?: string } = {}): Promise<SpanLinkResult> {
   const result: SpanLinkResult = { scanned: 0, linked: 0, symbols: 0, errors: [] };
 
   // 1. Index every LSP symbol by file_path, keeping its createdAt + timeline.
   //    For each timeline we'll later pick "latest version ≤ endedAt".
   const byFile = buildLspIndexByFile(db);
 
-  // 2. Walk every Span in `extracted` state.
+  // 2. Walk every Span. `extracted` spans always get linked + bumped to
+  //    `linked`. Already-`linked` spans get re-linked only when their
+  //    current `touchedSymbols` is empty — this is the recovery path for
+  //    historical spans that were "linked" with [] back when filesChanged
+  //    used absolute paths and never matched LSP file_path.
   for (const spanId of db.queryByNamedType(['Span'])) {
-    if (db.getNodeState(spanId) !== 'extracted') continue;
+    const state = db.getNodeState(spanId);
+    if (state !== 'extracted' && state !== 'linked') continue;
     result.scanned += 1;
     try {
       const node = db.loadNodeDeep(spanId, 2);
@@ -45,9 +50,19 @@ export async function linkSpans(db: Db): Promise<SpanLinkResult> {
       const endedAt = parseNumeric(atomText(node.entries['endedAt']));
       if (endedAt == null) continue;
       const filesChanged = collectListAtoms(node.entries['filesChanged']);
+      const existingCount = countListItems(node.entries['touchedSymbols']);
+
+      // Skip cheap if a previous pass already produced a non-empty link
+      // (we don't re-shuffle once symbols are attached).
+      if (state === 'linked' && existingCount > 0) continue;
 
       const symbolIds = new Set<string>();
-      for (const relPath of filesChanged) {
+      for (const rawPath of filesChanged) {
+        // Historical spans stored absolute paths in `filesChanged` before
+        // the indexer started relativizing them. Strip the repo prefix at
+        // lookup time so the existing rows still match LSP file_path
+        // (always repo-relative). New spans arrive already relativized.
+        const relPath = relativizeForLookup(rawPath, opts.repoPath);
         const symbols = byFile.get(relPath);
         if (!symbols) continue;
         // Group by timeline; pick the largest createdAt ≤ endedAt. The
@@ -72,15 +87,25 @@ export async function linkSpans(db: Db): Promise<SpanLinkResult> {
         }
       }
 
-      const refs = [...symbolIds].map(id => ({ $id: id }));
-      await db.insertEntries([{
-        id: spanId,
-        type: 'Span',
-        data: { touchedSymbols: refs },
-      }]);
-      db.setNodeState(spanId, 'linked');
+      // Don't bother touching DB if nothing would change. For `extracted`
+      // spans we still want the state bump so future passes skip them.
+      if (symbolIds.size === 0 && state === 'linked') continue;
+
+      // The Span node always has a `touchedSymbols` list (created at insert
+      // time as `[]`). We append into that list directly — `insertEntries`'
+      // plain-patch path is purely additive on missing keys, so it can't be
+      // used to populate a field that's already initialized to an empty list.
+      const listId = db.getMapFieldId(spanId, 'touchedSymbols');
+      if (!listId) {
+        result.errors.push({ spanId, error: 'touchedSymbols field missing' });
+        continue;
+      }
+      const added = symbolIds.size > 0
+        ? db.appendListItemsUnique(listId, [...symbolIds])
+        : 0;
+      if (state === 'extracted') db.setNodeState(spanId, 'linked');
       result.linked += 1;
-      result.symbols += refs.length;
+      result.symbols += added;
     } catch (err) {
       result.errors.push({ spanId, error: (err as Error).message });
     }
@@ -159,8 +184,21 @@ function collectListAtoms(n: DeepNode | undefined): string[] {
   return out;
 }
 
+function countListItems(n: DeepNode | undefined): number {
+  if (!n || n.kind !== 'list') return 0;
+  return n.items.length;
+}
+
 function parseNumeric(s: string | null): number | null {
   if (s == null) return null;
   const v = Number(s);
   return Number.isFinite(v) ? v : null;
+}
+
+function relativizeForLookup(p: string, repoPath: string | undefined): string {
+  if (!repoPath || !p) return p;
+  const root = repoPath.endsWith('/') ? repoPath.slice(0, -1) : repoPath;
+  if (p === root) return '';
+  if (p.startsWith(root + '/')) return p.slice(root.length + 1);
+  return p;
 }

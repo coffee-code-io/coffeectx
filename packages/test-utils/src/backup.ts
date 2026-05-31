@@ -17,13 +17,13 @@ import {
   cpSync, existsSync, mkdirSync, readFileSync, readdirSync,
   statSync, writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { loadConfig } from '@coffeectx/core';
 import {
   BACKUPS_DIR, FILE_HASHES_PATH,
   backupClaudeLogsDir, backupDbPath, backupDir, backupHashesPath,
   backupManifestPath, backupSnapshotsDir,
-  claudeLogsDirFor, projectDbPath, projectSnapshotDir,
+  claudeLogsDirFor, dbAndSiblings, projectDbPath, projectSnapshotDir,
 } from './paths.js';
 import { writeManifest, type BackupManifest } from './manifest.js';
 
@@ -68,12 +68,19 @@ export function backup(opts: BackupOptions): BackupResult {
   }
 
   // ── DB ────────────────────────────────────────────────────────────────────
+  // Copy the main `.db` plus any `-wal` / `-shm` siblings SQLite is
+  // currently using. Skipping them would let a restore silently roll back
+  // to an older committed state once SQLite re-opens the trio.
   const liveDb = projectDbPath(opts.project);
   const dbBackup = backupDbPath(name, opts.project);
+  const backupDbDir = dirname(dbBackup);
+  const backupDbBase = basename(dbBackup);
   let dbBytes = 0;
-  if (existsSync(liveDb)) {
-    cpSync(liveDb, dbBackup);
-    dbBytes = statSync(dbBackup).size;
+  for (const liveFile of dbAndSiblings(liveDb)) {
+    const suffix = basename(liveFile).slice(basename(liveDb).length); // '', '-wal', '-shm'
+    const dest = join(backupDbDir, backupDbBase + suffix);
+    cpSync(liveFile, dest);
+    if (suffix === '') dbBytes = statSync(dest).size;
   }
 
   // ── File hashes (filtered to project) ─────────────────────────────────────

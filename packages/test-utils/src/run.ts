@@ -101,7 +101,7 @@ export async function runFullChain(opts: RunOptions): Promise<RunResult> {
     }
 
     // 3. Span ↔ LSP linker
-    const linkRes = await linkSpans(db);
+    const linkRes = await linkSpans(db, { repoPath });
     result.link = {
       scanned: linkRes.scanned,
       linked: linkRes.linked,

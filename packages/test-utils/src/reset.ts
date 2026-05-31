@@ -11,10 +11,15 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { loadConfig } from '@coffeectx/core';
 import { purgeSnapshots } from '@coffeectx/indexer/dist/lsp/snapshotSupervisor.js';
-import { FILE_HASHES_PATH, claudeLogsDirFor, projectDbPath } from './paths.js';
+import { FILE_HASHES_PATH, claudeLogsDirFor, dbAndSiblings, projectDbPath } from './paths.js';
 
 export function resetDb(project: string): void {
-  rmSync(projectDbPath(project), { force: true });
+  // SQLite in WAL mode keeps `-wal` and `-shm` siblings; removing only the
+  // main `.db` would leave them behind for the next `new Db()` to ingest
+  // and silently roll the schema back to a stale state.
+  for (const path of dbAndSiblings(projectDbPath(project))) {
+    rmSync(path, { force: true });
+  }
 }
 
 export function resetHashes(project: string): void {

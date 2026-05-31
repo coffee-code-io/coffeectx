@@ -13,13 +13,13 @@
 import {
   cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { loadConfig } from '@coffeectx/core';
 import {
   FILE_HASHES_PATH,
   backupClaudeLogsDir, backupDbPath, backupHashesPath,
   backupManifestPath, backupSnapshotsDir,
-  claudeLogsDirFor, projectDbPath, projectSnapshotDir,
+  claudeLogsDirFor, dbAndSiblings, projectDbPath, projectSnapshotDir,
 } from './paths.js';
 import { readManifest, type BackupManifest } from './manifest.js';
 import { resetDb, resetHashes, resetSnapshots } from './reset.js';
@@ -56,11 +56,21 @@ export function restore(opts: RestoreOptions): BackupManifest {
   }
 
   // ── Restore DB ───────────────────────────────────────────────────────────
+  // resetDb above already removed live `-wal` / `-shm` siblings. Now copy
+  // back every `<project>.db*` file present in the backup so SQLite sees a
+  // consistent trio. We can't just copy the main file: if a `-wal` from a
+  // prior run is still there (resetDb missed it), SQLite would replay it
+  // and corrupt the restored state.
   const dbBackup = backupDbPath(opts.name, opts.project);
   const dbLive = projectDbPath(opts.project);
   if (existsSync(dbBackup)) {
     mkdirSync(dirname(dbLive), { recursive: true });
-    cpSync(dbBackup, dbLive);
+    const liveDir = dirname(dbLive);
+    const liveBase = basename(dbLive);
+    for (const backupFile of dbAndSiblings(dbBackup)) {
+      const suffix = basename(backupFile).slice(basename(dbBackup).length);
+      cpSync(backupFile, join(liveDir, liveBase + suffix));
+    }
   }
 
   // ── Merge backup hashes into live file-hashes.json ───────────────────────

@@ -33,8 +33,23 @@ function parseMs(iso: string | undefined): number {
   return Number.isNaN(ms) ? Date.now() : ms;
 }
 
+/** Normalize an agent-supplied file path to repo-relative when it sits under
+ * repoPath. Claude tool inputs usually give absolute paths; LSP `file_path`
+ * is always repo-relative, so Span.filesChanged must match that shape for
+ * spanLink to find anything. Paths outside the repo (config, plans) and
+ * already-relative paths pass through unchanged. */
+function relativizePath(p: string, repoPath: string | undefined): string {
+  if (!repoPath || !p) return p;
+  const root = repoPath.endsWith('/') ? repoPath.slice(0, -1) : repoPath;
+  if (p === root) return '';
+  if (p.startsWith(root + '/')) return p.slice(root.length + 1);
+  return p;
+}
+
 export interface IndexLogsOptions extends ProviderScanOptions {
-  /** Reserved for future LSP-linking convenience. Currently unused. */
+  /** Repo root used to relativize agent-supplied file paths so Span.filesChanged
+   * matches LSP `file_path` (which is always repo-relative). Paths outside the
+   * repo pass through unchanged. */
   repoPath?: string;
   /**
    * Wall-clock anchor for the hard-break gate inside `computeSpans`.
@@ -208,7 +223,7 @@ export async function indexAgentSessions(
       const filesChanged = new Set<string>();
       for (const ev of span.events) {
         if (ev.kind === 'file_create' || ev.kind === 'file_edit') {
-          if (ev.path) filesChanged.add(ev.path);
+          if (ev.path) filesChanged.add(relativizePath(ev.path, options.repoPath));
         }
       }
       const data: Record<string, unknown> = {
@@ -285,7 +300,7 @@ export async function indexAgentSessions(
   //   above does no work — but a trailing tail may have aged past
   //   HARD_BREAK_MS and is now ready to finalise. This pass operates
   //   purely on `state='unspanned'` rows in DB, so it always runs.
-  const catchUpResult = await catchUpUnspannedTails(db, closeBeforeMs, existingSpanKeys, provider.name);
+  const catchUpResult = await catchUpUnspannedTails(db, closeBeforeMs, existingSpanKeys, provider.name, options.repoPath);
   result.spans += catchUpResult.spans;
   // `events` counter is incremented as we transition events to `spanned`;
   // the row count change is reflected in `catchUpResult.eventsBumped`.
@@ -406,6 +421,7 @@ async function catchUpUnspannedTails(
   closeBeforeMs: number,
   existingSpanKeys: Set<string>,
   providerName: string,
+  repoPath: string | undefined,
 ): Promise<{ spans: number; eventsBumped: number }> {
   const result = { spans: 0, eventsBumped: 0 };
   const raw = db.findUnspannedEvents();
@@ -460,7 +476,7 @@ async function catchUpUnspannedTails(
       const filesChanged = new Set<string>();
       for (const ev of span.events) {
         if (ev.kind === 'file_create' || ev.kind === 'file_edit') {
-          if (ev.path) filesChanged.add(ev.path);
+          if (ev.path) filesChanged.add(relativizePath(ev.path, repoPath));
         }
       }
       const data: Record<string, unknown> = {

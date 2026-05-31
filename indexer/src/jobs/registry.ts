@@ -370,7 +370,7 @@ function buildSpanLinkJob(): Job {
       { kind: 'timer', intervalMs: DEFAULT_SKILL_FALLBACK_INTERVAL_MS },
     ],
     async run(ctx) {
-      const r = await linkSpans(ctx.db);
+      const r = await linkSpans(ctx.db, { repoPath: ctx.project.repoPath ?? undefined });
       if (r.errors.length > 0) {
         const first = r.errors[0]!;
         throw new Error(`${r.errors.length} span error(s); first: ${first.spanId}: ${first.error}`);
