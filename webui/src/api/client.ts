@@ -43,9 +43,9 @@ export type RefsBatchResponse = Record<string, RefsResponse>;
  * Mirror of `NodeDebugInfo` in indexer/src/ui/debugInfo.ts.
  */
 export type NodeDebugInfo = {
-  kind: 'plan';
-  acceptances: { sessionId: string; timestamp: string }[];
-  filePaths: string[];
+  /** Per-node JSON written via `db.debugSet(nodeId, field, value)`.
+   *  Indexed by field name; values are the original JSON-parsed shapes. */
+  debug: Record<string, unknown>;
 };
 
 /** One row of `db.listTimelineVersions(timelineId)` — every version of a

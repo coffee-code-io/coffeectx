@@ -4,43 +4,20 @@
  * pass `undefined` through to the response so the client side stays
  * easy: render iff `data.debug !== undefined`.
  *
- * One branch today: `Plan` nodes get a `plan_acceptances` summary plus
- * the unioned `FileOperation.path` set the accepting sessions touched.
+ * Today this is one branch: the per-node JSON blob stashed via
+ * `db.debugSet(nodeId, field, value)`. Pipeline stages opt-in to
+ * instrumentation by sprinkling those calls; this collector reads them
+ * back. No type-specific aux any more — Plan-flavoured aux was
+ * superseded by Spans + `touchedSymbols`.
  */
 
-import type { Db, DeepNode } from '@coffeectx/core';
+import type { Db } from '@coffeectx/core';
 
 /** Shape mirrored on the client (webui/src/api/client.ts). */
-export type NodeDebugInfo = {
-  kind: 'plan';
-  acceptances: { sessionId: string; timestamp: string }[];
-  filePaths: string[];
-};
+export type NodeDebugInfo = { debug: Record<string, unknown> };
 
-export function collectDebugInfo(
-  db: Db,
-  _id: string,
-  typeName: string | null,
-  node: DeepNode,
-): NodeDebugInfo | undefined {
-  if (!typeName) return undefined;
-
-  if (typeName === 'Plan') {
-    const slug = readPlanSlug(node);
-    if (!slug) return undefined;
-    const acceptances = db.getAcceptingSessions(slug);
-    const filePaths = db.getPlanFilePaths(slug);
-    return { kind: 'plan', acceptances, filePaths };
-  }
-
-  return undefined;
-}
-
-/** Pull the `name` Symbol off a deep-loaded Plan node, if present. */
-function readPlanSlug(node: DeepNode): string | null {
-  if (node.kind !== 'map') return null;
-  const nameField = node.entries['name'];
-  if (!nameField || nameField.kind !== 'atom') return null;
-  if (nameField.atom.kind !== 'symbol') return null;
-  return nameField.atom.value;
+export function collectDebugInfo(db: Db, id: string): NodeDebugInfo | undefined {
+  const debug = db.getNodeDebug(id);
+  if (!debug || Object.keys(debug).length === 0) return undefined;
+  return { debug };
 }

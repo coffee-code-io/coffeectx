@@ -259,61 +259,18 @@ function NotANodeBanner({ id, message }: { id: string; message: string }) {
 }
 
 /**
- * Aux-table panel rendered on NodeDetail when the global `debug` flag is
- * on AND the server attached a payload. Only Plan nodes carry one today.
- * Dashed amber tint marks it as out-of-band diagnostic info.
+ * Per-node debug instrumentation panel — appears only when the server's
+ * `config.debug` flag is on AND the node has rows in `node_debug_info`.
+ * Renders the `{field: value, ...}` blob written via `db.debugSet` via
+ * the same syntax-highlighted JsonView the main JSON tab uses.
  */
 function DebugSection({ info }: { info: NodeDebugInfo }) {
   return (
-    <div className="border border-dashed border-status-warning/60 bg-status-warning/5 rounded-lg p-4 space-y-3">
-      <div className="text-[10px] uppercase tracking-widest text-status-warning">Debug · aux tables</div>
-      {info.kind === 'plan' && (
-        <PlanDebugBody acceptances={info.acceptances} filePaths={info.filePaths} />
-      )}
-    </div>
-  );
-}
-
-function PlanDebugBody({
-  acceptances,
-  filePaths,
-}: {
-  acceptances: { sessionId: string; timestamp: string }[];
-  filePaths: string[];
-}) {
-  return (
-    <div className="space-y-3">
-      <div className="space-y-1.5">
-        <div className="text-[11px] text-roast-medium">
-          Accepting sessions ({acceptances.length}) — from <code className="font-mono">plan_acceptances</code>:
-        </div>
-        {acceptances.length === 0 ? (
-          <div className="text-[11px] italic text-roast-light">(none — no session ran ExitPlanMode against this plan)</div>
-        ) : (
-          <ul className="space-y-0.5">
-            {acceptances.map(a => (
-              <li key={a.sessionId} className="font-mono text-[11px] text-roast-dark break-all flex gap-2">
-                <span>{a.sessionId}</span>
-                <span className="text-roast-light">@ {a.timestamp}</span>
-              </li>
-            ))}
-          </ul>
-        )}
+    <div className="border border-dashed border-status-warning/60 bg-status-warning/5 rounded-lg p-4 space-y-2">
+      <div className="text-[10px] uppercase tracking-widest text-status-warning">
+        Debug · <code className="font-mono">node_debug_info</code>
       </div>
-      <div className="space-y-1.5">
-        <div className="text-[11px] text-roast-medium">
-          Touched files ({filePaths.length}) — union of <code className="font-mono">FileOperation.path</code> across accepting sessions:
-        </div>
-        {filePaths.length === 0 ? (
-          <div className="text-[11px] italic text-roast-light">(none)</div>
-        ) : (
-          <ul className="space-y-0.5">
-            {filePaths.map(p => (
-              <li key={p} className="font-mono text-[11px] text-roast-dark break-all">{p}</li>
-            ))}
-          </ul>
-        )}
-      </div>
+      <JsonView value={info.debug} />
     </div>
   );
 }

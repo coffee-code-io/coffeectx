@@ -5,9 +5,13 @@ types:
   #   containerName: Symbol — fully qualified parent (e.g. "UserService"), empty if top-level
   #   detail: Symbol        — type signature or other detail string from the server
   #   file_path: Symbol     — repo-relative path of the source file
-  #   line: Symbol          — 1-based line number, stored as a string for symbol-key uniformity
-  #   column: Symbol        — 1-based column
   #   comment: Meaning?     — optional analyst/agent annotation
+  #
+  # Position (line / column) is intentionally NOT stored. The hash function
+  # in the LSP indexer already excludes position from the bump decision —
+  # moving a function vertically (e.g. adding another function above it)
+  # isn't a structural change — and keeping the field around suggested
+  # otherwise.
   #
   # Container types (Module / Namespace / Class) carry `children` — REAL $id refs
   # to nested LspMethod / LspConstructor / LspFunction / LspClass — filled by a
@@ -24,8 +28,6 @@ types:
       containerName: Symbol
       detail: Symbol
       file_path: Symbol
-      line: Symbol
-      column: Symbol
       children:             # $id refs to nested LSP symbols
         kind: List
         item: AnyLspSymbol
@@ -40,8 +42,6 @@ types:
       containerName: Symbol
       detail: Symbol
       file_path: Symbol
-      line: Symbol
-      column: Symbol
       children:             # $id refs to nested LSP symbols
         kind: List
         item: AnyLspSymbol
@@ -56,8 +56,6 @@ types:
       containerName: Symbol
       detail: Symbol        # e.g. "extends Base implements IFoo"
       file_path: Symbol
-      line: Symbol
-      column: Symbol
       children:             # $id refs to LspMethod / LspConstructor / nested LspClass
         kind: List
         item: AnyLspSymbol
@@ -72,8 +70,6 @@ types:
       containerName: Symbol  # owning class name
       detail: Symbol         # signature, e.g. "(id: string): Promise<User>"
       file_path: Symbol
-      line: Symbol
-      column: Symbol
       source: Symbol         # raw function body sliced from the snapshot file
       comment: Meaning?
 
@@ -86,8 +82,6 @@ types:
       containerName: Symbol
       detail: Symbol         # parameter list
       file_path: Symbol
-      line: Symbol
-      column: Symbol
       source: Symbol         # raw constructor body sliced from the snapshot file
       comment: Meaning?
 
@@ -100,8 +94,6 @@ types:
       containerName: Symbol
       detail: Symbol
       file_path: Symbol
-      line: Symbol
-      column: Symbol
       members:              # enum entry names
         kind: List
         item: Symbol
@@ -116,8 +108,6 @@ types:
       containerName: Symbol
       detail: Symbol
       file_path: Symbol
-      line: Symbol
-      column: Symbol
       members:              # method/property/entry names
         kind: List
         item: Symbol
@@ -132,8 +122,6 @@ types:
       containerName: Symbol
       detail: Symbol         # signature
       file_path: Symbol
-      line: Symbol
-      column: Symbol
       source: Symbol         # raw function body sliced from the snapshot file
       comment: Meaning?
 

@@ -14,6 +14,13 @@ export interface DbOptions {
   embed: EmbedFn;
   /** Embedding dimension. Must match the model's output size. Defaults to 1536. */
   dimensions?: number;
+  /**
+   * When true, `debugSet` writes to the `node_debug_info` table; when
+   * false (the default), `debugSet` is a NOOP. Mirror `config.debug` —
+   * callers read it once at construction. Reads via `getNodeDebug` work
+   * regardless so the UI can surface rows written by an earlier run.
+   */
+  debug?: boolean;
 }
 
 /**
@@ -81,11 +88,13 @@ export class Db implements QueryDb {
   private readonly embed: EmbedFn;
   readonly dims: number;
   private readonly nodeEventListeners = new Set<NodeEventListener>();
+  private debugEnabled: boolean;
 
   constructor(options: DbOptions) {
     this.raw = new Database(options.path);
     this.embed = options.embed;
     this.dims = options.dimensions ?? 1536;
+    this.debugEnabled = options.debug === true;
 
     sqliteVec.load(this.raw);
     this.raw.pragma('journal_mode = WAL');
@@ -98,6 +107,55 @@ export class Db implements QueryDb {
 
     this.raw.exec(SCHEMA_DDL);
     this.raw.exec(makeVecTableDDL(this.dims));
+  }
+
+  /** Runtime toggle for the `debugSet` write path. Callers that want
+   *  to flip the flag without rebuilding the Db (e.g. after a config
+   *  reload) call this. Reads via `getNodeDebug` are always available. */
+  setDebug(enabled: boolean): void {
+    this.debugEnabled = enabled;
+  }
+
+  /**
+   * Stash arbitrary JSON-serialisable `value` under `field` for `nodeId`
+   * in the hidden `node_debug_info` table. NOOP when debug is disabled
+   * so production paths can sprinkle calls with zero overhead.
+   *
+   * Errors (unserialisable value, write failure) are caught and logged
+   * — debug helpers must never break the call site.
+   */
+  debugSet(nodeId: string, field: string, value: unknown): void {
+    if (!this.debugEnabled) return;
+    try {
+      const json = JSON.stringify(value);
+      this.raw
+        .prepare(
+          `INSERT OR REPLACE INTO node_debug_info(node_id, field, value_json)
+           VALUES(?,?,?)`,
+        )
+        .run(nodeId, field, json);
+    } catch (err) {
+      log(`debugSet failed for ${nodeId}.${field}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Read every `(field, value)` pair recorded for `nodeId`. Returns an
+   * object map or `null` when no rows exist. Always available regardless
+   * of `debugEnabled` so the UI can surface historical writes even after
+   * the user toggled debug off.
+   */
+  getNodeDebug(nodeId: string): Record<string, unknown> | null {
+    const rows = this.raw
+      .prepare(`SELECT field, value_json FROM node_debug_info WHERE node_id = ?`)
+      .all(nodeId) as Array<{ field: string; value_json: string }>;
+    if (rows.length === 0) return null;
+    const out: Record<string, unknown> = {};
+    for (const r of rows) {
+      try { out[r.field] = JSON.parse(r.value_json); }
+      catch { out[r.field] = r.value_json; }
+    }
+    return out;
   }
 
   // ── Type upsert ────────────────────────────────────────────────────────────
@@ -2037,28 +2095,6 @@ export class Db implements QueryDb {
       `SELECT session_id, timestamp FROM plan_acceptances WHERE plan_slug = ? ORDER BY timestamp DESC`,
     ).all(planSlug) as Array<{ session_id: string; timestamp: string }>;
     return rows.map(r => ({ sessionId: r.session_id, timestamp: r.timestamp }));
-  }
-
-  /**
-   * Union of `FileOperation.path` values across every session that accepted
-   * the plan. Used by the LSP reverse pass to constrain symbol linking to
-   * the files the accepting sessions actually touched.
-   */
-  getPlanFilePaths(planSlug: string): string[] {
-    const rows = this.raw.prepare(`
-      SELECT DISTINCT path_node.symbol_value AS file_path
-      FROM plan_acceptances pa
-      JOIN map_entries me_sid ON me_sid.key = 'sessionId'
-      JOIN nodes sid_atom    ON sid_atom.id = me_sid.value_id
-                              AND sid_atom.kind = 'symbol'
-                              AND sid_atom.symbol_value = pa.session_id
-      JOIN nodes fileop_node ON fileop_node.id = me_sid.map_id
-      JOIN named_types nt    ON nt.type_id = fileop_node.type_id AND nt.name = 'FileOperation'
-      JOIN map_entries me_path ON me_path.map_id = fileop_node.id AND me_path.key = 'path'
-      JOIN nodes path_node     ON path_node.id = me_path.value_id AND path_node.kind = 'symbol'
-      WHERE pa.plan_slug = ?
-    `).all(planSlug) as Array<{ file_path: string }>;
-    return rows.map(r => r.file_path);
   }
 
   // ── Scheduler heartbeat ────────────────────────────────────────────────────

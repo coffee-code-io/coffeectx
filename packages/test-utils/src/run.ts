@@ -51,7 +51,7 @@ export async function runFullChain(opts: RunOptions): Promise<RunResult> {
   const claudeLogsPath = readClaudeLogsPath(projectEntry) ?? claudeLogsDirFor(repoPath);
   const embedCfg = resolveProjectEmbed(config, opts.project);
   const embedFn = createEmbedFn(embedCfg);
-  const db = new Db({ path: projectDbPath(opts.project), embed: embedFn, dimensions: embedCfg.dimensions });
+  const db = new Db({ path: projectDbPath(opts.project), embed: embedFn, dimensions: embedCfg.dimensions, debug: config.debug });
 
   const result: RunResult = {
     logs: { sessions: 0, events: 0, spans: 0, inserted: 0, errors: 0 },

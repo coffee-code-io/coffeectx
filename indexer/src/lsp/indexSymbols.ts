@@ -615,13 +615,15 @@ async function applyFileRecords(
 }
 
 function buildEntryData(rec: SymbolRecord, relPath: string): Record<string, unknown> {
+  // line + column intentionally omitted: position movement isn't a
+  // structural change. The hash function excludes them too, so a function
+  // shifted vertically (e.g. by a new function inserted above) does not
+  // produce a fresh LSP version.
   const data: Record<string, unknown> = {
     name: rec.name,
     containerName: rec.containerName,
     detail: rec.detail,
     file_path: relPath,
-    line: String(rec.line + 1),
-    column: String(rec.column + 1),
   };
   if (LEAF_TYPES.has(rec.typeName)) {
     data['source'] = rec.source ?? '';

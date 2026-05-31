@@ -162,6 +162,20 @@ CREATE TABLE IF NOT EXISTS plan_acceptances (
 );
 CREATE INDEX IF NOT EXISTS idx_plan_acceptances_session ON plan_acceptances(session_id);
 
+-- Per-node debug instrumentation — hidden from the MCP/UI graph.
+-- Populated only when config.debug === true; db.debugSet is a NOOP
+-- otherwise. One row per (node_id, field) so different pipeline stages
+-- can stash their own JSON blobs against the same node without
+-- read-modify-write contention. The UI debug panel renders the whole
+-- {field: value, ...} map for the open node.
+CREATE TABLE IF NOT EXISTS node_debug_info (
+  node_id    TEXT NOT NULL,
+  field      TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  PRIMARY KEY (node_id, field)
+);
+CREATE INDEX IF NOT EXISTS idx_node_debug_info_node ON node_debug_info(node_id);
+
 -- Materialized edge index between named-type nodes.
 -- Populated by insertEntries; read by findReferencingNamedNodes and
 -- collectOutgoingNamedRefs to power the graph view and detail-page "refs".

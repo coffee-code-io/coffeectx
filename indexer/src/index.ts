@@ -208,7 +208,7 @@ try {
 
 const embedCfg = resolveProjectEmbed(globalCfg, project.name);
 const embedFn = createEmbedFn(embedCfg);
-const db = new Db({ path: project.db, embed: embedFn, dimensions: embedCfg.dimensions });
+const db = new Db({ path: project.db, embed: embedFn, dimensions: embedCfg.dimensions, debug: globalCfg.debug });
 
 switch (command) {
   case 'sync-types': {

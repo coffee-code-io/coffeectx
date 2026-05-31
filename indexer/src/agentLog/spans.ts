@@ -3,7 +3,9 @@
  *
  * Algorithm:
  *   1. Score every candidate boundary as `Σ split − Σ join` using the
- *      heuristic weights in spanHeuristics.ts.
+ *      heuristic weights in spanHeuristics.ts. Each boundary records the
+ *      named signals that fired so debug instrumentation can replay
+ *      exactly why a cut happened (or didn't).
  *   2. Cut at every boundary whose score exceeds `CUT_THRESHOLD`.
  *   3. Merge spans shorter than `SMALL_BATCH.MIN_SPAN_MESSAGES` into the
  *      neighbour with the weaker boundary.
@@ -15,7 +17,9 @@
  *      it carries `isSummary="true"` on its AgentMessage row.
  *
  * The caller (indexLogs.ts) is responsible for actually emitting Span
- * nodes — this module only produces the segmentation.
+ * nodes — this module only produces the segmentation. Each returned
+ * `ComputedSpan` carries the boundary scoring breakdown so callers can
+ * stash it via `db.debugSet` for later inspection.
  */
 
 import type { ClassifiedEvent } from './classifier.js';
@@ -23,6 +27,28 @@ import {
   SPLIT_WEIGHTS, JOIN_WEIGHTS, SMALL_BATCH, CUT_THRESHOLD, HARD_BREAK_MS,
   DONE_KEYWORD_RE, TEST_CMD_RE, IDENT_RE,
 } from './spanHeuristics.js';
+
+export interface BoundarySignal {
+  /** Matches a key from `SPLIT_WEIGHTS` or `JOIN_WEIGHTS`. */
+  name: string;
+  /** Magnitude of the signal's contribution at this boundary. Always
+   *  non-negative; `sign` carries the direction. */
+  weight: number;
+  /** `'+'` for split, `'-'` for join. */
+  sign: '+' | '-';
+}
+
+export interface BoundaryScore {
+  /** Index of the LEFT event in `events`; the boundary lives between
+   *  events[i] and events[i+1]. */
+  i: number;
+  /** Unix-ms timestamp of event i+1 (the anchor). */
+  atMs: number;
+  /** Σ split − Σ join. Same value used by the cut threshold. */
+  total: number;
+  /** Per-signal contributions in firing order. */
+  signals: BoundarySignal[];
+}
 
 export interface ComputedSpan {
   /** Slice of the session's event list, in order. Excludes the
@@ -33,6 +59,17 @@ export interface ComputedSpan {
   endedAtMs: number;
   /** Index of the event in `events` that should be marked isSummary=true. */
   summaryIndex: number;
+  /** Boundaries internal to this span (didn't cut). One entry per
+   *  adjacent-event gap inside the segment. */
+  boundaries: BoundaryScore[];
+  /** Cut that opened this span (between the previous segment's last
+   *  event and this span's first event). Absent for the first span of
+   *  the session. */
+  openingBoundary?: BoundaryScore;
+  /** Cut that closed this span (between this span's last event and the
+   *  next segment's first event). Absent if the span runs to session
+   *  end (then the hard-break gate finalised it, not a cut). */
+  closingBoundary?: BoundaryScore;
 }
 
 /**
@@ -57,7 +94,7 @@ export function computeSpans(
   if (events.length === 0) return [];
 
   // ── Score boundaries ───────────────────────────────────────────────────────
-  const scores: number[] = new Array(events.length - 1).fill(0);
+  const boundaries: BoundaryScore[] = new Array(events.length - 1);
   const identCache: Array<Set<string> | null> = new Array(events.length).fill(null);
   const eventText = (e: ClassifiedEvent): string =>
     e.text ?? e.question ?? e.command ?? e.path ?? '';
@@ -76,25 +113,29 @@ export function computeSpans(
   for (let i = 0; i < events.length - 1; i++) {
     const a = events[i]!;
     const b = events[i + 1]!;
-    let score = 0;
+    const signals: BoundarySignal[] = [];
+    const split = (name: keyof typeof SPLIT_WEIGHTS, weight: number) =>
+      signals.push({ name, weight, sign: '+' });
+    const join = (name: keyof typeof JOIN_WEIGHTS, weight: number) =>
+      signals.push({ name, weight, sign: '-' });
 
     // ── Split signals ────────────────────────────────────────────────────────
-    if (b.kind === 'user_input') score += SPLIT_WEIGHTS.USER_MESSAGE;
-    if (a.kind === 'plan_accepted') score += SPLIT_WEIGHTS.PLAN_ACCEPTED;
+    if (b.kind === 'user_input') split('USER_MESSAGE', SPLIT_WEIGHTS.USER_MESSAGE);
+    if (a.kind === 'plan_accepted') split('PLAN_ACCEPTED', SPLIT_WEIGHTS.PLAN_ACCEPTED);
     if (a.kind === 'agent_message' && a.text && DONE_KEYWORD_RE.test(a.text)) {
-      score += SPLIT_WEIGHTS.DONE_KEYWORD;
+      split('DONE_KEYWORD', SPLIT_WEIGHTS.DONE_KEYWORD);
     }
     if (a.kind === 'shell_exec' && TEST_CMD_RE.test(a.command ?? '') && !(b.kind === 'shell_exec' && TEST_CMD_RE.test(b.command ?? ''))) {
-      score += SPLIT_WEIGHTS.TEST_CMD_TERMINAL;
+      split('TEST_CMD_TERMINAL', SPLIT_WEIGHTS.TEST_CMD_TERMINAL);
     }
     if (a.kind === 'todo_write' && a.todos && a.todos.length > 0) {
       const last = a.todos[a.todos.length - 1]!;
-      if (last.status === 'completed') score += SPLIT_WEIGHTS.TODO_LIST_LAST_ITEM_COMPLETED;
+      if (last.status === 'completed') split('TODO_LIST_LAST_ITEM_COMPLETED', SPLIT_WEIGHTS.TODO_LIST_LAST_ITEM_COMPLETED);
     }
     const gapMs = parseMs(b.timestamp) - parseMs(a.timestamp);
     if (gapMs > SPLIT_WEIGHTS.LONG_INACTIVITY_GAP_MS) {
       const extraMin = (gapMs - SPLIT_WEIGHTS.LONG_INACTIVITY_GAP_MS) / 60_000;
-      score += SPLIT_WEIGHTS.LONG_INACTIVITY_PER_MIN * extraMin;
+      split('LONG_INACTIVITY_PER_MIN', SPLIT_WEIGHTS.LONG_INACTIVITY_PER_MIN * extraMin);
     }
 
     // ── Join signals ─────────────────────────────────────────────────────────
@@ -102,22 +143,26 @@ export function computeSpans(
     const bIdents = identsOf(i + 1);
     if (aIdents.size > 0 && bIdents.size > 0) {
       const norm = wordLevenshteinNormalised(aIdents, bIdents);
-      if (norm < 0.3) score -= JOIN_WEIGHTS.LEVENSHTEIN_NORM_BELOW_03;
+      if (norm < 0.3) join('LEVENSHTEIN_NORM_BELOW_03', JOIN_WEIGHTS.LEVENSHTEIN_NORM_BELOW_03);
     }
     if (gapMs >= 0 && gapMs < JOIN_WEIGHTS.SHORT_GAP_MS) {
-      score -= JOIN_WEIGHTS.SHORT_GAP_BONUS;
+      join('SHORT_GAP_BONUS', JOIN_WEIGHTS.SHORT_GAP_BONUS);
     }
     if (a.kind === 'shell_exec' && b.kind === 'shell_exec' &&
         TEST_CMD_RE.test(a.command ?? '') && TEST_CMD_RE.test(b.command ?? '')) {
-      score -= JOIN_WEIGHTS.CONSECUTIVE_TEST_CMD;
+      join('CONSECUTIVE_TEST_CMD', JOIN_WEIGHTS.CONSECUTIVE_TEST_CMD);
     }
     if (a.kind === 'todo_write' && a.todos && a.todos.length > 0) {
       const last = a.todos[a.todos.length - 1]!;
-      if (last.status !== 'completed') score -= JOIN_WEIGHTS.TODO_LIST_PARTIAL_PROGRESS;
+      if (last.status !== 'completed') join('TODO_LIST_PARTIAL_PROGRESS', JOIN_WEIGHTS.TODO_LIST_PARTIAL_PROGRESS);
     }
 
-    scores[i] = score;
+    let total = 0;
+    for (const s of signals) total += s.sign === '+' ? s.weight : -s.weight;
+    boundaries[i] = { i, atMs: parseMs(b.timestamp), total, signals };
   }
+
+  const scores = boundaries.map(b => b.total);
 
   // ── Initial cuts ───────────────────────────────────────────────────────────
   /** Set of i where cut is kept (boundary between events[i] and events[i+1]). */
@@ -135,7 +180,8 @@ export function computeSpans(
 
   // ── Build ComputedSpan list ────────────────────────────────────────────────
   const out: ComputedSpan[] = [];
-  for (const [start, end] of segments) {
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const [start, end] = segments[segIdx]!;
     const slice = events.slice(start, end + 1);
     const persisted = slice.filter(isPersistable);
     if (persisted.length === 0) continue;
@@ -163,7 +209,23 @@ export function computeSpans(
     // session fails this check and is held back until a future crawl.
     if (endedAtMs > closeBeforeMs - HARD_BREAK_MS) continue;
 
-    out.push({ events: persisted, kind, startedAtMs, endedAtMs, summaryIndex });
+    // Internal boundaries: every gap inside [start, end - 1].
+    const internal: BoundaryScore[] = [];
+    for (let i = start; i < end; i++) internal.push(boundaries[i]!);
+
+    // Opening cut: the boundary at (start - 1) — between previous
+    // segment's tail and this segment's head. Undefined for segIdx===0.
+    const openingBoundary = segIdx > 0 ? boundaries[start - 1] : undefined;
+    // Closing cut: the boundary at end — between this segment's tail
+    // and next segment's head. Undefined for the last segment.
+    const closingBoundary = segIdx < segments.length - 1 ? boundaries[end] : undefined;
+
+    out.push({
+      events: persisted, kind, startedAtMs, endedAtMs, summaryIndex,
+      boundaries: internal,
+      openingBoundary,
+      closingBoundary,
+    });
   }
 
   return out;

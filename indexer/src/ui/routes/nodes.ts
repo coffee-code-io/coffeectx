@@ -225,7 +225,7 @@ export async function registerNodesRoutes(app: FastifyInstance): Promise<void> {
         // field is present, so flipping the YAML setting to false
         // immediately suppresses the panel without a UI reload.
         const debug = loadConfig().debug
-          ? collectDebugInfo(db, req.params.id, typeName, node)
+          ? collectDebugInfo(db, req.params.id)
           : undefined;
         // Always include the timeline's version list — the UI uses
         // length > 1 to decide whether to render version arrows. For

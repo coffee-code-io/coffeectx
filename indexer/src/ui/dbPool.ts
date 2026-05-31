@@ -30,7 +30,7 @@ export function getDb(projectName: string, config?: CoffeectxConfig): Db {
 
   const embed = resolveProjectEmbed(cfg, projectName);
   const embedFn = createEmbedFn(embed);
-  const db = new Db({ path: project.db, embed: embedFn, dimensions: embed.dimensions });
+  const db = new Db({ path: project.db, embed: embedFn, dimensions: embed.dimensions, debug: cfg.debug });
   pool.set(projectName, { db, embedDims: embed.dimensions ?? 128 });
   return db;
 }

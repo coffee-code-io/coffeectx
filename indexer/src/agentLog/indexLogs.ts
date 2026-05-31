@@ -177,6 +177,7 @@ export async function indexAgentSessions(
   //    For each message, prefer the batch `$ref` (newly inserted in this run)
   //    falling back to the existing node's `$id` (inserted in a previous run).
   const spansBatchIndices: number[] = []; // entry indices that are Span entries
+  const spanByBatchIndex = new Map<number, ComputedSpan>();
   for (const spans of spansBySession.values()) {
     for (const span of spans) {
       const sid = span.events[0]!.sessionId;
@@ -220,7 +221,9 @@ export async function indexAgentSessions(
         touchedSymbols: [],
       };
       if (summaryRef) data.summary = summaryRef;
-      spansBatchIndices.push(entries.length);
+      const batchIdx = entries.length;
+      spansBatchIndices.push(batchIdx);
+      spanByBatchIndex.set(batchIdx, span);
       entries.push({ type: 'Span', data, createdAt: span.startedAtMs });
       existingSpanKeys.add(spanKey);
     }
@@ -263,6 +266,17 @@ export async function indexAgentSessions(
   }
   for (const nodeId of spannedNodeIds) {
     try { db.setNodeState(nodeId, 'spanned'); } catch { /* node missing / no machine */ }
+  }
+
+  // ── Debug instrumentation: stash boundary scoring on each emitted Span.
+  //     NOOP when `config.debug = false`. Lets the tuner see exactly which
+  //     signals fired (or didn't) at every boundary the cut algorithm saw.
+  for (const spanIdx of spansBatchIndices) {
+    const spanId = insertResult.ids[spanIdx];
+    if (!spanId) continue;
+    const span = spanByBatchIndex.get(spanIdx);
+    if (!span) continue;
+    db.debugSet(spanId, 'spanScoring', buildSpanScoringPayload(span));
   }
 
   // ── Catch-up pass: re-segment unspanned tails already in DB ───────────────
@@ -425,6 +439,7 @@ async function catchUpUnspannedTails(
 
   const entries: InsertEntry[] = [];
   const spanBatchIndices: number[] = [];
+  const spanByBatchIndex = new Map<number, ComputedSpan>();
   for (const [sid, evs] of eventsBySession) {
     const spans = computeSpans(evs, closeBeforeMs);
     for (const span of spans) {
@@ -458,7 +473,9 @@ async function catchUpUnspannedTails(
         touchedSymbols: [],
       };
       if (summary) data.summary = summary;
-      spanBatchIndices.push(entries.length);
+      const batchIdx = entries.length;
+      spanBatchIndices.push(batchIdx);
+      spanByBatchIndex.set(batchIdx, span);
       entries.push({ type: 'Span', data, createdAt: span.startedAtMs });
       existingSpanKeys.add(spanKey);
     }
@@ -472,21 +489,39 @@ async function catchUpUnspannedTails(
   }
   result.spans = spanBatchIndices.filter(i => ir.ids[i] != null).length;
 
-  // Transition every event that just got claimed by a Span.
+  // Transition every event that just got claimed by a Span + stash debug.
   for (const i of spanBatchIndices) {
-    if (ir.ids[i] == null) continue;
+    const spanId = ir.ids[i];
+    if (spanId == null) continue;
     const data = entries[i]!.data as Record<string, unknown>;
     const refs = data.messages as Array<{ $id: string }>;
     for (const ref of refs) {
       try { db.setNodeState(ref.$id, 'spanned'); result.eventsBumped++; }
       catch { /* node missing / no machine */ }
     }
+    const span = spanByBatchIndex.get(i);
+    if (span) db.debugSet(spanId, 'spanScoring', buildSpanScoringPayload(span));
   }
 
   if (result.spans > 0) {
     console.log(`[${providerName}] catch-up: emitted ${result.spans} span(s), bumped ${result.eventsBumped} event(s) to spanned`);
   }
   return result;
+}
+
+/** Shape we stash under `node_debug_info.spanScoring` for each emitted Span.
+ *  Carries the surrounding cut decisions and every internal boundary's
+ *  signal breakdown so the tuner can reconstruct the segmentation
+ *  reasoning without re-running computeSpans. */
+function buildSpanScoringPayload(span: ComputedSpan): Record<string, unknown> {
+  return {
+    kind: span.kind,
+    startedAt: span.startedAtMs,
+    endedAt: span.endedAtMs,
+    openingBoundary: span.openingBoundary ?? null,
+    closingBoundary: span.closingBoundary ?? null,
+    internalBoundaries: span.boundaries,
+  };
 }
 
 /** "<sessionId>|<startedAtMs>" for every Span node currently in DB. */
