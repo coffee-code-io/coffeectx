@@ -72,7 +72,7 @@ types:
       isSummary: Symbol?   # "true" iff this is the terminating summary of a Span; absent otherwise
 
   Span:
-    description: A contiguous run of agent activity within a session — kind is 'planning' or 'execution'. Closed spans terminate in an AgentMessage with isSummary="true". `filesChanged` is the union of FileOperation paths in the span; `touchedSymbols` are the latest-at-endedAt LSP symbol versions in those files.
+    description: A contiguous run of agent activity within a session — kind is 'planning' or 'execution'. Closed spans terminate in an AgentMessage with isSummary="true". `filesChanged` is the union of FileOperation paths in the span; `touchedSymbols` are the latest-at-effectiveEnd LSP symbol versions in those files; `touchedPlans` are Plan instances whose file path appears in filesChanged and whose createdAt sits within (startedAt, effectiveEnd].
     hidden: true
     states: [extracted, linked]
     kind: Map
@@ -81,6 +81,7 @@ types:
       kind: Symbol                 # 'planning' | 'execution'
       startedAt: Symbol            # unix ms as string
       endedAt: Symbol
+      effectiveEnd: Symbol         # unix ms as string — endedAt extended by ≤SPAN_LINK_EPS_MS but never past the next event in the session. Used by the linker as the upper bound for LSP / Plan attachment to absorb mtime vs event-time skew.
       messages:                    # ordered $id refs to events in this span
         kind: List
         item: AnyLogEvent
@@ -88,9 +89,12 @@ types:
       filesChanged:                # union of FileOperation.path values in this span
         kind: List
         item: Symbol
-      touchedSymbols:              # latest-at-endedAt LSP symbol $ids for files in filesChanged
+      touchedSymbols:              # latest-at-effectiveEnd LSP symbol $ids for files in filesChanged
         kind: List
         item: AnyLspSymbol
+      touchedPlans:                # Plan instances whose path is in filesChanged and createdAt ∈ (startedAt, effectiveEnd]
+        kind: List
+        item: Plan
       comment: Meaning?            # optional analyst annotation on the span as a whole
 
   AnyLogEvent:

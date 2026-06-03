@@ -7,8 +7,11 @@
  * project. Both would race on the same snapshot index.jsonl.
  */
 
+import { homedir } from 'node:os';
 import { loadConfig } from '@coffeectx/core';
-import { SnapshotSupervisor } from '@coffeectx/indexer/dist/lsp/snapshotSupervisor.js';
+import {
+  PLANS_EXTENSIONS, SOURCE_EXTENSIONS, SnapshotSupervisor,
+} from '@coffeectx/indexer/dist/lsp/snapshotSupervisor.js';
 
 export interface RecordOptions {
   project: string;
@@ -21,9 +24,13 @@ export async function record(opts: RecordOptions): Promise<void> {
   const repoPath = config.projects[opts.project]?.repoPath;
   if (!repoPath) throw new Error(`project ${opts.project} has no repoPath set in config`);
 
+  const plansDir = readPlansDir(config.projects[opts.project]) ?? `${homedir()}/.claude/plans`;
   const supervisor = new SnapshotSupervisor({
     projectName: opts.project,
-    repoPaths: [repoPath],
+    watches: [
+      { rootPath: repoPath, extensions: SOURCE_EXTENSIONS },
+      { rootPath: plansDir, extensions: PLANS_EXTENSIONS, allowDottedSegments: true },
+    ],
   });
 
   const startedAt = Date.now();
@@ -54,4 +61,10 @@ export async function record(opts: RecordOptions): Promise<void> {
     process.once('SIGINT', onSignal);
     process.once('SIGTERM', onSignal);
   });
+}
+
+function readPlansDir(projectEntry: { jobs?: Record<string, { parameters?: Record<string, unknown> }> } | undefined): string | undefined {
+  const raw = projectEntry?.jobs?.plans?.parameters?.['plansDir'];
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  return raw.startsWith('~/') ? `${homedir()}/${raw.slice(2)}` : raw;
 }

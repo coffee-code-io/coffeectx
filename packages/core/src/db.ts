@@ -2074,29 +2074,6 @@ export class Db implements QueryDb {
     return rows;
   }
 
-  // ── Plan acceptance (hidden from MCP/UI) ───────────────────────────────────
-  //
-  // `plan_acceptances(plan_slug, session_id)` links Claude / Codex / pi.dev
-  // sessions to the Plan markdown they accepted via ExitPlanMode. Plans
-  // indexed without at least one accepting session are treated as orphans
-  // (likely produced by a different project, since `~/.claude/plans/` is a
-  // global directory) and skipped.
-
-  /** Record one ExitPlanMode acceptance. Idempotent. */
-  writePlanAcceptance(planSlug: string, sessionId: string, timestamp: string): void {
-    this.raw.prepare(
-      `INSERT OR IGNORE INTO plan_acceptances(plan_slug, session_id, timestamp) VALUES(?,?,?)`,
-    ).run(planSlug, sessionId, timestamp);
-  }
-
-  /** Sessions that accepted a plan, newest first. */
-  getAcceptingSessions(planSlug: string): Array<{ sessionId: string; timestamp: string }> {
-    const rows = this.raw.prepare(
-      `SELECT session_id, timestamp FROM plan_acceptances WHERE plan_slug = ? ORDER BY timestamp DESC`,
-    ).all(planSlug) as Array<{ session_id: string; timestamp: string }>;
-    return rows.map(r => ({ sessionId: r.session_id, timestamp: r.timestamp }));
-  }
-
   // ── Scheduler heartbeat ────────────────────────────────────────────────────
 
   /** Upsert the single-row heartbeat. Called by the running scheduler every 2s. */

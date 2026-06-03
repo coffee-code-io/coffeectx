@@ -31,19 +31,42 @@ import chokidar, { type FSWatcher } from 'chokidar';
 
 const SNAPSHOT_ROOT = join(homedir(), '.coffeecode', 'snapshots');
 
-const SOURCE_EXTENSIONS = new Set([
+export const SOURCE_EXTENSIONS = new Set([
   'ts', 'tsx', 'js', 'mjs', 'cjs', 'jsx',
   'py', 'rs', 'go', 'java', 'cs', 'cpp', 'cc', 'c', 'rb',
 ]);
+
+/** Extensions watched when a `WatchSpec` targets the plans directory. */
+export const PLANS_EXTENSIONS = new Set(['md']);
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', 'out', '.next', '__pycache__', 'target',
 ]);
 
+/**
+ * Per-root watch configuration. The supervisor can watch any number of roots
+ * in parallel, each with its own extension allowlist and dot-segment policy
+ * (needed for `~/.claude/plans` which lives under a dotted directory the
+ * default code-watch policy would skip).
+ */
+export interface WatchSpec {
+  rootPath: string;
+  extensions: Set<string>;
+  /** When true, the default "skip path-segments starting with `.`" rule is
+   *  disabled for THIS root. Required for `~/.claude/plans` and other
+   *  dotted-prefix locations. Does NOT disable extension or `SKIP_DIRS`
+   *  filtering. */
+  allowDottedSegments?: boolean;
+}
+
 export interface SnapshotEntry {
   relPath: string;
   ts: number;
   snapshotPath: string;
+  /** Source file mtime at copy time. Closer to "when the writer touched the
+   *  file" than `ts` (which is supervisor wall-clock at scan moment); used
+   *  by indexers that need write-time semantics (e.g. plans). */
+  mtimeMs: number;
 }
 
 interface IndexRow extends SnapshotEntry {
@@ -53,41 +76,43 @@ interface IndexRow extends SnapshotEntry {
   /** Source file size at copy time. Used together with `mtimeMs` to skip
    *  the next daemon-start `add` when neither has changed. */
   size: number;
-  /** Source file mtime in ms at copy time. */
-  mtimeMs: number;
 }
 
 export class SnapshotSupervisor {
   private readonly projectName: string;
-  private readonly repoPaths: string[];
+  private readonly watches: WatchSpec[];
   private readonly watchers: FSWatcher[] = [];
   private readonly projectDir: string;
   private readonly indexPath: string;
-  /** Latest snapshot per (repoPath, relPath). Seeded from index.jsonl on
+  /** Latest snapshot per (rootPath, relPath). Seeded from index.jsonl on
    *  start(), updated in place on every new copy. Drives the stat-skip
    *  check: if an incoming `add` event's (size, mtimeMs) matches the
    *  latest entry's, the file hasn't changed since we last snapshotted
    *  it and we skip the copy. */
   private readonly latest = new Map<string, IndexRow>();
 
-  constructor(opts: { projectName: string; repoPaths: string[] }) {
+  constructor(opts: { projectName: string; watches: WatchSpec[] }) {
     this.projectName = opts.projectName;
-    this.repoPaths = opts.repoPaths.map(p => p.replace(/\/+$/, ''));
+    this.watches = opts.watches.map(w => ({
+      ...w,
+      rootPath: w.rootPath.replace(/\/+$/, ''),
+    }));
     this.projectDir = join(SNAPSHOT_ROOT, sanitize(opts.projectName));
     this.indexPath = join(this.projectDir, 'index.jsonl');
   }
 
   async start(): Promise<void> {
-    if (this.repoPaths.length === 0) return;
+    if (this.watches.length === 0) return;
     mkdirSync(this.projectDir, { recursive: true });
     this.seedLatestCache();
     const settled: Promise<void>[] = [];
-    for (const repoPath of this.repoPaths) {
-      if (!existsSync(repoPath)) {
-        console.warn(`[snapshot-supervisor] repoPath not found, skipping: ${repoPath}`);
+    for (const spec of this.watches) {
+      const rootPath = spec.rootPath;
+      if (!existsSync(rootPath)) {
+        console.warn(`[snapshot-supervisor] rootPath not found, skipping: ${rootPath}`);
         continue;
       }
-      const extraSkip = loadCoffeeignore(repoPath);
+      const extraSkip = loadCoffeeignore(rootPath);
       // ignoreInitial=false → chokidar emits 'add' for every existing source
       // file during its initial scan. Combined with the stat-skip check in
       // onChange, that means daemon restarts only re-snapshot files whose
@@ -97,8 +122,8 @@ export class SnapshotSupervisor {
       // alwaysStat=true forces chokidar to deliver fs.Stats with every
       // add/change event so the skip check is a cheap integer compare,
       // no extra statSync round-trip.
-      const watcher = chokidar.watch(repoPath, {
-        ignored: (path, stats) => shouldIgnore(repoPath, path, stats, extraSkip),
+      const watcher = chokidar.watch(rootPath, {
+        ignored: (path, stats) => shouldIgnore(spec, path, stats, extraSkip),
         ignoreInitial: false,
         persistent: true,
         alwaysStat: true,
@@ -121,11 +146,11 @@ export class SnapshotSupervisor {
       };
       watcher.on('add', async (filePath, stats) => {
         pending += 1;
-        try { await this.onChange(repoPath, filePath, stats, /* allowSkip */ true); }
+        try { await this.onChange(spec, filePath, stats, /* allowSkip */ true); }
         finally { pending -= 1; checkSettled(); }
       });
       watcher.on('change', (filePath, stats) => {
-        void this.onChange(repoPath, filePath, stats, /* allowSkip */ false);
+        void this.onChange(spec, filePath, stats, /* allowSkip */ false);
       });
       watcher.once('ready', () => { scanComplete = true; checkSettled(); });
       settled.push(new Promise<void>(resolve => {
@@ -150,7 +175,7 @@ export class SnapshotSupervisor {
       if (row.repoPath !== normalized) continue;
       if (row.ts <= since) continue;
       const arr = out.get(row.relPath) ?? [];
-      arr.push({ relPath: row.relPath, ts: row.ts, snapshotPath: row.snapshotPath });
+      arr.push({ relPath: row.relPath, ts: row.ts, snapshotPath: row.snapshotPath, mtimeMs: row.mtimeMs });
       out.set(row.relPath, arr);
     }
     for (const arr of out.values()) arr.sort((a, b) => a.ts - b.ts);
@@ -196,17 +221,17 @@ export class SnapshotSupervisor {
   // ── Internals ─────────────────────────────────────────────────────────────
 
   private onChange(
-    repoPath: string,
+    spec: WatchSpec,
     filePath: string,
     stats: Stats | undefined,
     allowSkip: boolean,
   ): void {
     const ext = extname(filePath).replace(/^\./, '');
-    if (!SOURCE_EXTENSIONS.has(ext)) return;
+    if (!spec.extensions.has(ext)) return;
     try {
-      const relPath = relative(repoPath, filePath);
+      const relPath = relative(spec.rootPath, filePath);
       if (!relPath || relPath.startsWith('..')) return;
-      const normRepo = repoPath.replace(/\/+$/, '');
+      const normRoot = spec.rootPath.replace(/\/+$/, '');
 
       // alwaysStat=true should always give us Stats; if it didn't, fall
       // back to a sync stat so the skip check still works.
@@ -219,7 +244,7 @@ export class SnapshotSupervisor {
       // `add` events — `change` always copies because something demonstrably
       // moved.
       if (allowSkip) {
-        const prior = this.latest.get(latestKey(normRepo, relPath));
+        const prior = this.latest.get(latestKey(normRoot, relPath));
         if (prior && prior.size === size && prior.mtimeMs === mtimeMs) return;
       }
 
@@ -229,9 +254,9 @@ export class SnapshotSupervisor {
       mkdirSync(dir, { recursive: true });
       const snapshotPath = join(dir, `${ts}.${ext}`);
       copyFileSync(filePath, snapshotPath);
-      const row: IndexRow = { repoPath: normRepo, relPath, ts, snapshotPath, size, mtimeMs };
+      const row: IndexRow = { repoPath: normRoot, relPath, ts, snapshotPath, size, mtimeMs };
       appendFileSync(this.indexPath, JSON.stringify(row) + '\n');
-      this.latest.set(latestKey(normRepo, relPath), row);
+      this.latest.set(latestKey(normRoot, relPath), row);
     } catch (err) {
       console.warn(`[snapshot-supervisor] copy failed for ${filePath}: ${(err as Error).message}`);
     }
@@ -290,26 +315,26 @@ function loadCoffeeignore(repoPath: string): Set<string> {
 }
 
 function shouldIgnore(
-  repoPath: string,
+  spec: WatchSpec,
   path: string,
   stats: ReturnType<typeof statSync> | undefined,
   extraSkip: Set<string>,
 ): boolean {
   // chokidar may call the filter before stats are ready; in that case use the
   // path-segment heuristic and let chokidar resolve directories below.
-  if (path === repoPath) return false;
-  const rel = relative(repoPath, path);
+  if (path === spec.rootPath) return false;
+  const rel = relative(spec.rootPath, path);
   if (!rel) return false;
   for (const seg of rel.split(sep)) {
     if (!seg) continue;
-    if (seg.startsWith('.')) return true;
+    if (seg.startsWith('.') && !spec.allowDottedSegments) return true;
     if (SKIP_DIRS.has(seg)) return true;
     if (extraSkip.has(seg)) return true;
   }
   if (stats?.isDirectory()) return false;
   if (stats?.isFile()) {
     const ext = extname(path).replace(/^\./, '');
-    return !SOURCE_EXTENSIONS.has(ext);
+    return !spec.extensions.has(ext);
   }
   return false;
 }

@@ -397,7 +397,7 @@ export async function indexWithLsp(
     }
   } else {
     for (const abs of walkRepo(repoPath)) {
-      planned.push({ relPath: relative(repoPath, abs), snapshots: [{ relPath: relative(repoPath, abs), ts: 0, snapshotPath: abs }] });
+      planned.push({ relPath: relative(repoPath, abs), snapshots: [{ relPath: relative(repoPath, abs), ts: 0, snapshotPath: abs, mtimeMs: 0 }] });
     }
   }
 

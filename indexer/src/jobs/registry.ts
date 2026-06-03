@@ -243,29 +243,34 @@ function buildPiJob(config: CoffeectxConfig, projectName: string): Job {
   };
 }
 
+interface PlansJobState { lastConsumedTs?: number }
+
 function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
   const params = projectJobParams(config, projectName, 'plans');
   return {
     name: 'plans',
-    description: 'Ingest Claude plan-mode markdown files from ~/.claude/plans/.',
+    description: 'Ingest Claude plan-mode markdown files from ~/.claude/plans/ via snapshot supervisor.',
     defaultEnabled: false,
     triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_PLANS_INTERVAL_MS) }],
     async run(ctx) {
       const plansDir = readString(ctx.parameters, 'plansDir') ?? DEFAULT_PLANS_DIR;
-      const r = await indexPlans(ctx.db, { plansDir: resolve(plansDir) });
+      if (!ctx.snapshotSupervisor) {
+        return { message: 'no snapshot supervisor available — skipped' };
+      }
+      const state = (ctx.db.getJobState<PlansJobState>('plans')) ?? {};
+      const r = await indexPlans(ctx.db, {
+        plansDir: resolve(plansDir),
+        supervisor: ctx.snapshotSupervisor,
+        lastConsumedTs: state.lastConsumedTs ?? 0,
+      });
       if (r.errors.length > 0) {
         const first = r.errors[0]!;
         throw new Error(`${r.errors.length} plan error(s); first: ${first.path}: ${first.error}`);
       }
+      ctx.db.setJobState('plans', { ...state, lastConsumedTs: r.consumedTs });
       return {
-        message: `${r.scanned} scanned, ${r.inserted} new, ${r.patched} patched (${r.linksAdded} links added), ${r.skipped} unchanged`,
-        metrics: {
-          scanned: r.scanned,
-          inserted: r.inserted,
-          patched: r.patched,
-          linksAdded: r.linksAdded,
-          skipped: r.skipped,
-        },
+        message: `${r.files} files, ${r.inserted} new Plan(s)`,
+        metrics: { files: r.files, inserted: r.inserted, consumedTs: r.consumedTs },
       };
     },
   };

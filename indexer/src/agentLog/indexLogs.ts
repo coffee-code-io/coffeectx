@@ -12,8 +12,9 @@
  *    Spans whose trailing event is within HARD_BREAK_MS of `Date.now()`
  *    are deferred (still in-progress). Detection-only events
  *    (`plan_accepted`, `todo_write`) feed segmentation but are not
- *    persisted as nodes. `plan_accepted` still flows into the
- *    `plan_acceptances` hidden table so plans can backref to sessions.
+ *    persisted as nodes — `plan_accepted` is recoverable from
+ *    Span.touchedPlans, which the linker job populates from Plan
+ *    instances minted by the snapshot-driven plans indexer.
  *  - Span dedup is keyed on `(sessionId, startedAt)` — finalised spans
  *    don't reshape across crawls, so re-running the indexer is idempotent.
  *
@@ -23,7 +24,7 @@
 
 import type { Db, InsertEntry } from '@coffeectx/core';
 import { classifyMessages, type ClassifiedEvent } from './classifier.js';
-import { computeSpans, type ComputedSpan } from './spans.js';
+import { computeSpans, SPAN_LINK_EPS_MS, type ComputedSpan } from './spans.js';
 import type { AgentLogProvider, ProviderScanOptions } from './provider.js';
 import { Progress } from '../jobs/progress.js';
 
@@ -154,7 +155,6 @@ export async function indexAgentSessions(
   // 2) Event rows. Track per-uuid batch index so spans built in step 3 can
   //    cross-reference newly-inserted events via `$ref`.
   const newEventBatchIndexByUuid = new Map<string, number>();
-  const planAcceptances: Array<{ planSlug: string; sessionId: string; timestamp: string }> = [];
 
   // UUIDs of events that any finalised span claims — only these AgentMessage
   // entries get isSummary, only these events get a state on insert.
@@ -168,16 +168,11 @@ export async function indexAgentSessions(
 
   for (const [, sessionEvents] of eventsBySession) {
     for (const event of sessionEvents) {
-      if (event.kind === 'plan_accepted') {
-        if (event.planSlug) {
-          planAcceptances.push({
-            planSlug: event.planSlug,
-            sessionId: event.sessionId,
-            timestamp: event.timestamp,
-          });
-        }
-        continue;
-      }
+      // `plan_accepted` and `todo_write` are in-memory signals that feed the
+      // span heuristics (SPLIT_WEIGHTS in spanHeuristics.ts) but are NOT
+      // persisted as rows — acceptance is recoverable via Span ↔ Plan
+      // linkage instead.
+      if (event.kind === 'plan_accepted') continue;
       if (event.kind === 'todo_write') continue;
       if (existingEventIdByUuid.has(event.uuid)) continue;
       const entry = eventToInsertEntry(event, summaryUuids.has(event.uuid));
@@ -194,10 +189,13 @@ export async function indexAgentSessions(
   const spansBatchIndices: number[] = []; // entry indices that are Span entries
   const spanByBatchIndex = new Map<number, ComputedSpan>();
   for (const spans of spansBySession.values()) {
-    for (const span of spans) {
+    for (let i = 0; i < spans.length; i++) {
+      const span = spans[i]!;
       const sid = span.events[0]!.sessionId;
       const spanKey = `${sid}|${span.startedAtMs}`;
       if (existingSpanKeys.has(spanKey)) continue;
+      const nextStart = i + 1 < spans.length ? spans[i + 1]!.startedAtMs : undefined;
+      const effectiveEnd = computeEffectiveEnd(span.endedAtMs, nextStart);
 
       const messageRefs: Array<{ $ref: number } | { $id: string }> = [];
       for (const ev of span.events) {
@@ -231,9 +229,11 @@ export async function indexAgentSessions(
         kind: span.kind,
         startedAt: String(span.startedAtMs),
         endedAt: String(span.endedAtMs),
+        effectiveEnd: String(effectiveEnd),
         messages: messageRefs,
         filesChanged: [...filesChanged],
         touchedSymbols: [],
+        touchedPlans: [],
       };
       if (summaryRef) data.summary = summaryRef;
       const batchIdx = entries.length;
@@ -304,13 +304,6 @@ export async function indexAgentSessions(
   result.spans += catchUpResult.spans;
   // `events` counter is incremented as we transition events to `spanned`;
   // the row count change is reflected in `catchUpResult.eventsBumped`.
-
-  if (planAcceptances.length > 0) {
-    for (const pa of planAcceptances) {
-      db.writePlanAcceptance(pa.planSlug, pa.sessionId, pa.timestamp);
-    }
-    console.log(`[${provider.name}] wrote ${planAcceptances.length} plan_acceptances rows`);
-  }
 
   return result;
 }
@@ -458,7 +451,8 @@ async function catchUpUnspannedTails(
   const spanByBatchIndex = new Map<number, ComputedSpan>();
   for (const [sid, evs] of eventsBySession) {
     const spans = computeSpans(evs, closeBeforeMs);
-    for (const span of spans) {
+    for (let i = 0; i < spans.length; i++) {
+      const span = spans[i]!;
       const spanKey = `${sid}|${span.startedAtMs}`;
       if (existingSpanKeys.has(spanKey)) continue;
       const messageRefs: Array<{ $id: string }> = [];
@@ -467,6 +461,8 @@ async function catchUpUnspannedTails(
         if (nodeId) messageRefs.push({ $id: nodeId });
       }
       if (messageRefs.length === 0) continue;
+      const nextStart = i + 1 < spans.length ? spans[i + 1]!.startedAtMs : undefined;
+      const effectiveEnd = computeEffectiveEnd(span.endedAtMs, nextStart);
       const summary = (() => {
         const ev = span.events[span.summaryIndex];
         if (!ev || ev.kind !== 'agent_message') return undefined;
@@ -484,9 +480,11 @@ async function catchUpUnspannedTails(
         kind: span.kind,
         startedAt: String(span.startedAtMs),
         endedAt: String(span.endedAtMs),
+        effectiveEnd: String(effectiveEnd),
         messages: messageRefs,
         filesChanged: [...filesChanged],
         touchedSymbols: [],
+        touchedPlans: [],
       };
       if (summary) data.summary = summary;
       const batchIdx = entries.length;
@@ -523,6 +521,14 @@ async function catchUpUnspannedTails(
     console.log(`[${providerName}] catch-up: emitted ${result.spans} span(s), bumped ${result.eventsBumped} event(s) to spanned`);
   }
   return result;
+}
+
+/** Per-span linker-side upper bound: `endedAt + SPAN_LINK_EPS_MS`, but never
+ *  past the start of the next span in the same session. Lets the linker
+ *  absorb mtime / event-time skew without bleeding into a follow-up span. */
+function computeEffectiveEnd(endedAtMs: number, nextSpanStartMs: number | undefined): number {
+  const padded = endedAtMs + SPAN_LINK_EPS_MS;
+  return nextSpanStartMs == null ? padded : Math.min(padded, nextSpanStartMs);
 }
 
 /** Shape we stash under `node_debug_info.spanScoring` for each emitted Span.

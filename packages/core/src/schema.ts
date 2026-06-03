@@ -149,19 +149,6 @@ CREATE TABLE IF NOT EXISTS job_runs (
   metrics_json TEXT
 );
 
--- Plan acceptance log — hidden from the MCP/UI graph. One row per session
--- that ran ExitPlanMode against a given plan. Populated by the agent-log
--- indexer; consumed by the plans indexer (to skip orphan plans / fill in
--- Plan.acceptedBy) and by the LSP reverse pass (to derive each plan's file
--- context from its accepting sessions' FileOperations).
-CREATE TABLE IF NOT EXISTS plan_acceptances (
-  plan_slug   TEXT NOT NULL,
-  session_id  TEXT NOT NULL,     -- namespaced "claude:<uuid>" / "codex:<id>" / "pi:<id>"
-  timestamp   TEXT NOT NULL,
-  PRIMARY KEY (plan_slug, session_id)
-);
-CREATE INDEX IF NOT EXISTS idx_plan_acceptances_session ON plan_acceptances(session_id);
-
 -- Per-node debug instrumentation — hidden from the MCP/UI graph.
 -- Populated only when config.debug === true; db.debugSet is a NOOP
 -- otherwise. One row per (node_id, field) so different pipeline stages

@@ -17,7 +17,9 @@ import { loadConfig, resolveJobEnv, resolveJobParameters, type Db, type Coffeect
 import { CronExpressionParser } from 'cron-parser';
 import type { Job, JobContext, JobTrigger } from './types.js';
 import { withRunLog } from './runLog.js';
-import { SnapshotSupervisor } from '../lsp/snapshotSupervisor.js';
+import {
+  PLANS_EXTENSIONS, SOURCE_EXTENSIONS, SnapshotSupervisor, type WatchSpec,
+} from '../lsp/snapshotSupervisor.js';
 
 // Wrapper to keep the call-site name short. Returning the parsed iterator
 // (which has `.next()`) is all the scheduler needs.
@@ -208,13 +210,19 @@ export class Scheduler {
   }
 
   /**
-   * Collect every distinct repoPath declared by an enabled LSP job for this
-   * project. Returns null if none — the supervisor is only worth starting
-   * when at least one LSP job will consume its output.
+   * Collect every watch root the supervisor must observe for this project:
+   *   - Each enabled LSP job's `repoPath` (or fallback to `project.repoPath`),
+   *     filtered by `SOURCE_EXTENSIONS`.
+   *   - If the `plans` job is enabled, its `plansDir` (or `~/.claude/plans`),
+   *     filtered by `PLANS_EXTENSIONS` and allowing the `.claude` dotted
+   *     segment.
+   * Returns null if no jobs claim a root — the supervisor is only worth
+   * starting when at least one consumer exists.
    */
   private buildSnapshotSupervisor(): SnapshotSupervisor | null {
     const projectJobs = this.config.projects[this.project.name]?.jobs ?? {};
-    const seen = new Set<string>();
+    const watches: WatchSpec[] = [];
+    const seenCodeRoots = new Set<string>();
     for (const job of this.jobs.values()) {
       if (job.name !== 'lsp' && !job.name.startsWith('lsp:')) continue;
       const cfg = projectJobs[job.name];
@@ -223,10 +231,28 @@ export class Scheduler {
       const params = cfg?.parameters ?? {};
       const raw = typeof params['repoPath'] === 'string' ? (params['repoPath'] as string) : undefined;
       const repoPath = raw ? expandTilde(raw) : this.project.repoPath;
-      if (repoPath) seen.add(repoPath);
+      if (repoPath && !seenCodeRoots.has(repoPath)) {
+        seenCodeRoots.add(repoPath);
+        watches.push({ rootPath: repoPath, extensions: SOURCE_EXTENSIONS });
+      }
     }
-    if (seen.size === 0) return null;
-    return new SnapshotSupervisor({ projectName: this.project.name, repoPaths: Array.from(seen) });
+    const plansJob = this.jobs.get('plans');
+    if (plansJob) {
+      const cfg = projectJobs['plans'];
+      const enabled = cfg?.enabled ?? plansJob.defaultEnabled;
+      if (enabled) {
+        const params = cfg?.parameters ?? {};
+        const raw = typeof params['plansDir'] === 'string' ? (params['plansDir'] as string) : undefined;
+        const plansDir = expandTilde(raw ?? '~/.claude/plans');
+        watches.push({
+          rootPath: plansDir,
+          extensions: PLANS_EXTENSIONS,
+          allowDottedSegments: true,
+        });
+      }
+    }
+    if (watches.length === 0) return null;
+    return new SnapshotSupervisor({ projectName: this.project.name, watches });
   }
 
   // ── Trigger plumbing ──────────────────────────────────────────────────────

@@ -28,6 +28,16 @@ import {
   DONE_KEYWORD_RE, TEST_CMD_RE, IDENT_RE,
 } from './spanHeuristics.js';
 
+/**
+ * Tolerance applied to `endedAt` when computing `Span.effectiveEnd`. Absorbs
+ * the natural skew between agent-log event times (which drive `endedAt`) and
+ * filesystem mtimes (which drive `Plan.createdAt` and follow the kernel's
+ * Write-tool completion). Persisted-side: `effectiveEnd =
+ * min(endedAt + SPAN_LINK_EPS_MS, nextSpanStart)`. Linker-side: fallback for
+ * legacy spans that predate `effectiveEnd`.
+ */
+export const SPAN_LINK_EPS_MS = 120_000;
+
 export interface BoundarySignal {
   /** Matches a key from `SPLIT_WEIGHTS` or `JOIN_WEIGHTS`. */
   name: string;

@@ -180,10 +180,11 @@ function humanBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
 
-function printRun(r: { logs: Record<string, number>; lsp: Record<string, number | boolean> | null; link: Record<string, number> }): void {
-  console.log('[run] logs:', r.logs);
-  console.log('[run] lsp: ', r.lsp ?? '(skipped)');
-  console.log('[run] link:', r.link);
+function printRun(r: { logs: Record<string, number>; lsp: Record<string, number | boolean> | null; plans: Record<string, number>; link: Record<string, number> }): void {
+  console.log('[run] logs: ', r.logs);
+  console.log('[run] lsp:  ', r.lsp ?? '(skipped)');
+  console.log('[run] plans:', r.plans);
+  console.log('[run] link: ', r.link);
 }
 
 // Silently report and exit on stat errors so we don't leak stack traces.

@@ -1,45 +1,48 @@
 /**
- * Index Claude Code plan files into the knowledge graph as `Plan` nodes.
+ * Plans indexer — supervisor-driven.
  *
- * Plans are markdown documents written during "plan mode" turns. Claude saves
- * them to `~/.claude/plans/<slug>.md`. They're high-signal artefacts because
- * they capture the agent's intended approach (context, files, verification)
- * before any code is written.
+ * Claude writes plan-mode markdown to `~/.claude/plans/<slug>.md`. The
+ * SnapshotSupervisor captures every byte-for-byte revision as a snapshot
+ * under `~/.coffeecode/snapshots/<project>/<sha>/<ts>.md`. This job drains
+ * those snapshots and mints one Plan node per file per drain, taking the
+ * latest snapshot per relPath in the batch.
  *
- * One Plan node per `.md` file in the directory; the filename slug (sans
- * extension) is the dedup key.
+ * Unlike the LSP indexer, plans are NOT versioned: a re-write of the same
+ * slug in a new planning session yields a brand-new Plan node (separate
+ * timeline, fresh uuid, no `bumpVersion`). The downstream span linker
+ * attaches each plan to whatever Span(s) wrote it.
  *
- * Linking is bidirectional and order-independent:
- *
- * - **Forward pass** on insert: parse `content` for markdown link targets
- *   (file paths) and fenced inline-code tokens (identifiers); resolve each
- *   against the current DB using exact-Symbol + findNamedParent. Only single,
- *   unambiguous matches are kept.
- * - **Reverse pass** every run: for every existing Plan node — even unchanged
- *   ones — re-resolve the same tokens and `appendListItemsUnique` any
- *   newly-resolvable refs into the existing `relatedFiles` / `relatedSymbols`
- *   lists. This means a Plan inserted before its referenced files/symbols
- *   existed gets linked the next time the indexer runs after those land.
+ * Reverse-pass link backfilling (the old job's per-run "retry resolving
+ * unmatched references") is dropped — Plan nodes are now point-in-time
+ * immutable captures; relatedFiles/relatedSymbols reflect what was
+ * resolvable at write time.
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { parseQuery, executeQuery } from '@coffeectx/core';
 import type { Db, InsertEntry } from '@coffeectx/core';
 import { extractIdentifiers } from '../agentLog/enricher.js';
+import type { SnapshotSupervisor } from '../lsp/snapshotSupervisor.js';
 
 export interface IndexPlansOptions {
-  /** Absolute path of the plans directory. Defaults to `~/.claude/plans`. */
+  /** Absolute path of the plans directory (the supervisor's watch root). */
   plansDir: string;
+  supervisor: SnapshotSupervisor;
+  /** Highest snapshot ts the previous run consumed. The supervisor returns
+   *  rows strictly newer than this. */
+  lastConsumedTs: number;
 }
 
 export interface IndexPlansResult {
-  scanned: number;
+  /** Distinct plan files seen in this drain (the bucket count after grouping
+   *  by relPath). */
+  files: number;
+  /** Plan nodes successfully minted this run. */
   inserted: number;
-  patched: number;
-  linksAdded: number;
-  skipped: number;
   errors: Array<{ path: string; error: string }>;
+  /** Max snapshot ts consumed — caller persists via setJobState. */
+  consumedTs: number;
 }
 
 /** Markdown link target — captures the URL/path inside `[label](target)`. */
@@ -47,129 +50,72 @@ const MD_LINK_RE = /\[[^\]]*\]\(([^)\s]+)/g;
 /** Backtick-fenced inline code — captures whatever's between single backticks. */
 const INLINE_CODE_RE = /`([^`\n]{2,})`/g;
 
-/** Scan the directory and upsert Plan nodes. */
 export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<IndexPlansResult> {
   const result: IndexPlansResult = {
-    scanned: 0, inserted: 0, patched: 0, linksAdded: 0, skipped: 0, errors: [],
+    files: 0, inserted: 0, errors: [], consumedTs: options.lastConsumedTs,
   };
 
-  let entries: string[];
-  try {
-    entries = readdirSync(options.plansDir);
-  } catch (err) {
-    result.errors.push({ path: options.plansDir, error: (err as Error).message });
-    return result;
-  }
+  const drained = options.supervisor.drainSince(options.plansDir, options.lastConsumedTs);
+  if (drained.size === 0) return result;
 
-  const existing = loadExistingPlans(db);
+  for (const [relPath, snapshots] of drained) {
+    if (snapshots.length === 0) continue;
+    if (extname(relPath).toLowerCase() !== '.md') continue;
+    result.files++;
 
-  for (const entry of entries) {
-    if (extname(entry).toLowerCase() !== '.md') continue;
-    const path = join(options.plansDir, entry);
-    result.scanned++;
-
-    let stat;
-    try { stat = statSync(path); }
-    catch (err) { result.errors.push({ path, error: (err as Error).message }); continue; }
-    if (!stat.isFile()) continue;
+    // drainSince returns snapshots ascending by ts; the last entry is the
+    // most recent revision we should commit as the Plan body. Older
+    // snapshots in the same batch are subsumed (they're transitional saves
+    // within one drain interval) and discarded by gcKeepingLatest below.
+    const latest = snapshots[snapshots.length - 1]!;
+    if (latest.ts > result.consumedTs) result.consumedTs = latest.ts;
 
     let content: string;
-    try { content = readFileSync(path, 'utf-8'); }
-    catch (err) { result.errors.push({ path, error: (err as Error).message }); continue; }
-
-    const name = basename(entry, extname(entry));
-    // Persist mtime/birthtime as the node's first-class timestamps so they
-    // participate in CreatedAfter / UpdatedAfter queries. Both stored as
-    // Unix ms — same units the DB column expects.
-    const updatedAt = stat.mtimeMs;
-    const createdAt = stat.birthtimeMs || updatedAt;
-    const title = extractTitle(content);
-
-    // Orphan filter: `~/.claude/plans/` is GLOBAL across all projects, so we
-    // need an explicit signal that *some session in this project's DB* used
-    // this plan via ExitPlanMode. Without that signal we'd index plans from
-    // unrelated projects. Source of truth: the plan_acceptances table the
-    // agent-log indexer populated.
-    const acceptances = db.getAcceptingSessions(name);
-    if (acceptances.length === 0) {
-      console.log(`[indexPlans] skipping orphan plan "${name}" (no accepting session in this project)`);
-      result.skipped++;
+    try {
+      content = readFileSync(latest.snapshotPath, 'utf-8');
+    } catch (err) {
+      result.errors.push({ path: latest.snapshotPath, error: (err as Error).message });
       continue;
     }
-    const acceptedBy = acceptances.map(a => a.sessionId);
 
-    // Forward-pass link resolution (used for both new and existing plans).
+    const name = basename(relPath, extname(relPath));
+    const absPath = join(options.plansDir, relPath);
+    const title = extractTitle(content);
     const { filePaths, symbolRefs } = await resolvePlanLinks(content, db);
 
-    const prior = existing.get(name);
-    if (!prior) {
-      const newEntry: InsertEntry = {
-        type: 'Plan',
-        data: {
-          name,
-          path,
-          content,
-          ...(title ? { title } : {}),
-          relatedFiles: filePaths,    // plain path strings (List<Symbol>)
-          relatedSymbols: symbolRefs,
-          acceptedBy,                 // namespaced sessionIds
-        },
-        createdAt,
-        updatedAt,
-      };
-      try {
-        const r = await db.insertEntries([newEntry]);
-        if (r.errors.length > 0) {
-          result.errors.push({ path, error: r.errors.map(e => e.message).join('; ') });
-        } else {
-          result.inserted++;
-        }
-      } catch (err) {
-        result.errors.push({ path, error: (err as Error).message });
+    const entry: InsertEntry = {
+      type: 'Plan',
+      data: {
+        name,
+        path: absPath,
+        content,
+        ...(title ? { title } : {}),
+        relatedFiles: filePaths,
+        relatedSymbols: symbolRefs,
+      },
+      // File mtime is when Claude's Write tool actually touched the disk —
+      // a tighter proxy for "when this content existed" than the supervisor
+      // ts (which is Date.now() at scan moment and can lag the write by
+      // minutes in batched/replay runs). Fall back to ts if mtime is 0/missing.
+      createdAt: latest.mtimeMs || latest.ts,
+      updatedAt: latest.mtimeMs || latest.ts,
+    };
+    try {
+      const r = await db.insertEntries([entry]);
+      if (r.errors.length > 0) {
+        result.errors.push({ path: absPath, error: r.errors.map(e => e.message).join('; ') });
+      } else {
+        result.inserted++;
       }
-      continue;
+    } catch (err) {
+      result.errors.push({ path: absPath, error: (err as Error).message });
     }
-
-    // Existing plan — reverse-pass append any newly-resolvable refs AND new
-    // acceptances (sessions accepted after the plan was first indexed).
-    const added = appendLinksToExistingPlan(db, prior.id, filePaths, symbolRefs, acceptedBy);
-    if (added > 0) {
-      result.patched++;
-      result.linksAdded += added;
-    }
-
-    if (prior.updatedAt !== updatedAt) {
-      // mtime changed — Db patching only adds absent fields, so we can't easily
-      // overwrite `content`. Surface this so the user can decide.
-      console.warn(
-        `[indexPlans] plan "${name}" changed on disk (mtime ${new Date(updatedAt).toISOString()}) but ` +
-        `Db patching adds-only — existing node retains previous content. Delete the Plan node manually to force a re-index.`,
-      );
-    }
-    if (added === 0) result.skipped++;
   }
+
+  // Done with this drain — keep only the newest snapshot per relPath on disk.
+  options.supervisor.gcKeepingLatest(options.plansDir);
 
   return result;
-}
-
-interface PlanRow {
-  id: string;
-  /** Unix ms — sourced from the node's first-class `updated_at` column. */
-  updatedAt: number;
-}
-
-function loadExistingPlans(db: Db): Map<string, PlanRow> {
-  const out = new Map<string, PlanRow>();
-  for (const id of db.queryByNamedType(['Plan'])) {
-    const nameFieldId = db.getMapFieldId(id, 'name');
-    if (!nameFieldId) continue;
-    const nameNode = db.loadNode(nameFieldId);
-    if (nameNode.kind !== 'atom' || nameNode.atom.kind !== 'symbol') continue;
-    const ts = db.getNodeTimestamps(id);
-    if (!ts) continue;
-    out.set(nameNode.atom.value, { id, updatedAt: ts.updatedAt });
-  }
-  return out;
 }
 
 /** Pull the first-line H1 or the first non-empty trimmed line, capped at 200 chars. */
@@ -187,13 +133,11 @@ function extractTitle(content: string): string | null {
 }
 
 /**
- * Parse a plan's markdown body and resolve any references that the graph can
- * actually represent.
- *
- * - File paths now land as **plain strings** in `Plan.relatedFiles` — File is
- *   no longer a node type. The resolver doesn't need DB lookups for these.
- * - Identifier candidates (inline-code tokens) resolve to LSP symbol UUIDs
- *   the same way as before — single non-excluded ancestor or drop.
+ * Parse a plan's markdown body and resolve any references the graph can
+ * represent at write time:
+ *  - File paths land as plain Symbol strings in `Plan.relatedFiles`.
+ *  - Identifier candidates (inline-code tokens) resolve to LSP symbol ids
+ *    — single non-excluded ancestor or drop.
  */
 async function resolvePlanLinks(content: string, db: Db): Promise<{
   filePaths: string[];
@@ -204,7 +148,7 @@ async function resolvePlanLinks(content: string, db: Db): Promise<{
 
   const symbolOwners = new Set<string>();
   for (const ident of identifiers) {
-    const owner = await resolveSingleNamedOwnerExcluding(ident, db, EXCLUDED_TYPES);
+    const owner = await resolveSingleNamedOwnerIn(ident, db, LSP_SYMBOL_TYPES);
     if (owner) symbolOwners.add(owner);
   }
 
@@ -214,52 +158,14 @@ async function resolvePlanLinks(content: string, db: Db): Promise<{
   };
 }
 
-// After the directory-schema flatten: File/Folder/Location/Span are gone, so
-// the only thing to exclude is Plan itself (don't link a Plan to other Plans).
-const EXCLUDED_TYPES = new Set(['Plan']);
-
-/**
- * Append new file-path strings + symbol refs to an existing Plan's lists,
- * skipping duplicates. Returns the total items appended.
- */
-function appendLinksToExistingPlan(
-  db: Db,
-  planId: string,
-  filePaths: string[],
-  symbolRefs: { $id: string }[],
-  acceptedBy: string[],
-): number {
-  let added = 0;
-  added += appendValueListUnique(db, planId, 'relatedFiles', filePaths);
-  if (symbolRefs.length > 0) {
-    const listId = db.getMapFieldId(planId, 'relatedSymbols');
-    if (listId) added += db.appendListItemsUnique(listId, symbolRefs.map(r => r.$id));
-  }
-  added += appendValueListUnique(db, planId, 'acceptedBy', acceptedBy);
-  return added;
-}
-
-/**
- * Append plain Symbol VALUES to a list field, deduping by value rather than
- * by node id. `appendListItemsUnique` alone dedups item-ids, but every call
- * to `db.insertSymbolNode` creates a fresh node, so naive code would grow
- * the list with duplicate "claude:<uuid>" entries on every run.
- */
-function appendValueListUnique(db: Db, planId: string, fieldKey: string, values: string[]): number {
-  if (values.length === 0) return 0;
-  const listId = db.getMapFieldId(planId, fieldKey);
-  if (!listId) return 0;
-  // Inspect what's already in the list.
-  const existing = new Set<string>();
-  for (const itemId of db.getListItems(listId)) {
-    const node = db.loadNode(itemId);
-    if (node.kind === 'atom' && node.atom.kind === 'symbol') existing.add(node.atom.value);
-  }
-  const toAdd = [...new Set(values)].filter(v => !existing.has(v));
-  if (toAdd.length === 0) return 0;
-  const newIds = toAdd.map(v => db.insertSymbolNode(v));
-  return db.appendListItemsUnique(listId, newIds);
-}
+/** `Plan.relatedSymbols` accepts these types only (matches AnyLspSymbol). A
+ *  loose blacklist (e.g. exclude Plan) lets unrelated owners like AgentSession
+ *  / Span through and the insert then rejects the whole batch. Whitelisting
+ *  here matches the field's schema exactly. */
+const LSP_SYMBOL_TYPES = new Set([
+  'LspModule', 'LspNamespace', 'LspClass', 'LspInterface',
+  'LspEnum', 'LspFunction', 'LspMethod', 'LspConstructor',
+]);
 
 /** Pull every `[label](target)` target whose path looks like a file. */
 export function extractFilePathCandidates(content: string): string[] {
@@ -267,11 +173,9 @@ export function extractFilePathCandidates(content: string): string[] {
   for (const m of content.matchAll(MD_LINK_RE)) {
     const target = m[1]!.trim();
     if (!target) continue;
-    if (/^https?:/i.test(target)) continue;        // skip URLs
+    if (/^https?:/i.test(target)) continue;
     if (/^mailto:/i.test(target)) continue;
-    // Anchor-only links (#section) and pure section refs aren't files.
     if (target.startsWith('#')) continue;
-    // Strip any trailing anchor / line number (`foo.ts#L42`, `foo.ts:42`).
     const stripped = target.split(/[#:]/, 1)[0]!.trim();
     if (stripped) out.add(stripped);
   }
@@ -284,7 +188,6 @@ export function extractIdentifierCandidates(content: string): string[] {
   for (const m of content.matchAll(INLINE_CODE_RE)) {
     codeSpans.push(m[1]!);
   }
-  // Reuse the agent-log identifier filter (PascalCase / camelCase / snake_case).
   const all = new Set<string>();
   for (const span of codeSpans) {
     for (const id of extractIdentifiers(span)) all.add(id);
@@ -292,10 +195,9 @@ export function extractIdentifierCandidates(content: string): string[] {
   return [...all];
 }
 
-/**
-/** Resolve `value` to its single named-type ancestor, skipping `excluded` types. */
-async function resolveSingleNamedOwnerExcluding(
-  value: string, db: Db, excluded: Set<string>,
+/** Resolve `value` to its single named-type ancestor whose type is in `allowed`. */
+async function resolveSingleNamedOwnerIn(
+  value: string, db: Db, allowed: Set<string>,
 ): Promise<string | null> {
   const symbolIds = await querySymbolExact(value, db);
   if (symbolIds.length === 0) return null;
@@ -303,7 +205,7 @@ async function resolveSingleNamedOwnerExcluding(
   for (const sid of symbolIds) {
     const p = db.findNamedParent(sid);
     if (!p) continue;
-    if (excluded.has(p.typeName)) continue;
+    if (!allowed.has(p.typeName)) continue;
     owners.add(p.id);
     if (owners.size > 1) return null;
   }

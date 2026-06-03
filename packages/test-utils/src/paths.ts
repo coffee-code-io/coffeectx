@@ -6,7 +6,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { COFFEECODE_DIR, DB_DIR } from '@coffeectx/core';
+import { COFFEECODE_DIR, DB_DIR, loadConfig } from '@coffeectx/core';
 
 /** Where backups live. Sibling of `db/` and `snapshots/`. */
 export const BACKUPS_DIR = join(COFFEECODE_DIR, 'backups');
@@ -20,7 +20,20 @@ export const FILE_HASHES_PATH = join(COFFEECODE_DIR, 'file-hashes.json');
 /** Root of Claude Code's per-cwd session JSONLs. */
 export const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
+/**
+ * Resolve the live DB path for a project. Honors `projects.<name>.db` in
+ * `~/.coffeecode/config.yaml` when present — the project key in config can
+ * differ from the DB file basename, so falling back blindly to
+ * `${DB_DIR}/${project}.db` would target the wrong file. Falls back to that
+ * convention only when the project is unregistered (e.g. ad-hoc harness
+ * runs against a fresh restore).
+ */
 export function projectDbPath(project: string): string {
+  try {
+    const cfg = loadConfig();
+    const entry = cfg.projects[project];
+    if (entry?.db) return entry.db;
+  } catch { /* config missing/unreadable — fall through to convention */ }
   return join(DB_DIR, `${project}.db`);
 }
 

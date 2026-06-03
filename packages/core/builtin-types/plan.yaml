@@ -1,13 +1,13 @@
 types:
   Plan:
-    description: A markdown plan authored during a Claude Code "plan mode" turn and saved by Claude to `~/.claude/plans/<slug>.md`. Plans capture the agent's intended implementation approach (context, files to modify, verification) before any code is written, so they're high-signal artefacts for understanding what was about to happen in a session.
+    description: A markdown plan authored during a Claude Code "plan mode" turn and saved by Claude to `~/.claude/plans/<slug>.md`. Plans capture the agent's intended implementation approach (context, files to modify, verification) before any code is written. Each write of a plan file produces a NEW Plan instance — plans are point-in-time captures, not versioned timelines. The owning planning session is recovered via Span.touchedPlans (linker job).
     states: [extracted, linked]
     kind: Map
     fields:
-      name: Symbol         # filename slug (no extension) — also the natural unique key
-      path: Symbol         # absolute path to the .md file on disk
+      name: Symbol         # filename slug (no extension) — NOT unique; same slug rewritten in a later session yields a separate Plan instance
+      path: Symbol         # absolute path to the .md file on disk at write time
       title: Meaning?      # first-line H1 (or first non-empty line) — extracted for summary search
-      content: Meaning     # full markdown body
+      content: Meaning     # full markdown body at write time
       comment: Meaning?    # optional analyst annotation
       relatedFiles:        # File paths mentioned in the plan content (plain strings — File is no longer a node type)
         kind: List
@@ -15,6 +15,3 @@ types:
       relatedSymbols:      # LSP symbol nodes whose name appears in fenced inline code in the plan
         kind: List
         item: AnyLspSymbol
-      acceptedBy:          # Namespaced sessionIds (e.g. "claude:<uuid>") of agent sessions that ran ExitPlanMode against this plan
-        kind: List
-        item: Symbol
