@@ -72,9 +72,9 @@ types:
       isSummary: Symbol?   # "true" iff this is the terminating summary of a Span; absent otherwise
 
   Span:
-    description: A contiguous run of agent activity within a session — kind is 'planning' or 'execution'. Closed spans terminate in an AgentMessage with isSummary="true". `filesChanged` is the union of FileOperation paths in the span; `touchedSymbols` are the latest-at-effectiveEnd LSP symbol versions in those files; `touchedPlans` are Plan instances whose file path appears in filesChanged and whose createdAt sits within (startedAt, effectiveEnd].
+    description: A contiguous run of agent activity within a session — kind is 'planning' or 'execution'. Closed spans terminate in an AgentMessage with isSummary="true". `filesChanged` is the union of FileOperation paths in the span; `touchedSymbols` are the latest-at-effectiveEnd LSP symbol versions in those files; `touchedPlans` are Plan instances whose file path appears in filesChanged and whose createdAt sits within (startedAt, effectiveEnd]. State machine `extracted → linked → indexed` — the indexer job consumes spans at `linked` and advances them to `indexed` after the agent run finishes.
     hidden: true
-    states: [extracted, linked]
+    states: [extracted, linked, indexed]
     kind: Map
     fields:
       sessionId: Symbol

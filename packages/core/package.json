@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^v12.4.5",
+    "diff": "^7.0.0",
     "openai": "^6.27.0",
     "sqlite-vec": "^0.1.6",
     "uuid": "^10.0.0",
@@ -30,6 +31,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
+    "@types/diff": "^7.0.0",
     "@types/node": "^20.14.0",
     "@types/uuid": "^10.0.0",
     "typescript": "^5.4.5"

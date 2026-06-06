@@ -1,0 +1,54 @@
+types:
+  TextContract:
+    description: A natural-language agreement between two components — what each side is responsible for.
+    kind: Map
+    fields:
+      description: Meaning
+      parties:
+        kind: List
+        item: Symbol          # component, module, or function names involved
+      obligations:
+        kind: List
+        item: Meaning         # one obligation per party or shared responsibility
+
+  ArgValidator:
+    description: A validation rule on a function argument — the invariant that must hold on entry.
+    kind: Map
+    fields:
+      function: Symbol        # fully qualified function name (e.g. "UserService.createUser")
+      argument: Symbol        # parameter name (e.g. "email")
+      rule: Meaning           # invariant in natural language (e.g. "must be a valid RFC 5322 address")
+      errorMessage: Meaning
+      symbol:                 # the LspFunction or LspMethod node for this function (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod]
+
+  EntityMapping:
+    description: A cardinality relationship between two domain entities — how many of each relate.
+    kind: Map
+    fields:
+      from: Symbol            # source entity name
+      to: Symbol              # target entity name
+      cardinality: Symbol     # "1-1" | "1-many" | "many-1" | "many-many"
+      description: Meaning
+
+  Unique:
+    description: A uniqueness constraint — the set of fields that must be unique for an entity.
+    kind: Map
+    fields:
+      entity: Symbol
+      fields:
+        kind: List
+        item: Symbol          # field names forming the unique key
+      description: Meaning
+
+  Relation:
+    description: A named directed relation between two entities — type, cardinality, and semantics.
+    kind: Map
+    fields:
+      from: Symbol
+      to: Symbol
+      name: Symbol            # verb or phrase labelling the relation (e.g. "owns", "depends-on")
+      type: Symbol            # "association" | "aggregation" | "composition" | "dependency"
+      cardinality: Symbol     # "1-1" | "1-many" | "many-many"
+      description: Meaning

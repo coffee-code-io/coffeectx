@@ -80,6 +80,16 @@ export interface Skill {
    * pi itself only accepts exact names in `tools: string[]`.
    */
   allowedTools?: ReadonlyArray<string>;
+  /**
+   * True iff the skill's front-matter sets `coffeecode.indexer: true`. The
+   * unified per-Span indexer runner enumerates these and injects each one's
+   * `name` + `description` into the base prompt as a routing catalog —
+   * the agent then invokes `/skill:<name>` when a span matches.
+   *
+   * Decoupled from `typesPath` so a skill can contribute *only* a prompt
+   * (operating on built-in types) without forcing a synthetic YAML.
+   */
+  isIndexer: boolean;
 }
 
 // ── Filesystem layout ──────────────────────────────────────────────────────
@@ -202,6 +212,7 @@ function loadOneSkill(dirName: string, skillDir: string, skillPath: string, cate
     typesPath: resolveTypesPath(skillDir, cc.types),
     requiredEnv: parseRequiredEnv(cc.requiredEnv),
     allowedTools: parseAllowedTools(front),
+    isIndexer: cc.indexer === true,
   };
 }
 
@@ -242,6 +253,8 @@ interface RawCoffeecodeBlock {
   job?: RawJobSpec;
   types?: unknown;
   requiredEnv?: unknown;
+  /** Marker flag — opts the skill into the per-Span indexer's routing catalog. */
+  indexer?: boolean;
   // Legacy `loadInto` is silently ignored; per-agent visibility moved to
   // `projects.<p>.skills` config in the v2 refactor.
 }

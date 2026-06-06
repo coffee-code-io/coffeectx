@@ -1808,6 +1808,55 @@ export class Db implements QueryDb {
     }));
   }
 
+  /**
+   * Resolve a node id to its timeline id. Used by the span-markdown renderer
+   * to walk timeline history given only an LSP-symbol $id reference (which
+   * may point at any version on the timeline, not just the head).
+   * Returns null when no row with that id exists.
+   */
+  getTimelineIdOf(nodeId: string): string | null {
+    const row = this.raw
+      .prepare(`SELECT timeline_id FROM nodes WHERE id = ?`)
+      .get(nodeId) as { timeline_id: string | null } | undefined;
+    return row?.timeline_id ?? null;
+  }
+
+  /**
+   * Return the highest-version row on `timelineId` whose `created_at` is
+   * strictly less than `beforeMs`. Used by the span renderer to pick the
+   * "pre-span" baseline version for diff + prior-comment lookup. Returns
+   * null when nothing predates the cutoff (i.e. the symbol is brand-new
+   * relative to the span).
+   */
+  getVersionBefore(
+    timelineId: string,
+    beforeMs: number,
+  ): { id: string; version: number; createdAt: number; tombstone: boolean } | null {
+    const row = this.raw
+      .prepare(
+        `SELECT id, version, created_at AS createdAt, tombstone
+           FROM nodes
+          WHERE timeline_id = ?
+            AND created_at IS NOT NULL
+            AND created_at < ?
+          ORDER BY version DESC
+          LIMIT 1`,
+      )
+      .get(timelineId, beforeMs) as {
+        id: string;
+        version: number;
+        createdAt: number;
+        tombstone: number;
+      } | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      version: row.version,
+      createdAt: row.createdAt,
+      tombstone: row.tombstone === 1,
+    };
+  }
+
   // ── QueryDb interface ──────────────────────────────────────────────────────
 
   queryById(id: string): string[] {

@@ -26,8 +26,7 @@ import type { AuthSettings, Db } from '@coffeectx/core';
 import { buildPiAuth } from './auth.js';
 import { buildGraphTools } from './piTools.js';
 import { buildResourceLoader } from './skillResourceLoader.js';
-import { PROJECT_ROOT } from './runEventStreamSkill.js';
-import { ProviderError } from './runEventStreamSkill.js';
+import { PROJECT_ROOT, ProviderError } from './common.js';
 import {
   DEFAULT_USER_JOB_TOOLS,
   PI_BUILTIN_TOOL_NAMES,

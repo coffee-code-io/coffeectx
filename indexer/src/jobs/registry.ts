@@ -8,10 +8,10 @@
  *   - codex             : index OpenAI Codex CLI sessions from ~/.codex/.
  *   - pi                : index pi.dev session JSONLs from a configured dir.
  *   - plans             : ingest Claude plan-mode markdown files.
- *   - local-decisions   : agent extracts local decisions from new log events;
- *                         prompt at indexer/prompts/local-decisions.md.
- *   - lsp-enrichment    : agent fills in comments on Lsp* symbol nodes;
- *                         prompt at indexer/prompts/lsp-enrichment.md.
+ *   - span-link         : link Spans to LSP symbols + Plans at endedAt.
+ *   - indexer           : per-Span unified knowledge extraction; prompt at
+ *                         indexer/prompts/indexer.md. Replaces the old
+ *                         local-decisions + lsp-enrichment passes.
  *
  * User skills under `~/.coffeecode/skills/<name>/` that declare a
  * `coffeecode.job` block in their SKILL.md front-matter are also registered
@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { Db, CoffeectxConfig, AuthSettings, Skill, SkillTrigger } from '@coffeectx/core';
 import { loadAllSkills, parseTriggers } from '@coffeectx/core';
 import { runUserJob } from '../agentRun/runUserJob.js';
+import { runSpanIndexer } from '../agentRun/runSpanIndexer.js';
 import type { Job, JobTrigger } from './types.js';
 import { indexWithLsp } from '../lsp/indexSymbols.js';
 import { indexAgentSessions } from '../agentLog/indexLogs.js';
@@ -32,7 +33,6 @@ import { linkSpans } from '../agentLog/spanLink.js';
 import { ClaudeProvider } from '../agentLog/providers/claude.js';
 import { CodexProvider } from '../agentLog/providers/codex.js';
 import { PiProvider } from '../agentLog/providers/pi.js';
-import { runOneSkill } from '../agentRun/indexAgent.js';
 import { loadFileHashes } from '../fileHashes.js';
 import { indexPlans } from '../plans/indexPlans.js';
 
@@ -45,22 +45,6 @@ const DEFAULT_SKILL_FALLBACK_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
 const DEFAULT_PLANS_DIR = join(homedir(), '.claude', 'plans');
 const DEFAULT_CODEX_STATE_PATH = join(homedir(), '.codex', 'state_5.sqlite');
-
-/**
- * Named types whose transition to the `linked` state should fan out to the
- * indexing skill jobs (`local-decisions`, `lsp-enrichment`). Per-event
- * agent-log types are out — they no longer carry a state machine, since
- * symbol attribution now happens at the Span level. Spans + Plans are the
- * only kinds that travel `extracted → linked`. The fallback timer on each
- * job is the safety net for state-machine misses.
- */
-const SKILL_TRIGGER_TYPES = ['Span', 'Plan'];
-
-interface SkillJobState {
-  processedEventIds?: string[];
-  /** Catch-up cursor (rowid) maintained by the scheduler. */
-  cursor?: number;
-}
 
 function projectJobParams(
   config: CoffeectxConfig,
@@ -276,88 +260,99 @@ function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
   };
 }
 
+function loadPrompt(file: string): string {
+  return readFileSync(join(PROMPTS_DIR, file), 'utf-8');
+}
+
 /**
- * Generic agent-log skill job builder. Used by the two hardcoded built-ins
- * (`local-decisions`, `lsp-enrichment`) AND by user skills whose body is a
- * SKILL.md and whose triggers match the agent-log linked-state pattern.
+ * Per-Span unified indexer job.
  *
- * Shape: every batch is a chunk of new log events grouped by session; the
- * agent's prompt is replayed for each batch and the resulting `$id`-bearing
- * upserts land via `upsertEntries`. Progress is persisted in
- * `jobs.state_json.processedEventIds`.
+ * Triggers on every Span flipping to `linked` (the linker has just
+ * attached touched symbols + plans). For each such Span the job renders
+ * a Markdown document (`formatSpanMd`), kicks off a fresh pi.dev session,
+ * lets the agent emit `upsert_entries` for `LocalDecision` / `Decision`
+ * / `Assumption` / `ChangeEvent` + comment patches on `Lsp*` symbols,
+ * and finally advances the Span to `indexed` so the trigger doesn't
+ * re-fire.
+ *
+ * The fallback timer is the catch-up safety net — same pattern as
+ * `span-link` — for state-machine misses (e.g. linker ran in a previous
+ * process so its `state-change` event was never seen by this scheduler).
  */
-function buildAgentLogJob(args: {
-  name: string;
-  description: string;
-  prompt: string;
-  defaultEnabled: boolean;
-  triggers: JobTrigger[];
-}): Job {
-  const { name, description, prompt, defaultEnabled, triggers } = args;
+function buildIndexerJob(config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, 'indexer');
+  const prompt = loadPrompt('indexer.md');
   return {
-    name,
-    description,
-    defaultEnabled,
-    triggers,
+    name: 'indexer',
+    description: 'Per-Span knowledge extraction: decisions, assumptions, change events, LSP-symbol comments, and skill-routed types.',
+    defaultEnabled: false,
+    triggers: [
+      { kind: 'onNodeState', typeNames: ['Span'], state: 'linked' },
+      { kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_SKILL_FALLBACK_INTERVAL_MS) },
+    ],
     async run(ctx) {
-      const initial = (ctx.db.getJobState<SkillJobState>(name)) ?? {};
-      const processed = new Set<string>(initial.processedEventIds ?? []);
       const auth = (ctx.parameters['auth'] as AuthSettings | undefined) ?? {};
-      const batchStep = typeof ctx.parameters['batchStep'] === 'number'
-        ? (ctx.parameters['batchStep'] as number)
-        : undefined;
-      // Skill jobs write structured knowledge — the agent MUST be able to
-      // call upsert_entries. The project's mcp.tools.insert flag only gates
-      // the *external* MCP server's exposure to Claude Desktop & friends;
-      // the in-process agent is unrelated.
-      const allowInsert = true;
+      if (!auth.authType) {
+        throw new Error('indexer job requires parameters.auth (authType + model + apiKey)');
+      }
+      // Indexer skills surface as `/skill:<name>` routing options in the
+      // base prompt. The resource loader still filters them through the
+      // project's `indexingAgents` bucket — this catalog is purely the
+      // prompt-level hint.
+      const indexerSkills = loadAllSkills().filter(s => s.isIndexer);
 
-      const r = await runOneSkill({
-        db: ctx.db,
-        projectName: ctx.project.name,
-        skillName: name,
-        prompt,
-        processedEventIds: processed,
-        auth,
-        batchStep,
-        allowInsert,
-        signal: ctx.signal,
-        onBatchProcessed: async (newlyProcessed) => {
-          for (const id of newlyProcessed) processed.add(id);
-          const fresh = (ctx.db.getJobState<SkillJobState>(name)) ?? {};
-          fresh.processedEventIds = Array.from(processed);
-          ctx.db.setJobState(name, fresh);
-        },
-      });
+      const spans = findLinkedSpans(ctx.db);
+      if (spans.length === 0) {
+        return { message: 'no spans at state=linked' };
+      }
 
-      if (r.errors.length > 0) {
-        const first = r.errors[0]!;
-        throw new Error(`${r.errors.length} skill error(s); first: ${first.error}`);
+      let indexed = 0;
+      const errors: Array<{ spanId: string; error: string }> = [];
+      for (const spanId of spans) {
+        if (ctx.signal?.aborted) break;
+        try {
+          await runSpanIndexer({
+            db: ctx.db,
+            projectName: ctx.project.name,
+            spanId,
+            basePrompt: prompt,
+            indexerSkills,
+            auth,
+            signal: ctx.signal,
+          });
+          ctx.db.setNodeState(spanId, 'indexed');
+          indexed++;
+        } catch (err) {
+          if (ctx.signal?.aborted) break;
+          errors.push({ spanId, error: (err as Error).message });
+        }
+      }
+
+      if (errors.length > 0) {
+        const first = errors[0]!;
+        throw new Error(`${errors.length} span error(s); first: ${first.spanId}: ${first.error}`);
       }
       return {
-        message: `${r.sessions} sessions, ${r.events} events, ${r.batches} batches`,
-        metrics: { sessions: r.sessions, events: r.events, batches: r.batches },
+        message: `${indexed} span(s) indexed`,
+        metrics: { indexed, scanned: spans.length },
       };
     },
   };
 }
 
-function loadPrompt(file: string): string {
-  return readFileSync(join(PROMPTS_DIR, file), 'utf-8');
-}
-
-function buildLocalDecisionsJob(config: CoffeectxConfig, projectName: string): Job {
-  const params = projectJobParams(config, projectName, 'local-decisions');
-  return buildAgentLogJob({
-    name: 'local-decisions',
-    description: 'Extract local decisions, implementation choices, and concrete change events from agent session events.',
-    prompt: loadPrompt('local-decisions.md'),
-    defaultEnabled: false,
-    triggers: [
-      { kind: 'onNodeState', typeNames: SKILL_TRIGGER_TYPES, state: 'linked' },
-      { kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_SKILL_FALLBACK_INTERVAL_MS) },
-    ],
-  });
+/**
+ * Find every Span node currently at state `linked` — the queue the
+ * indexer job consumes. Skips `indexed` (already done) and `extracted`
+ * (linker hasn't run yet).
+ */
+function findLinkedSpans(db: Db): string[] {
+  const out: string[] = [];
+  const ids = db.queryByNamedType(['Span']);
+  for (const id of ids) {
+    const state = db.getNodeState(id);
+    if (state === 'linked') out.push(id);
+  }
+  return out;
 }
 
 function buildSpanLinkJob(): Job {
@@ -386,20 +381,6 @@ function buildSpanLinkJob(): Job {
       };
     },
   };
-}
-
-function buildLspEnrichmentJob(config: CoffeectxConfig, projectName: string): Job {
-  const params = projectJobParams(config, projectName, 'lsp-enrichment');
-  return buildAgentLogJob({
-    name: 'lsp-enrichment',
-    description: 'Patch comments onto Lsp* symbol nodes touched by recent file operations.',
-    prompt: loadPrompt('lsp-enrichment.md'),
-    defaultEnabled: false,
-    triggers: [
-      { kind: 'onNodeState', typeNames: SKILL_TRIGGER_TYPES, state: 'linked' },
-      { kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_SKILL_FALLBACK_INTERVAL_MS) },
-    ],
-  });
 }
 
 /**
@@ -512,9 +493,8 @@ export function buildJobs(_db: Db, config: CoffeectxConfig, projectName: string)
   jobs.push(buildCodexJob(config, projectName));
   jobs.push(buildPiJob(config, projectName));
   jobs.push(buildPlansJob(config, projectName));
-  jobs.push(buildLocalDecisionsJob(config, projectName));
-  jobs.push(buildLspEnrichmentJob(config, projectName));
   jobs.push(buildSpanLinkJob());
+  jobs.push(buildIndexerJob(config, projectName));
 
   // User skills + jobs. Skills from `~/.coffeecode/skills/` are
   // agent-loadable only (no job registration here — pi's ResourceLoader

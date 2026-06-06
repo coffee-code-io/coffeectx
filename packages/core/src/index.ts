@@ -62,6 +62,8 @@ export { loadSkillsFromDir, loadAllSkills, defaultUserSkillsDir, defaultUserJobs
 export type { Skill, SkillTrigger, SkillJobSpec, SkillCategory, LoadAllSkillsOptions } from './skills.js';
 export { SCHEMA_DDL, VEC_TABLE_DDL, makeVecTableDDL } from './schema.js';
 export { formatDeepNode } from './deepFormat.js';
+export { formatSpanMd } from './spanMd.js';
+export type { SpanMdOptions } from './spanMd.js';
 export { parseQuery, executeQuery } from './query.js';
 export type {
   Query,

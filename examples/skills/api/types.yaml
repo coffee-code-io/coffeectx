@@ -1,0 +1,64 @@
+types:
+  Endpoint:
+    description: An HTTP route handler — method, path, handler function, and purpose.
+    kind: Map
+    fields:
+      path: Symbol            # URL pattern, e.g. "/api/v1/users/:id"
+      method: Symbol          # "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS"
+      description: Meaning
+      handler: Symbol         # function or controller name
+      tags:
+        kind: List
+        item: Symbol          # grouping tags (e.g. "auth", "admin")
+      symbol:                 # the LspFunction/LspMethod implementing this handler (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod]
+
+  CliCommand:
+    description: A command-line command or subcommand — name, flags, and what it does.
+    kind: Map
+    fields:
+      name: Symbol            # command name, e.g. "index" or "retrival-index init"
+      description: Meaning    # what the command does
+      args:
+        kind: List
+        item: Symbol          # positional argument names
+      flags:
+        kind: List
+        item: Symbol          # flag names including leading dashes (e.g. "--project", "--dry-run")
+      symbol:                 # the LspFunction node implementing this command (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod]
+
+  InterfaceMethod:
+    description: A public method on a class or interface that forms part of its API contract.
+    kind: Map
+    fields:
+      interface: Symbol       # class or interface name
+      name: Symbol            # method name
+      signature: Symbol       # e.g. "(id: string): Promise<User>"
+      description: Meaning
+      symbol:                 # the LspMethod node for this method (use { "$id": "uuid" })
+        kind: Or
+        types: [LspMethod, LspFunction]
+
+  McpTool:
+    description: An MCP tool exposed by this server — name, description, and input schema summary.
+    kind: Map
+    fields:
+      name: Symbol            # tool name as registered, e.g. "search"
+      description: Meaning    # what the tool does
+      inputSchema: Symbol?    # Zod schema or type name describing the input
+      symbol:                 # the LspFunction/LspMethod implementing this tool (use { "$id": "uuid" })
+        kind: Or
+        types: [LspFunction, LspMethod]
+
+  ApiSchema:
+    description: A named data schema or DTO — the contract shape shared between components.
+    kind: Map
+    fields:
+      name: Symbol
+      description: Meaning
+      symbol:                 # the LspInterface/LspClass node defining this schema (use { "$id": "uuid" })
+        kind: Or
+        types: [LspInterface, LspClass]

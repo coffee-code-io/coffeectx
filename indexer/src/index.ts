@@ -17,7 +17,11 @@
  *   exact <value>                           Exact symbol match
  *   regex <pattern>                         Regex symbol match
  *   insert-entries <file.json>              Insert typed entries from a JSON file
- *   load-node <id> [--depth <n>]            Load a node by ID
+ *   load-node <id> [--depth <n>] [--format <json|span-md>]
+ *                                            Load a node by ID. `span-md`
+ *                                            requires the node to be a Span
+ *                                            and emits the agent-facing
+ *                                            Markdown render.
  *
  * Scheduler:
  *   daemonize                                Start the scheduler (runs jobs by trigger)
@@ -35,7 +39,7 @@ import { writeFileSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Db, syncAllTypes, syncFromDir, parseQuery, executeQuery, formatDeepNode, createEmbedFn, loadConfig, resolveProjectEmbed, listEnabledProjects } from '@coffeectx/core';
+import { Db, syncAllTypes, syncFromDir, parseQuery, executeQuery, formatDeepNode, formatSpanMd, createEmbedFn, loadConfig, resolveProjectEmbed, listEnabledProjects } from '@coffeectx/core';
 import type { InsertEntry } from '@coffeectx/core';
 import { initProject, interactiveSeedJobs, promptProjectName } from './init.js';
 import {
@@ -315,11 +319,15 @@ switch (command) {
     //   load-node <id>                          # exact row
     //   load-node --timeline <uuid>             # current version of timeline
     //   load-node --timeline <uuid> --version N # specific (timeline, version)
+    // Output formats (--format):
+    //   json     — default; the DeepNode tree via formatDeepNode.
+    //   span-md  — Span-only; the agent-facing Markdown render. Errors
+    //              if the resolved node is not a Span.
     const nodeId = positional(1);
     const timelineId = flag('--timeline');
     const versionArg = flag('--version');
     if (!nodeId && !timelineId) {
-      console.error('Usage: coffeectx-index load-node <id> [--depth <n>] [--project <name>]');
+      console.error('Usage: coffeectx-index load-node <id> [--depth <n>] [--format <json|span-md>] [--project <name>]');
       console.error('   or: coffeectx-index load-node --timeline <uuid> [--version <n>] [--depth <n>] [--project <name>]');
       db.close();
       process.exit(1);
@@ -340,6 +348,12 @@ switch (command) {
         process.exit(1);
       }
     }
+    const format = flag('--format') ?? 'json';
+    if (format !== 'json' && format !== 'span-md') {
+      console.error(`--format must be one of: json, span-md (got "${format}")`);
+      db.close();
+      process.exit(1);
+    }
     const verbose = args.includes('--verbose') || args.includes('-v');
     let node;
     let resolvedId = nodeId ?? timelineId!;
@@ -357,6 +371,25 @@ switch (command) {
       console.error((err as Error).message);
       db.close();
       process.exit(1);
+    }
+    if (format === 'span-md') {
+      // span-md goes straight to stdout — the agent reads it as plain text,
+      // the operator eyeballs it for diff/symbol coverage. No JSON wrapper.
+      if (node.kind !== 'map' || node.typeName !== 'Span') {
+        const got = node.kind === 'map' ? (node.typeName ?? '(unnamed map)') : node.kind;
+        console.error(`--format span-md requires the node to be a Span (got "${got}")`);
+        db.close();
+        process.exit(1);
+      }
+      try {
+        const out = formatSpanMd(db, resolvedId);
+        process.stdout.write(out);
+      } catch (err) {
+        console.error((err as Error).message);
+        db.close();
+        process.exit(1);
+      }
+      break;
     }
     const output = verbose
       ? { id: resolvedId, depth, node }
