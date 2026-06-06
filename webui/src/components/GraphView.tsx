@@ -5,9 +5,16 @@ import {
   Background,
   Controls,
   MiniMap,
+  BaseEdge,
+  getStraightPath,
+  useInternalNode,
+  MarkerType,
   type Node,
   type Edge,
+  type EdgeProps,
+  type EdgeTypes,
   type NodeMouseHandler,
+  type InternalNode,
 } from '@xyflow/react';
 import {
   forceSimulation,
@@ -86,6 +93,8 @@ export function GraphView() {
 
   const onNodeClick: NodeMouseHandler = (_, n) => setSelected(n.id);
 
+  const edgeTypes = useMemo<EdgeTypes>(() => ({ floating: FloatingEdge }), []);
+
   if (!project) return <Placeholder>Pick a project to begin.</Placeholder>;
   if (query.isLoading) return <Placeholder>Searching…</Placeholder>;
   if (query.error) return <Placeholder error>{(query.error as Error).message}</Placeholder>;
@@ -98,6 +107,7 @@ export function GraphView() {
         <ReactFlow
           nodes={nodes}
           edges={edges}
+          edgeTypes={edgeTypes}
           onNodeClick={onNodeClick}
           fitView
           minZoom={0.1}
@@ -192,13 +202,66 @@ function useGraph(
           id: `${m.id}__${out.id}`,
           source: m.id,
           target: out.id,
+          type: 'floating',
           animated: false,
-          style: { stroke: '#C19A6B' },
+          style: { stroke: '#C19A6B', strokeWidth: 1.5 },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: '#C19A6B',
+            width: 14,
+            height: 14,
+          },
         });
       }
     }
   }
   return { nodes, edges };
+}
+
+/**
+ * Edge that anchors to each node's perimeter rather than fixed
+ * top/bottom handles. For each end, we draw a straight line from the
+ * source-centre to the target-centre and clip both ends at the
+ * intersection with the node's bounding rectangle. With a force-directed
+ * layout the line then exits the node at the side facing its partner,
+ * eliminating the zigzag where edges loop around to reach a fixed
+ * handle on the far side of the box.
+ */
+function FloatingEdge({ id, source, target, style, markerEnd }: EdgeProps) {
+  const sourceNode = useInternalNode(source);
+  const targetNode = useInternalNode(target);
+  if (!sourceNode || !targetNode) return null;
+  const { sx, sy, tx, ty } = getFloatingEdgeEndpoints(sourceNode, targetNode);
+  const [edgePath] = getStraightPath({ sourceX: sx, sourceY: sy, targetX: tx, targetY: ty });
+  return <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />;
+}
+
+/** Line-rectangle intersection from `centre(other)` toward `centre(node)`,
+ *  clipped to `node`'s half-width / half-height. Returns the point where
+ *  the edge should anchor on `node`'s border. */
+function getNodePerimeterPoint(node: InternalNode, other: InternalNode): { x: number; y: number } {
+  const w = node.measured?.width ?? (node as { width?: number }).width ?? 80;
+  const h = node.measured?.height ?? (node as { height?: number }).height ?? 36;
+  const ow = other.measured?.width ?? (other as { width?: number }).width ?? 80;
+  const oh = other.measured?.height ?? (other as { height?: number }).height ?? 36;
+  const cx = (node.internals.positionAbsolute?.x ?? node.position.x) + w / 2;
+  const cy = (node.internals.positionAbsolute?.y ?? node.position.y) + h / 2;
+  const ox = (other.internals.positionAbsolute?.x ?? other.position.x) + ow / 2;
+  const oy = (other.internals.positionAbsolute?.y ?? other.position.y) + oh / 2;
+  const dx = ox - cx;
+  const dy = oy - cy;
+  if (dx === 0 && dy === 0) return { x: cx, y: cy };
+  // Scale to clip at whichever edge (x or y) the line hits first.
+  const sx = dx === 0 ? Infinity : (w / 2) / Math.abs(dx);
+  const sy = dy === 0 ? Infinity : (h / 2) / Math.abs(dy);
+  const t = Math.min(sx, sy);
+  return { x: cx + dx * t, y: cy + dy * t };
+}
+
+function getFloatingEdgeEndpoints(source: InternalNode, target: InternalNode): { sx: number; sy: number; tx: number; ty: number } {
+  const s = getNodePerimeterPoint(source, target);
+  const t = getNodePerimeterPoint(target, source);
+  return { sx: s.x, sy: s.y, tx: t.x, ty: t.y };
 }
 
 function Placeholder({ children, error = false }: { children: React.ReactNode; error?: boolean }) {
