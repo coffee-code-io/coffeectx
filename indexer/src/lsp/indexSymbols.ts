@@ -214,6 +214,13 @@ interface ExistingSymbol {
   containerName: string;
   filePath: string;
   hash: string;
+  /** State of the *current* head version on the timeline. `null` for legacy
+   *  rows inserted before the state machine landed. The indexer treats
+   *  `null` the same as `'final'` — sealed, must bump on change. */
+  state: string | null;
+  /** `createdAt` of the current head version, used to look up which span
+   *  bracketed the version's birth and decide patch-overwrite vs bump. */
+  createdAt: number | null;
 }
 
 interface ExistingIndex {
@@ -221,6 +228,21 @@ interface ExistingIndex {
   byKey: Map<string, ExistingSymbol>;
   /** All existing symbols grouped by file_path; used for the delete pass. */
   byFile: Map<string, ExistingSymbol[]>;
+}
+
+interface SpanInterval {
+  spanId: string;
+  startedAt: number;
+  effectiveEnd: number;
+}
+
+/** Sorted-by-startedAt finalised-span intervals. Used by the indexer to
+ *  bracket a snapshot's `mtimeMs` against the span that contains it. */
+interface IntervalIndex {
+  intervals: SpanInterval[];
+  /** Returns the spanId whose `(startedAt, effectiveEnd]` contains `ts`,
+   *  or null when no finalised span brackets the moment. */
+  lookup(ts: number): string | null;
 }
 
 function stableKey(typeName: string, filePath: string, name: string, containerName: string): string {
@@ -306,7 +328,12 @@ function buildExistingIndex(db: Db): ExistingIndex {
       const filePath = atomText(node.entries['file_path']) ?? '';
       if (!name || !filePath) continue;
       const hash = hashStoredSymbol(node);
-      const existing: ExistingSymbol = { id, typeName, name, containerName, filePath, hash };
+      const state = db.getNodeState(id);
+      const ts = db.getNodeTimestamps(id);
+      const existing: ExistingSymbol = {
+        id, typeName, name, containerName, filePath, hash,
+        state, createdAt: ts?.createdAt ?? null,
+      };
       byKey.set(stableKey(typeName, filePath, name, containerName), existing);
       const bucket = byFile.get(filePath) ?? [];
       bucket.push(existing);
@@ -370,6 +397,14 @@ export async function indexWithLsp(
 
   const { supervisor, lastConsumedTs = 0, cutoffMs } = options;
   const existingIndex = buildExistingIndex(db);
+  // Build (startedAt, effectiveEnd] interval map of finalised Spans. Used
+  // to (a) gate which snapshots we even process — a snapshot whose
+  // mtimeMs falls outside every finalised span is deferred until a span
+  // closes around it — and (b) decide overwrite-in-place vs bump.
+  const intervalIndex = buildSpanIntervalIndex(db);
+  // Set of LSP node ids touched this run that are currently in state
+  // `new`. Promoted to `final` at the end of the run.
+  const newNodesThisRun = new Map<string, string>();   // id → typeName
 
   // Build the (relPath, snapshots) list. With a supervisor we drain its
   // index since the last consumed ts (the supervisor's initial scan
@@ -417,58 +452,94 @@ export async function indexWithLsp(
       const { relPath, snapshots } = planned[idx]!;
       progress.tick(idx, relPath);
 
-      // Pick the most-recent snapshot the LSP server can read. Snapshots
-      // are ordered ascending; walk from newest to oldest. A zero-symbol
-      // result is a valid parse — re-export-only `index.ts`, comment-only
-      // headers, etc. all legitimately yield no DocumentSymbols. Only an
-      // exception (thrown by `documentSymbols`) is treated as a failed
-      // parse worth walking back from.
-      let picked: { entry: SnapshotEntry; rawSymbols: (DocumentSymbol | SymbolInformation)[]; sourceLines: string[] } | null = null;
-      for (let s = snapshots.length - 1; s >= 0; s--) {
+      // `aliveAtCursor` carries forward across snapshots inside ONE file
+      // so we can detect deletions: keys alive after snapshot N but
+      // absent from snapshot N+1's records were removed by whatever
+      // happened between them. Seeded from the existing-DB view of the
+      // file so a deletion in the very first new snapshot is also
+      // caught.
+      const aliveAtCursor = new Set<string>();
+      for (const sym of existingIndex.byFile.get(relPath) ?? []) {
+        aliveAtCursor.add(stableKey(sym.typeName, relPath, sym.name, sym.containerName));
+      }
+
+      let appliedAny = false;
+      for (let s = 0; s < snapshots.length; s++) {
         const entry = snapshots[s]!;
+        // mtimeMs is when the writer (kernel) actually touched the file —
+        // it's also the value the span linker matches against. Bracket
+        // against finalised spans only; snapshots in an open/unindexed
+        // window are deferred (no rows written this run).
+        const snapshotTs = entry.mtimeMs || entry.ts;
+        const bracketSpanId = intervalIndex.lookup(snapshotTs);
+        if (bracketSpanId == null) continue;
+
+        let rawSymbols: (DocumentSymbol | SymbolInformation)[] | null = null;
+        let sourceLines: string[] | null = null;
         try {
           if (!existsSync(entry.snapshotPath)) continue;
           const sourceText = readFileSync(entry.snapshotPath, 'utf-8');
-          const rawSymbols = await client.documentSymbols(entry.snapshotPath);
-          picked = { entry, rawSymbols, sourceLines: sourceText.split('\n') };
-          break;
+          rawSymbols = await client.documentSymbols(entry.snapshotPath);
+          sourceLines = sourceText.split('\n');
         } catch {
-          // Try the next older snapshot.
+          continue;
         }
+        const records: SymbolRecord[] = [];
+        if (isDocumentSymbolArray(rawSymbols!)) {
+          flattenDocumentSymbols(rawSymbols as DocumentSymbol[], '', records);
+        } else {
+          flattenSymbolInformation(rawSymbols as SymbolInformation[], records);
+        }
+        for (const rec of records) {
+          if (LEAF_TYPES.has(rec.typeName)) {
+            rec.source = sliceSource(sourceLines!, rec.line, rec.endLine);
+          }
+        }
+        reindexedFiles.add(relPath);
+        await applyFileRecordsAtSnapshot(
+          db, relPath, records,
+          existingIndex, aliveAtCursor,
+          bracketSpanId, intervalIndex,
+          snapshotTs, newNodesThisRun, result,
+        );
+        appliedAny = true;
       }
 
-      if (!picked) {
-        result.errors.push({ file: relPath, error: 'no snapshot parsed' });
+      if (!appliedAny) {
+        result.errors.push({ file: relPath, error: 'no snapshot in finalised span' });
         continue;
       }
-
-      const records: SymbolRecord[] = [];
-      if (isDocumentSymbolArray(picked.rawSymbols)) {
-        flattenDocumentSymbols(picked.rawSymbols as DocumentSymbol[], '', records);
-      } else {
-        flattenSymbolInformation(picked.rawSymbols as SymbolInformation[], records);
-      }
-
-      // Fill `source` for function-likes from the snapshot bytes.
-      for (const rec of records) {
-        if (LEAF_TYPES.has(rec.typeName)) {
-          rec.source = sliceSource(picked.sourceLines, rec.line, rec.endLine);
-        }
-      }
-
-      reindexedFiles.add(relPath);
-      await applyFileRecords(db, relPath, records, existingIndex, result, picked.entry.ts);
     }
     progress.done(`${result.nodes} new, ${result.bumped} bumped, ${result.deleted} deleted`);
   } finally {
     await client.shutdown();
   }
 
-  // Delete pass — anything in a reindexed file that wasn't covered by the
-  // freshly-extracted records gets tombstoned. The covered set is tracked
-  // inside applyFileRecords via existingIndex.byKey (matched entries are
-  // removed from byFile during processing).
-  await tombstoneOrphans(db, reindexedFiles, existingIndex, result);
+  // Promote every `new` LSP row we touched this run → `final`. By
+  // construction (§2 in the plan) every snapshot we processed was in a
+  // finalised span, so `new` is purely transient — a crash-safety bit
+  // we clear before the linker sees the rows.
+  for (const [id, typeName] of newNodesThisRun) {
+    try {
+      const r = await db.insertEntries([{ id, type: typeName, data: {}, state: 'final' } as InsertEntry]);
+      if (r.errors.length > 0) {
+        pushErrors(result, '<promote>', r.errors);
+      }
+    } catch (err) {
+      result.errors.push({ file: '<promote>', error: `promote ${id}: ${(err as Error).message}` });
+    }
+  }
+
+  // Fallback: files we couldn't process any snapshot of (no eligible
+  // bracket span found, parse errors on every snapshot). For those, the
+  // per-snapshot delete tracking didn't run, so we still walk byFile and
+  // tombstone everything. Uses delete+bumpVersion (the only deletion
+  // model after the db.ts refactor).
+  const fallbackFiles = new Set<string>();
+  for (const { relPath } of planned) {
+    if (!reindexedFiles.has(relPath)) fallbackFiles.add(relPath);
+  }
+  await tombstoneOrphans(db, fallbackFiles, existingIndex, result);
 
   if (supervisor) {
     result.consumedTs = maxTs;
@@ -478,19 +549,69 @@ export async function indexWithLsp(
   return result;
 }
 
+function buildSpanIntervalIndex(db: Db): IntervalIndex {
+  const intervals: SpanInterval[] = [];
+  for (const spanId of db.queryByNamedType(['Span'])) {
+    const startFid = db.getMapFieldId(spanId, 'startedAt');
+    const endFid = db.getMapFieldId(spanId, 'effectiveEnd');
+    if (!startFid || !endFid) continue;
+    const startNode = db.loadNode(startFid);
+    const endNode = db.loadNode(endFid);
+    if (startNode.kind !== 'atom' || startNode.atom.kind !== 'symbol') continue;
+    if (endNode.kind !== 'atom' || endNode.atom.kind !== 'symbol') continue;
+    const startedAt = Number(startNode.atom.value);
+    const effectiveEnd = Number(endNode.atom.value);
+    if (!Number.isFinite(startedAt) || !Number.isFinite(effectiveEnd)) continue;
+    intervals.push({ spanId, startedAt, effectiveEnd });
+  }
+  intervals.sort((a, b) => a.startedAt - b.startedAt);
+  return {
+    intervals,
+    lookup(ts: number): string | null {
+      // Linear scan — interval counts are O(spans-per-project). For the
+      // sizes we see (hundreds) this is fine; if it ever needs to scale
+      // swap in a binary search over the sorted-by-startedAt array.
+      for (const iv of intervals) {
+        if (ts > iv.startedAt && ts <= iv.effectiveEnd) return iv.spanId;
+      }
+      return null;
+    },
+  };
+}
+
 /**
- * Apply the extracted records for a single file. Mutates `existingIndex` so
- * the delete pass at the end only sees genuinely-orphaned rows.
+ * Apply one snapshot's records against the running per-file state. Decides
+ * per record whether to:
+ *   - no-op (hash matches the existing alive head);
+ *   - overwrite the head in place (existing is `new` AND lives in the same
+ *     bracketing span as this snapshot — see types.ts InsertEntry.overwrite);
+ *   - bump a new `new` version (existing is sealed `final`/`linked` OR was
+ *     born in a different span);
+ *   - create a fresh node (no prior entry — either truly new or post-
+ *     resurrection where a previous tombstone broke continuity).
+ * After records: any key in `aliveAtCursor` that's NOT in this snapshot's
+ * records was deleted between snapshots — emit a delete+bumpVersion
+ * tombstone with createdAt = snapshot mtime so the linker can attribute
+ * it to the right span.
+ *
+ * `aliveAtCursor` is mutated to reflect the snapshot's view after return.
+ * `newNodesThisRun` accumulates ids touched in state `new` for the final
+ * promotion pass.
  */
-async function applyFileRecords(
+async function applyFileRecordsAtSnapshot(
   db: Db,
   relPath: string,
   records: SymbolRecord[],
   existingIndex: ExistingIndex,
+  aliveAtCursor: Set<string>,
+  bracketSpanId: string,
+  intervalIndex: IntervalIndex,
+  snapshotTs: number,
+  newNodesThisRun: Map<string, string>,
   result: IndexResult,
-  createdAt: number,
 ): Promise<void> {
-  // Partition records — leaves/enum-likes first, containers second.
+  // Partition records — leaves/enum-likes first, containers second so
+  // containers can resolve children by $id.
   const leaves: SymbolRecord[] = [];
   const containers: SymbolRecord[] = [];
   for (const r of records) {
@@ -498,120 +619,144 @@ async function applyFileRecords(
     else leaves.push(r);
   }
 
-  // Track key → resolved id for the in-batch lookup pass 2 needs.
   const idByLocalKey = new Map<string, string>();
-  const remainingInFile = new Set((existingIndex.byFile.get(relPath) ?? []).map(s => s.id));
+  const seenKeys = new Set<string>();
 
-  // Pass 1: leaves + enum-likes ───────────────────────────────────────────────
-  for (const rec of leaves) {
+  const applyOne = async (rec: SymbolRecord, recHash: string, data: Record<string, unknown>): Promise<void> => {
     const key = stableKey(rec.typeName, relPath, rec.name, rec.containerName);
+    seenKeys.add(key);
     const existing = existingIndex.byKey.get(key);
-    const recHash = hashRecord(rec);
+
     if (existing && existing.hash === recHash) {
+      // No content change. Touch updated_at so debug UIs see the visit
+      // and stamp createdAt forward if the existing head is `new` — the
+      // version's "as-of" moment moves with the latest in-span snapshot.
       idByLocalKey.set(key, existing.id);
-      remainingInFile.delete(existing.id);
-      continue;
-    }
-    const data = buildEntryData(rec, relPath);
-    if (existing) {
-      // bump — same timeline, new version. `createdAt` is the picked
-      // snapshot's ts so the version's "as of" time matches when that
-      // source state existed on disk (drives span-link picking).
-      const r = await db.insertEntries([{ id: existing.id, type: rec.typeName, data, bumpVersion: true, createdAt } as InsertEntry]);
-      pushErrors(result, relPath, r.errors);
-      const newId = r.ids[0];
-      if (newId) {
-        idByLocalKey.set(key, newId);
-        result.bumped += 1;
-        // Replace the index entry so subsequent re-runs in the same job
-        // don't redundantly bump.
-        existing.id = newId;
-        existing.hash = recHash;
+      if (existing.state === 'new' && intervalIndex.lookup(existing.createdAt ?? -1) === bracketSpanId) {
+        try {
+          await db.insertEntries([{
+            id: existing.id, type: rec.typeName, data: {},
+            updatedAt: snapshotTs,
+          } as InsertEntry]);
+          existing.createdAt = snapshotTs;
+        } catch { /* no-op patch failures don't block the snapshot */ }
       }
-      remainingInFile.delete(existing.id);
-    } else {
-      const r = await db.insertEntries([{ type: rec.typeName, data, createdAt }]);
+      return;
+    }
+
+    if (!existing) {
+      const r = await db.insertEntries([{ type: rec.typeName, data, createdAt: snapshotTs }]);
       pushErrors(result, relPath, r.errors);
       const newId = r.ids[0];
       if (newId) {
         idByLocalKey.set(key, newId);
         result.nodes += 1;
+        newNodesThisRun.set(newId, rec.typeName);
         const fresh: ExistingSymbol = {
           id: newId, typeName: rec.typeName, name: rec.name,
           containerName: rec.containerName, filePath: relPath, hash: recHash,
+          state: 'new', createdAt: snapshotTs,
         };
         existingIndex.byKey.set(key, fresh);
         const bucket = existingIndex.byFile.get(relPath) ?? [];
         bucket.push(fresh);
         existingIndex.byFile.set(relPath, bucket);
       }
+      return;
     }
+
+    // Existing head is alive but content differs. Overwrite if it's the
+    // same span's `new` row, otherwise bump.
+    const sameSpan = existing.state === 'new'
+      && intervalIndex.lookup(existing.createdAt ?? -1) === bracketSpanId;
+    if (sameSpan) {
+      const r = await db.insertEntries([{
+        id: existing.id, type: rec.typeName, data,
+        overwrite: true, createdAt: snapshotTs, updatedAt: snapshotTs,
+      } as InsertEntry]);
+      pushErrors(result, relPath, r.errors);
+      if (r.errors.length === 0) {
+        idByLocalKey.set(key, existing.id);
+        existing.hash = recHash;
+        existing.createdAt = snapshotTs;
+        newNodesThisRun.set(existing.id, rec.typeName);
+      }
+      return;
+    }
+
+    // Different span (or final/linked). Bump a fresh new-state version.
+    const r = await db.insertEntries([{
+      id: existing.id, type: rec.typeName, data,
+      bumpVersion: true, createdAt: snapshotTs,
+    } as InsertEntry]);
+    pushErrors(result, relPath, r.errors);
+    const newId = r.ids[0];
+    if (newId) {
+      idByLocalKey.set(key, newId);
+      result.bumped += 1;
+      newNodesThisRun.set(newId, rec.typeName);
+      existing.id = newId;
+      existing.hash = recHash;
+      existing.state = 'new';
+      existing.createdAt = snapshotTs;
+    }
+  };
+
+  // Pass 1: leaves + enum-likes ───────────────────────────────────────────────
+  for (const rec of leaves) {
+    const recHash = hashRecord(rec);
+    const data = buildEntryData(rec, relPath);
+    await applyOne(rec, recHash, data);
   }
 
-  // Pass 2: containers (with children $id refs from pass 1) ──────────────────
+  // Pass 2: containers (with children $id refs resolved from pass 1) ────────
   for (const rec of containers) {
     const childIds: string[] = [];
     for (const child of rec.rawChildren ?? []) {
       const childTypeName = kindToTypeName(child.kind);
       if (!childTypeName || isAnonymous(child.name)) continue;
-      // Containers contain leaves, enum-likes, AND nested containers. Look up
-      // any kind we know about.
       const cKey = stableKey(childTypeName, relPath, child.name, rec.name);
       const cId = idByLocalKey.get(cKey);
       if (cId) childIds.push(cId);
     }
-    const key = stableKey(rec.typeName, relPath, rec.name, rec.containerName);
-    const existing = existingIndex.byKey.get(key);
     const recHash = hashRecord(rec, childIds);
-    if (existing && existing.hash === recHash) {
-      idByLocalKey.set(key, existing.id);
-      remainingInFile.delete(existing.id);
-      continue;
-    }
     const data = buildEntryData(rec, relPath);
     data['children'] = childIds.map(id => ({ $id: id }));
-    if (existing) {
-      const r = await db.insertEntries([{ id: existing.id, type: rec.typeName, data, bumpVersion: true, createdAt } as InsertEntry]);
+    await applyOne(rec, recHash, data);
+  }
+
+  // Per-snapshot deletion: keys alive going into this snapshot but absent
+  // from its records were removed by whatever happened between snapshots.
+  // Emit a delete+bumpVersion tombstone so the linker can attribute it.
+  for (const key of aliveAtCursor) {
+    if (seenKeys.has(key)) continue;
+    const existing = existingIndex.byKey.get(key);
+    if (!existing) continue;
+    try {
+      const r = await db.insertEntries([{
+        id: existing.id, type: existing.typeName, data: {},
+        delete: true, bumpVersion: true, createdAt: snapshotTs,
+      } as InsertEntry]);
       pushErrors(result, relPath, r.errors);
       const newId = r.ids[0];
       if (newId) {
-        idByLocalKey.set(key, newId);
-        result.bumped += 1;
+        result.deleted += 1;
+        newNodesThisRun.set(newId, existing.typeName);
         existing.id = newId;
-        existing.hash = recHash;
+        existing.state = 'new';
+        existing.createdAt = snapshotTs;
+        // Tombstone in DB; drop the byKey entry so a same-name resurrection
+        // later starts a fresh timeline.
+        existingIndex.byKey.delete(key);
       }
-      remainingInFile.delete(existing.id);
-    } else {
-      const r = await db.insertEntries([{ type: rec.typeName, data, createdAt }]);
-      pushErrors(result, relPath, r.errors);
-      const newId = r.ids[0];
-      if (newId) {
-        idByLocalKey.set(key, newId);
-        result.nodes += 1;
-        const fresh: ExistingSymbol = {
-          id: newId, typeName: rec.typeName, name: rec.name,
-          containerName: rec.containerName, filePath: relPath, hash: recHash,
-        };
-        existingIndex.byKey.set(key, fresh);
-        const bucket = existingIndex.byFile.get(relPath) ?? [];
-        bucket.push(fresh);
-        existingIndex.byFile.set(relPath, bucket);
-      }
+    } catch (err) {
+      result.errors.push({ file: relPath, error: `tombstone ${existing.id}: ${(err as Error).message}` });
     }
   }
 
-  // Mark the un-touched existing rows in this file for the delete pass.
-  // They've stayed in `byFile`'s bucket; the post-pass tombstone walker
-  // will check membership in `reindexedFiles` and tombstone them.
-  if (remainingInFile.size > 0) {
-    const bucket = existingIndex.byFile.get(relPath) ?? [];
-    existingIndex.byFile.set(
-      relPath,
-      bucket.filter(s => remainingInFile.has(s.id)),
-    );
-  } else {
-    existingIndex.byFile.set(relPath, []);
-  }
+  // Refresh aliveAtCursor → exactly the keys present in this snapshot.
+  aliveAtCursor.clear();
+  for (const k of seenKeys) aliveAtCursor.add(k);
 }
 
 function buildEntryData(rec: SymbolRecord, relPath: string): Record<string, unknown> {
@@ -651,16 +796,18 @@ function pushErrors(
  */
 async function tombstoneOrphans(
   db: Db,
-  reindexedFiles: Set<string>,
+  files: Set<string>,
   existingIndex: ExistingIndex,
   result: IndexResult,
 ): Promise<void> {
-  for (const relPath of reindexedFiles) {
+  const nowMs = Date.now();
+  for (const relPath of files) {
     const orphans = existingIndex.byFile.get(relPath) ?? [];
     for (const orphan of orphans) {
       try {
         const r = await db.insertEntries([{
-          id: orphan.id, type: orphan.typeName, data: {}, delete: true,
+          id: orphan.id, type: orphan.typeName, data: {},
+          delete: true, bumpVersion: true, createdAt: nowMs,
         } as InsertEntry]);
         pushErrors(result, relPath, r.errors);
         if (r.errors.length === 0) result.deleted += 1;

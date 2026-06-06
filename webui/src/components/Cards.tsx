@@ -111,25 +111,49 @@ function ValueView({ value, depth, budget, fieldName }: ValueProps) {
 
 function TypedCard({ obj, depth, budget }: { obj: Record<string, unknown>; depth: number; budget: CardBudget }) {
   // Strip the system-level metadata keys so they don't render as data
-  // rows. Versioning identity ($timeline_id / $version / $tombstone)
-  // lives in the NodeDetail header chip; timestamps render below via
-  // their own styled row.
+  // rows. Versioning identity ($timeline_id / $version) lives in the
+  // NodeDetail header chip; timestamps render below via their own
+  // styled row. $tombstone surfaces here as a visible "deleted" badge.
   const {
     $type,
     $id: _id,
     $state,
     $timeline_id: _tid,
     $version: _ver,
-    $tombstone: _tomb,
+    $tombstone,
     $created_at,
     $updated_at,
     ...rest
   } = obj;
-  void _id; void _tid; void _ver; void _tomb;
+  void _id; void _tid; void _ver;
+  const isTombstoned = $tombstone === true || $tombstone === 1 || $tombstone === '1';
+  // Distinguish a deletion-bump version (no body, the row IS the
+  // deletion event) from a superseded-by-bump v_prev (full body
+  // carried forward, just no longer head). The user-facing "deleted"
+  // badge only applies to the former — the latter renders normally
+  // because it represents the symbol's state at some earlier moment.
+  const isDeletionEvent = isTombstoned && Object.keys(rest).length === 0;
   return (
-    <div className="bg-cream-100 border border-cream-200 rounded-lg p-3 space-y-2 animate-fade-up">
+    <div
+      className={
+        'border rounded-lg p-3 space-y-2 animate-fade-up ' +
+        (isDeletionEvent
+          ? 'bg-red-50 border-red-300 opacity-90'
+          : 'bg-cream-100 border-cream-200')
+      }
+    >
       <div className="flex items-baseline justify-between gap-2">
-        <div className="text-[10px] uppercase tracking-widest text-roast-light">{String($type)}</div>
+        <div className="flex items-baseline gap-2">
+          <div className={
+            'text-[10px] uppercase tracking-widest ' +
+            (isDeletionEvent ? 'text-red-700 line-through' : 'text-roast-light')
+          }>{String($type)}</div>
+          {isDeletionEvent && (
+            <div className="text-[10px] uppercase tracking-widest font-bold text-red-700 bg-red-100 border border-red-300 rounded px-1.5 py-0.5">
+              deleted
+            </div>
+          )}
+        </div>
         {typeof $state === 'string' && (
           <div className="text-[10px] font-mono text-roast-light">
             state:{' '}

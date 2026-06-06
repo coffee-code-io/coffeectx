@@ -2,12 +2,15 @@
  * Span linker — LSP symbols + Plan instances.
  *
  * For each Span we walk twice:
- *   1. LSP — for each filesChanged entry, gather symbol timelines whose
- *      latest version with `createdAt ≤ endedAt` is non-tombstoned. Append
- *      those ids into `touchedSymbols`.
+ *   1. LSP — for each filesChanged entry, gather symbol-timeline versions
+ *      whose `createdAt` falls in `(startedAt, effectiveEnd]` (a version
+ *      born inside the span = the agent actually rewrote that symbol).
+ *      Skip if the picked version is the timeline head AND tombstoned —
+ *      that's a deletion-then-recreation we don't want to attach. Append
+ *      ids into `touchedSymbols`.
  *   2. Plans — for each filesChanged entry, gather Plan nodes whose `path`
- *      matches and whose `createdAt` falls in `(startedAt, endedAt]` (the
- *      plan was minted during this span). Append those ids into
+ *      matches and whose `createdAt` falls in `(startedAt, effectiveEnd]`
+ *      (the plan was minted during this span). Append ids into
  *      `touchedPlans`.
  *
  * Both passes share one Span iteration and one terminal state bump
@@ -19,7 +22,7 @@
  * for cases where the symbol/plan rows arrive after the span was first seen.
  */
 
-import type { Db, DeepNode } from '@coffeectx/core';
+import type { Db, DeepNode, InsertEntry } from '@coffeectx/core';
 import { SPAN_LINK_EPS_MS } from './spans.js';
 
 const LSP_TYPES = [
@@ -66,9 +69,9 @@ export async function linkSpans(db: Db, opts: { repoPath?: string } = {}): Promi
       if (!needsSymbols && !needsPlans) continue;
 
       // ── LSP pass ────────────────────────────────────────────────────────
-      const symbolIds = needsSymbols
-        ? gatherTouchedSymbols(filesChanged, effectiveEnd, byFile, opts.repoPath)
-        : new Set<string>();
+      const symbolByType = needsSymbols
+        ? gatherTouchedSymbols(filesChanged, startedAt, effectiveEnd, byFile, opts.repoPath)
+        : new Map<string, string>();
 
       // ── Plans pass ──────────────────────────────────────────────────────
       const planIds = needsPlans
@@ -76,14 +79,23 @@ export async function linkSpans(db: Db, opts: { repoPath?: string } = {}): Promi
         : new Set<string>();
 
       // No-op early exit for already-`linked` spans with nothing to add.
-      if (state === 'linked' && symbolIds.size === 0 && planIds.size === 0) continue;
+      if (state === 'linked' && symbolByType.size === 0 && planIds.size === 0) continue;
 
       let symbolsAdded = 0;
       let plansAdded = 0;
-      if (symbolIds.size > 0) {
+      if (symbolByType.size > 0) {
         const listId = db.getMapFieldId(spanId, 'touchedSymbols');
-        if (listId) symbolsAdded = db.appendListItemsUnique(listId, [...symbolIds]);
+        if (listId) symbolsAdded = db.appendListItemsUnique(listId, [...symbolByType.keys()]);
         else result.errors.push({ spanId, error: 'touchedSymbols field missing' });
+        // Promote every attached LSP version `final → linked`. Best-effort —
+        // a stuck row stays at `final` and the next repair pass will retry.
+        for (const [id, typeName] of symbolByType) {
+          try {
+            await db.insertEntries([{ id, type: typeName, data: {}, state: 'linked' } as InsertEntry]);
+          } catch (err) {
+            result.errors.push({ spanId, error: `promote ${id}: ${(err as Error).message}` });
+          }
+        }
       }
       if (planIds.size > 0) {
         const listId = db.getMapFieldId(spanId, 'touchedPlans');
@@ -125,6 +137,7 @@ export async function linkSpans(db: Db, opts: { repoPath?: string } = {}): Promi
 
 interface LspIndexed {
   id: string;
+  typeName: string;
   timelineId: string;
   version: number;
   createdAt: number | null;
@@ -135,27 +148,41 @@ function buildLspIndexByFile(db: Db): Map<string, LspIndexed[]> {
   const out = new Map<string, LspIndexed[]>();
   // queryByNamedType returns only non-tombstoned current versions, but for
   // `touchedSymbols` at a past time we need every version — walk all
-  // timelines through listTimelineVersions instead.
+  // timelines through listTimelineVersions instead. We also include
+  // tombstones whose file_path can still be recovered from the prior
+  // alive version: a tombstone version itself has no body, so we copy
+  // file_path forward from the most recent alive version on the same
+  // timeline.
   const seenTimeline = new Set<string>();
   const headIds = db.queryByNamedType(LSP_TYPES);
   for (const headId of headIds) {
     try {
       const meta = (db as unknown as {
         raw: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } };
-      }).raw.prepare(`SELECT timeline_id FROM nodes WHERE id = ?`).get(headId) as
-        | { timeline_id: string } | undefined;
+      }).raw.prepare(`SELECT timeline_id, (SELECT name FROM named_types WHERE type_id=nodes.type_id) AS type_name FROM nodes WHERE id = ?`).get(headId) as
+        | { timeline_id: string; type_name: string } | undefined;
       const timelineId = meta?.timeline_id;
-      if (!timelineId || seenTimeline.has(timelineId)) continue;
+      const typeName = meta?.type_name;
+      if (!timelineId || !typeName || seenTimeline.has(timelineId)) continue;
       seenTimeline.add(timelineId);
-      // For each version of the timeline gather (id, file_path, createdAt,
-      // tombstone). file_path is the same across versions of an LSP symbol
-      // (renames produce a delete+new-timeline pair, not a rename).
+      // Walk versions oldest → newest. file_path carries forward from
+      // the most recent alive sibling so tombstone-bumps still bucket
+      // under the right file.
+      // Versions come oldest → newest. Read file_path directly when the
+      // row has it (superseded-by-bump v_prev rows still carry the field
+      // forward); fall back to the last-known alive sibling's file_path
+      // for empty rows (deletion-bump tombstone versions have no body).
+      let lastKnownFilePath: string | null = null;
       for (const row of db.listTimelineVersions(timelineId)) {
-        const fp = readMapSymbol(db, row.id, 'file_path');
+        if (row.state === 'new') continue;
+        let fp = readMapSymbol(db, row.id, 'file_path');
+        if (fp) lastKnownFilePath = fp;
+        else fp = lastKnownFilePath;
         if (!fp) continue;
         const bucket = out.get(fp) ?? [];
         bucket.push({
           id: row.id,
+          typeName,
           timelineId,
           version: row.version,
           createdAt: row.createdAt,
@@ -165,16 +192,55 @@ function buildLspIndexByFile(db: Db): Map<string, LspIndexed[]> {
       }
     } catch { /* best-effort */ }
   }
+  // queryByNamedType excludes tombstone heads, so a fully-deleted
+  // timeline (final version is tombstone) won't be discovered above.
+  // Walk those explicitly by scanning timelines whose head is tombstoned.
+  const tombstonedHeads = (db as unknown as {
+    raw: { prepare: (sql: string) => { all: (...args: unknown[]) => unknown[] } };
+  }).raw.prepare(
+    `SELECT n.id, n.timeline_id AS timelineId,
+            (SELECT name FROM named_types WHERE type_id=n.type_id) AS typeName
+       FROM nodes n
+       JOIN named_types nt ON nt.type_id = n.type_id
+      WHERE nt.name IN (${LSP_TYPES.map(() => '?').join(',')})
+        AND n.tombstone = 1
+        AND n.version = (SELECT MAX(version) FROM nodes WHERE timeline_id = n.timeline_id)`,
+  ).all(...LSP_TYPES) as Array<{ id: string; timelineId: string; typeName: string }>;
+  for (const head of tombstonedHeads) {
+    if (seenTimeline.has(head.timelineId)) continue;
+    seenTimeline.add(head.timelineId);
+    let lastKnownFilePath: string | null = null;
+    for (const row of db.listTimelineVersions(head.timelineId)) {
+      if (row.state === 'new') continue;
+      let fp = readMapSymbol(db, row.id, 'file_path');
+      if (fp) lastKnownFilePath = fp;
+      else fp = lastKnownFilePath;
+      if (!fp) continue;
+      const bucket = out.get(fp) ?? [];
+      bucket.push({
+        id: row.id,
+        typeName: head.typeName,
+        timelineId: head.timelineId,
+        version: row.version,
+        createdAt: row.createdAt,
+        tombstone: row.tombstone,
+      });
+      out.set(fp, bucket);
+    }
+  }
   return out;
 }
 
 function gatherTouchedSymbols(
   filesChanged: string[],
+  startedAt: number | null,
   cutoff: number,
   byFile: Map<string, LspIndexed[]>,
   repoPath: string | undefined,
-): Set<string> {
-  const out = new Set<string>();
+): Map<string, string> {
+  // id → typeName so the caller can promote each attached version
+  // `final → linked` without a second DB round-trip per id.
+  const out = new Map<string, string>();
   for (const rawPath of filesChanged) {
     // Historical spans stored absolute paths in `filesChanged` before the
     // indexer started relativizing them. Strip the repo prefix at lookup
@@ -183,22 +249,28 @@ function gatherTouchedSymbols(
     const relPath = relativizeForLookup(rawPath, repoPath);
     const symbols = byFile.get(relPath);
     if (!symbols) continue;
-    // Group by timeline; pick the largest createdAt ≤ cutoff. The tombstone
-    // flag means "superseded later" — only treat it as a real delete when
-    // the picked version is also the timeline head.
+    // Per timeline: pick the largest createdAt in (startedAt, cutoff]. A
+    // version born inside this window means the agent rewrote that symbol
+    // during the span. Versions outside the window — older or newer — mean
+    // the symbol existed in the file but wasn't touched here; we drop them
+    // so a span doesn't pick up every neighbor symbol in a file it edited.
     const byTimeline = new Map<string, LspIndexed>();
     const headVersion = new Map<string, number>();
     for (const s of symbols) {
       const prevHead = headVersion.get(s.timelineId) ?? -Infinity;
       if (s.version > prevHead) headVersion.set(s.timelineId, s.version);
-      if (s.createdAt == null || s.createdAt > cutoff) continue;
+      if (s.createdAt == null) continue;
+      if (s.createdAt > cutoff) continue;
+      if (startedAt != null && s.createdAt <= startedAt) continue;
       const prev = byTimeline.get(s.timelineId);
       if (!prev || s.createdAt > (prev.createdAt ?? -Infinity)) byTimeline.set(s.timelineId, s);
     }
     for (const s of byTimeline.values()) {
-      const isHead = s.version === headVersion.get(s.timelineId);
-      if (s.tombstone && isHead) continue;
-      out.add(s.id);
+      // Include tombstone heads — a tombstone-version born inside the
+      // span window IS the deletion event the diff agent wants to see.
+      // Downstream consumers check `nodes.tombstone` and render
+      // deletions distinctly.
+      out.set(s.id, s.typeName);
     }
   }
   return out;

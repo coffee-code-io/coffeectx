@@ -27,7 +27,8 @@ Commands:
   run                      [--project <name>] [--skip-lsp] [--close-before-ms <ms>]
                                                Execute the full pipeline once.
   replay   <name>          [--project <name>] [--skip-lsp] [--close-before-ms <ms>]
-                                               Shorthand for restore + run.
+                                               Shorthand for restore + run. <name> also accepted as --name <name>.
+                                               --close-before-ms defaults to Number.MAX_SAFE_INTEGER so every span finalises.
   list                                         List backups under ~/.coffeecode/backups/.
   help                                         Show this message.
 
@@ -101,14 +102,20 @@ async function main(): Promise<void> {
 
     case 'replay': {
       requireProject(project);
-      const name = positional(rest);
+      const name = (flags['--name'] as string | undefined) ?? positional(rest);
       if (!name) throw new Error('replay: missing <name>');
       const m = restore({ project: project!, name });
       console.log(`[replay] restored project=${m.project} from backup=${name}`);
+      // Replays operate on historical logs by definition — `Date.now()`
+      // is irrelevant, and using it as the HARD_BREAK anchor breaks any
+      // log whose final event lands within 5 minutes of wall-clock. Pin
+      // the gate far in the future so every span finalises. The caller
+      // can still override with `--close-before-ms`.
+      const closeBeforeMs = numericFlag(flags, '--close-before-ms') ?? Number.MAX_SAFE_INTEGER;
       const r = await runFullChain({
         project: project!,
         skipLsp: !!flags['--skip-lsp'],
-        closeBeforeMs: numericFlag(flags, '--close-before-ms'),
+        closeBeforeMs,
       });
       printRun(r);
       return;

@@ -724,10 +724,35 @@ export class Db implements QueryDb {
             typeInfos.push(null);
             continue;
           }
-          opKinds[i] = 'delete';
-          // Phase 4 only needs the prior id + the priorMeta block; no
-          // typeInfos row required, but we push one so indices line up
-          // with downstream loops.
+          if (!entry.bumpVersion) {
+            // Deletion must mint a new tombstone version on the timeline —
+            // never an in-place flip of the head's tombstone bit. That keeps
+            // the deletion moment (createdAt) and lets the span linker
+            // bracket it against (startedAt, effectiveEnd].
+            errors.push({
+              index: i,
+              path: '',
+              message: `delete on withHistory type "${entry.type}" requires bumpVersion: true (tombstones are first-class versions, not in-place flips)`,
+            });
+            typeInfos.push(null);
+            continue;
+          }
+          if (entry.state != null && !states.includes(entry.state)) {
+            errors.push({
+              index: i,
+              path: '',
+              message: `$state "${entry.state}" not in [${states.join(', ')}] for type "${entry.type}"`,
+            });
+            typeInfos.push(null);
+            continue;
+          }
+          // Same shell-insert path as a regular bump (op 'bump'), but the
+          // v_next row is stamped tombstone=1 and we skip field carry-forward
+          // — tombstone versions have no body. Distinguished from a regular
+          // bump downstream by checking `entry.delete && entry.bumpVersion`.
+          const headState = entry.state ?? states[0]!;
+          targetStates[i] = states.length > 1 ? headState : null;
+          opKinds[i] = 'bump';
           typeInfos.push({ typeId: row.type_id, schema, states });
           continue;
         }
@@ -905,20 +930,23 @@ export class Db implements QueryDb {
 
         const entry = entries[i]!;
         if (op === 'bump') {
-          // New version row of an existing timeline.
+          // New version row of an existing timeline. tombstone=1 only when
+          // this is the deletion-bump combination (delete:true + bumpVersion:true)
+          // — that path skips field carry-forward below.
           const prev = priorMeta[i]!;
           const createdAt = entry.createdAt ?? prev.createdAt ?? nowMs;
           const updatedAt = entry.updatedAt ?? nowMs;
+          const tombstoneOnInsert = entry.delete ? 1 : 0;
           this.raw
             .prepare(
               `INSERT INTO nodes(id, kind, type_id, state, created_at, updated_at,
                                   timeline_id, version, tombstone)
-               VALUES(?,?,?,?,?,?,?,?,0)`,
+               VALUES(?,?,?,?,?,?,?,?,?)`,
             )
             .run(
               id, 'map', ti.typeId, targetStates[i],
               createdAt, updatedAt,
-              prev.timelineId, prev.version + 1,
+              prev.timelineId, prev.version + 1, tombstoneOnInsert,
             );
         } else {
           // Fresh insert. Single-row timeline; defaults version=1, tombstone=0.
@@ -950,6 +978,9 @@ export class Db implements QueryDb {
       // Bump `updated_at` on every patched entry (state change or not).
       // Plain-patch only — bump's updated_at lands on shell insert; delete's
       // updated_at is bumped in its own sub-pass below.
+      // Overwrite-patch can additionally advance `created_at` — the version's
+      // "as-of" moment moves forward when an in-progress (`new`) row is
+      // rewritten by a later snapshot in the same span.
       for (let i = 0; i < entries.length; i++) {
         if (opKinds[i] !== 'patch') continue;
         const entry = entries[i]!;
@@ -957,6 +988,9 @@ export class Db implements QueryDb {
         if (!id) continue;
         const updatedAt = entry.updatedAt ?? nowMs;
         this.raw.prepare(`UPDATE nodes SET updated_at=? WHERE id=?`).run(updatedAt, id);
+        if (entry.overwrite && entry.createdAt != null) {
+          this.raw.prepare(`UPDATE nodes SET created_at=? WHERE id=?`).run(entry.createdAt, id);
+        }
       }
 
       // Write field values for inserts and plain patches.
@@ -973,11 +1007,25 @@ export class Db implements QueryDb {
           const value = entry.data[key];
           if (value == null) continue;
 
-          // Patch mode: skip keys that already exist on the node.
-          if (existingKeys) {
-            if (existingKeys.has(key)) {
+          // Patch mode: skip keys that already exist on the node, UNLESS
+          // `overwrite: true` was set on the entry — then tombstone the
+          // prior anonymous subtree and drop the map_entries row before
+          // inserting the new value. Named-type refs ($id targets) live
+          // in their own timelines and are aliased through unchanged by
+          // tombstoneAnonymousSubtree.
+          if (existingKeys && existingKeys.has(key)) {
+            if (!entry.overwrite) {
               skippedKeys[i]!.push(key);
               continue;
+            }
+            const priorRow = this.raw
+              .prepare(`SELECT value_id FROM map_entries WHERE map_id=? AND key=?`)
+              .get(id, key) as { value_id: string } | undefined;
+            if (priorRow) {
+              this.tombstoneAnonymousSubtree(priorRow.value_id);
+              this.raw
+                .prepare(`DELETE FROM map_entries WHERE map_id=? AND key=?`)
+                .run(id, key);
             }
           }
 
@@ -1003,6 +1051,14 @@ export class Db implements QueryDb {
         const v2Id = allocatedIds[i];
         const entry = entries[i]!;
         if (!ti || !v2Id || !entry.id) continue;
+
+        // Deletion-bump (delete:true + bumpVersion:true): v_next has no body,
+        // skip carry-forward. v_prev still gets tombstoned at the bottom.
+        if (entry.delete) {
+          this.tombstoneAnonymousSubtree(entry.id);
+          this.raw.prepare(`UPDATE nodes SET tombstone = 1 WHERE id = ?`).run(entry.id);
+          continue;
+        }
 
         const priorEntries = this.raw
           .prepare(`SELECT key, value_id FROM map_entries WHERE map_id=?`)
@@ -1064,18 +1120,9 @@ export class Db implements QueryDb {
         this.raw.prepare(`UPDATE nodes SET tombstone = 1 WHERE id = ?`).run(entry.id);
       }
 
-      // ── Delete-specific: walk current's anonymous subtree, tombstone it
-      // and the root, and bump updated_at on the root so debug UIs can see
-      // when the deletion happened.
-      for (let i = 0; i < entries.length; i++) {
-        if (opKinds[i] !== 'delete') continue;
-        const id = allocatedIds[i];
-        if (!id) continue;
-        this.tombstoneAnonymousSubtree(id);
-        this.raw
-          .prepare(`UPDATE nodes SET tombstone = 1, updated_at = ? WHERE id = ?`)
-          .run(nowMs, id);
-      }
+      // (Deletion-bump is handled inside the bump loop above — there is no
+      // separate in-place delete path. `delete: true` always pairs with
+      // `bumpVersion: true` on withHistory types.)
     });
     txn();
 
@@ -1738,10 +1785,10 @@ export class Db implements QueryDb {
    *  inline. Returns empty array when nothing matches. */
   listTimelineVersions(
     timelineId: string,
-  ): Array<{ id: string; version: number; createdAt: number | null; tombstone: boolean }> {
+  ): Array<{ id: string; version: number; createdAt: number | null; tombstone: boolean; state: string | null }> {
     const rows = this.raw
       .prepare(
-        `SELECT id, version, created_at AS createdAt, tombstone
+        `SELECT id, version, created_at AS createdAt, tombstone, state
            FROM nodes WHERE timeline_id = ?
           ORDER BY version`,
       )
@@ -1750,12 +1797,14 @@ export class Db implements QueryDb {
         version: number;
         createdAt: number | null;
         tombstone: number;
+        state: string | null;
       }>;
     return rows.map(r => ({
       id: r.id,
       version: r.version,
       createdAt: r.createdAt,
       tombstone: r.tombstone === 1,
+      state: r.state,
     }));
   }
 

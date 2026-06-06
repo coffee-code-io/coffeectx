@@ -177,14 +177,26 @@ export interface InsertEntry {
   bumpVersion?: boolean;
   /**
    * Only meaningful with `id` set, and only valid for types declaring
-   * `withHistory: true`. Tombstones the current version (and its
-   * anonymous subtree) so the timeline disappears from every search
-   * path and from `node_refs`. The row stays loadable by exact id.
+   * `withHistory: true`. MUST be paired with `bumpVersion: true`:
+   * deletion is modelled as bumping a new tombstone version onto the
+   * timeline (rather than flipping the head's tombstone bit in place),
+   * so the deletion moment carries its own `createdAt` and the span
+   * linker can bracket it inside `(startedAt, effectiveEnd]`. The
+   * v_next row has `tombstone=1` and no field values.
    *
-   * Sourced from the `upsertEntries` tool's top-level `delete` flag;
-   * mutually exclusive with `bumpVersion`.
+   * Sourced from the `upsertEntries` tool's top-level `delete` flag.
    */
   delete?: boolean;
+  /**
+   * Patch-only modifier. When `true`, fields supplied in `data` that
+   * already exist on the node REPLACE the prior value (and tombstone
+   * the prior anonymous subtree) instead of being skipped. Use this
+   * to update an in-progress (`state: 'new'`) row without bumping a
+   * new timeline version. `createdAt` may also be updated under
+   * overwrite — useful when the version's "as-of" moment moves
+   * forward inside a still-open span.
+   */
+  overwrite?: boolean;
 }
 
 export interface InsertResult {
