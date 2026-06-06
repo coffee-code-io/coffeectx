@@ -117,8 +117,19 @@ function bucketSymbols(db: Db, ids: string[], startedAt: number | null): SymbolB
     const prevRow = db.getVersionBefore(timelineId, startedAt);
     const prev = prevRow ? { id: prevRow.id, version: prevRow.version } : null;
 
+    // `cur.tombstone` is true in TWO semantically distinct cases:
+    //  1. real deletion — a `delete + bumpVersion` v_next with empty body
+    //     (no map_entries written), or
+    //  2. supersession — every regular bump tombstones its v_prev row,
+    //     but the row keeps its map_entries (deep-copied to v_next, not
+    //     moved). That happens whenever a LATER span edits the same
+    //     symbol after this span's linker already attached the now-stale
+    //     v_prev id to touchedSymbols.
+    // Discriminate by body presence: deletion v_next has no `name`;
+    // a superseded version still does.
+    const hasBody = atomSymbol(cur.entries['name']) != null;
     let bucket: 'created' | 'updated' | 'removed';
-    if (cur.tombstone) bucket = 'removed';
+    if (cur.tombstone && !hasBody) bucket = 'removed';
     else if (prev == null) bucket = 'created';
     else bucket = 'updated';
 
