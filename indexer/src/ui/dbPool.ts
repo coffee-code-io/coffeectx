@@ -43,3 +43,19 @@ export function closeAll(): void {
     pool.delete(name);
   }
 }
+
+/**
+ * Close the cached Db handle for one project and drop it from the pool.
+ * The next `getDb(project)` call opens a fresh connection — useful after
+ * an external `restore` / `reset` swap of the SQLite file on disk where
+ * the held connection would otherwise keep serving stale rows from the
+ * pre-swap WAL/shm pair.
+ */
+export function invalidate(projectName: string): boolean {
+  const entry = pool.get(projectName);
+  if (!entry) return false;
+  try { entry.db.close(); }
+  catch { /* swallow — the file may already be gone */ }
+  pool.delete(projectName);
+  return true;
+}

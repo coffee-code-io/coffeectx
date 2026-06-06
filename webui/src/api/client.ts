@@ -155,6 +155,15 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
+  /** Tell the UI server to drop its cached Db handle for this project.
+   *  Required after an external `restore` / `reset` swapped the SQLite
+   *  file — the server's held connection would otherwise keep serving
+   *  stale rows. Idempotent: returns reopened=false if no handle was open. */
+  refreshProject: (name: string) =>
+    http<{ name: string; reopened: boolean }>(`/api/projects/${encodeURIComponent(name)}/refresh`, {
+      method: 'POST',
+    }),
+
   listTypes: (project: string) =>
     http<NamedTypeInfo[]>(`/api/p/${encodeURIComponent(project)}/types`),
 

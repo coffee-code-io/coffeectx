@@ -57,7 +57,7 @@ export const useUi = create<UiState>()(
       activeAgentSessionByProject: {},
       debug: false,
       setProject: p => set({ project: p, selectedNodeId: null }),
-      setTab: t => set({ tab: t }),
+      setTab: t => set({ tab: t, selectedNodeId: null }),
       setViewMode: v => set({ viewMode: v }),
       setSelected: id => set({ selectedNodeId: id }),
       setFilter: patch => set(s => ({ filter: { ...s.filter, ...patch } })),

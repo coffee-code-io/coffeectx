@@ -5,6 +5,7 @@
 import { existsSync } from 'node:fs';
 import { loadConfig, updateConfig, listEnabledProjects } from '@coffeectx/core';
 import type { FastifyInstance } from 'fastify';
+import { invalidate as invalidateDb } from '../dbPool.js';
 
 export async function registerProjectsRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/projects', async () => {
@@ -39,6 +40,21 @@ export async function registerProjectsRoutes(app: FastifyInstance): Promise<void
         return { error: (err as Error).message };
       }
       return { name, enabled };
+    },
+  );
+
+  // POST /api/projects/:name/refresh
+  // Drops the cached Db handle for this project. The next request opens a
+  // fresh SQLite connection — required after an external `restore` /
+  // `reset` swap of the .db file, since the held connection keeps
+  // referring to the pre-swap inode (and its WAL/shm pair). Without this
+  // hook the UI would serve stale rows until the server process restart.
+  app.post<{ Params: { name: string } }>(
+    '/api/projects/:name/refresh',
+    async (req) => {
+      const { name } = req.params;
+      const wasOpen = invalidateDb(name);
+      return { name, reopened: wasOpen };
     },
   );
 }

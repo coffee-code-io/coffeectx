@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState, type MouseEvent } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api/client';
 import { decodeUrlState, installPopStateBridge, pushUrlState } from './state/urlState';
 import { ProjectSelector } from './components/ProjectSelector';
@@ -77,6 +77,7 @@ export function App() {
         <ProjectSelector />
         <Tabs current={tab} onChange={setTab} />
         <div className="flex-1" />
+        <RefreshButton />
         <SchedulerDot />
       </header>
 
@@ -110,6 +111,52 @@ export function App() {
         </aside>
       </div>
     </div>
+  );
+}
+
+/**
+ * Header refresh control. Drops the UI server's cached Db handle for the
+ * current project (so the next API request opens a fresh SQLite
+ * connection against the on-disk file — required after an external
+ * `restore` / `reset` swap), then invalidates the React Query cache so
+ * every mounted view refetches against the fresh handle. No page reload
+ * — invalidation alone is enough now that the server side is correct,
+ * and skipping the reload avoids the layout flash.
+ */
+function RefreshButton() {
+  const qc = useQueryClient();
+  const project = useUi(s => s.project);
+  const [spinning, setSpinning] = useState(false);
+  const handle = async (_e: MouseEvent) => {
+    setSpinning(true);
+    try {
+      if (project) {
+        try { await api.refreshProject(project); }
+        catch { /* server may be down; still refresh client-side */ }
+      }
+      await qc.invalidateQueries();
+    } finally {
+      // Hold the spin long enough to read on a fast LAN.
+      window.setTimeout(() => setSpinning(false), 600);
+    }
+  };
+  return (
+    <button
+      onClick={handle}
+      title="Refresh — drop server Db handle and refetch all queries"
+      className="p-1.5 rounded text-roast-medium hover:text-roast-dark hover:bg-cream-200 transition"
+    >
+      <svg
+        viewBox="0 0 24 24" width="16" height="16"
+        fill="none" stroke="currentColor" strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round"
+        className={spinning ? 'animate-spin' : ''}
+      >
+        <polyline points="23 4 23 10 17 10" />
+        <polyline points="1 20 1 14 7 14" />
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+      </svg>
+    </button>
   );
 }
 

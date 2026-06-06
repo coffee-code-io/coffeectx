@@ -39,7 +39,15 @@ export function encodeUrlState(state: UiState): URLSearchParams {
 
 /** Decode a `URLSearchParams` into the partial zustand state slice the
  *  popstate / hydrate bridges hand to `setState`. Tolerant of missing
- *  keys — anything absent stays at its current value. */
+ *  keys — anything absent stays at its current value.
+ *
+ *  Only navigation-shape filter fields (`mode`, `q`, `types`) are
+ *  returned here; `includeHidden` and `depth` are view-preference
+ *  toggles that aren't mirrored to the URL — including them would
+ *  overwrite the persisted (localStorage) preference every time the URL
+ *  changed, dropping the checkbox state on each navigation. The caller's
+ *  merge (`{ ...current.filter, ...decoded.filter }`) keeps the user's
+ *  view prefs intact. */
 export function decodeUrlState(sp: URLSearchParams): Partial<UiState> {
   const out: Partial<UiState> = {};
   const tab = sp.get('tab');
@@ -59,15 +67,8 @@ export function decodeUrlState(sp: URLSearchParams): Partial<UiState> {
   filter.q = sp.get('q') ?? '';
   const types = sp.get('types');
   filter.types = types ? types.split(',').filter(t => t.length > 0) : [];
-  out.filter = { ...defaultFilterTail(), ...filter };
+  out.filter = filter as UiState['filter'];
   return out;
-}
-
-/** The non-URL filter fields keep their defaults when hydrating from
- *  URL — they're not in the URL so we can't reconstruct them, and we
- *  don't want to leak them either. */
-function defaultFilterTail(): UiState['filter'] {
-  return { mode: 'query', q: '', types: [], depth: 0, includeHidden: false };
 }
 
 /**
