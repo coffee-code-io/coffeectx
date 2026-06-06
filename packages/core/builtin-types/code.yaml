@@ -23,7 +23,7 @@ types:
     description: A module symbol (SymbolKind 2) — a source file treated as a named module.
     kind: Map
     withHistory: true
-    states: [new, final, linked]
+    states: [new, final, linked, commented]
     fields:
       name: Symbol
       containerName: Symbol
@@ -38,7 +38,7 @@ types:
     description: A namespace or package symbol (SymbolKind 3) — a named scope grouping related declarations.
     kind: Map
     withHistory: true
-    states: [new, final, linked]
+    states: [new, final, linked, commented]
     fields:
       name: Symbol
       containerName: Symbol
@@ -53,7 +53,7 @@ types:
     description: A class declaration (SymbolKind 5) — a named type with fields and methods. Child methods/constructors are referenced via `children`. Property/field names are not surfaced separately.
     kind: Map
     withHistory: true
-    states: [new, final, linked]
+    states: [new, final, linked, commented]
     fields:
       name: Symbol
       containerName: Symbol
@@ -68,7 +68,7 @@ types:
     description: A method on a class or object (SymbolKind 6) — a named function scoped to a class.
     kind: Map
     withHistory: true
-    states: [new, final, linked]
+    states: [new, final, linked, commented]
     fields:
       name: Symbol
       containerName: Symbol  # owning class name
@@ -81,7 +81,7 @@ types:
     description: A constructor function (SymbolKind 9) — the initializer for a class.
     kind: Map
     withHistory: true
-    states: [new, final, linked]
+    states: [new, final, linked, commented]
     fields:
       name: Symbol           # usually the class name
       containerName: Symbol
@@ -94,7 +94,7 @@ types:
     description: An enum declaration (SymbolKind 10) — a named set of constant members. Member names are flattened into `members` (plain strings, not refs).
     kind: Map
     withHistory: true
-    states: [new, final, linked]
+    states: [new, final, linked, commented]
     fields:
       name: Symbol
       containerName: Symbol
@@ -109,7 +109,7 @@ types:
     description: An interface declaration (SymbolKind 11) — a structural type contract without implementation. Method/property/entry names are flattened into `members` (plain strings, not refs).
     kind: Map
     withHistory: true
-    states: [new, final, linked]
+    states: [new, final, linked, commented]
     fields:
       name: Symbol
       containerName: Symbol
@@ -124,7 +124,7 @@ types:
     description: A top-level or module-scoped function (SymbolKind 12) — not a method.
     kind: Map
     withHistory: true
-    states: [new, final, linked]
+    states: [new, final, linked, commented]
     fields:
       name: Symbol
       containerName: Symbol

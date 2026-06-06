@@ -22,10 +22,10 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
-import type { Db, CoffeectxConfig, AuthSettings, Skill, SkillTrigger } from '@coffeectx/core';
+import type { Db, CoffeectxConfig, AuthSettings, DeepNode, Skill, SkillTrigger } from '@coffeectx/core';
 import { loadAllSkills, parseTriggers } from '@coffeectx/core';
 import { runUserJob } from '../agentRun/runUserJob.js';
-import { runSpanIndexer } from '../agentRun/runSpanIndexer.js';
+import { runSessionIndexer } from '../agentRun/runSessionIndexer.js';
 import type { Job, JobTrigger } from './types.js';
 import { indexWithLsp } from '../lsp/indexSymbols.js';
 import { indexAgentSessions } from '../agentLog/indexLogs.js';
@@ -301,59 +301,98 @@ function buildIndexerJob(config: CoffeectxConfig, projectName: string): Job {
       // prompt-level hint.
       const indexerSkills = loadAllSkills().filter(s => s.isIndexer);
 
-      const spans = findLinkedSpans(ctx.db);
+      const spans = findLinkedSpansWithSession(ctx.db);
       if (spans.length === 0) {
         return { message: 'no spans at state=linked' };
       }
 
+      // Group by sessionId so every pi.dev session sees its own spans as
+      // a coherent conversation, oldest-first. Earlier turns become
+      // context for later ones — that's the whole point of the
+      // per-agent-session reuse.
+      const bySession = new Map<string, typeof spans>();
+      for (const s of spans) {
+        const list = bySession.get(s.sessionId);
+        if (list) list.push(s);
+        else bySession.set(s.sessionId, [s]);
+      }
+
       let indexed = 0;
-      const errors: Array<{ spanId: string; error: string }> = [];
-      for (const spanId of spans) {
+      let sessions = 0;
+      const errors: Array<{ sessionId: string; error: string }> = [];
+      for (const [sessionId, group] of bySession) {
         if (ctx.signal?.aborted) break;
+        group.sort((a, b) => a.startedAt - b.startedAt);
         try {
-          await runSpanIndexer({
+          const r = await runSessionIndexer({
             db: ctx.db,
             projectName: ctx.project.name,
-            spanId,
+            sessionId,
+            spans: group.map(s => ({ id: s.id, startedAt: s.startedAt })),
             basePrompt: prompt,
             indexerSkills,
             auth,
             signal: ctx.signal,
+            // State advance lives here so a setNodeState throw (state
+            // already advanced concurrently, etc.) doesn't get buried
+            // inside the runner.
+            onSpanIndexed: (id) => { ctx.db.setNodeState(id, 'indexed'); },
           });
-          ctx.db.setNodeState(spanId, 'indexed');
-          indexed++;
+          indexed += r.indexed;
+          sessions++;
         } catch (err) {
           if (ctx.signal?.aborted) break;
-          errors.push({ spanId, error: (err as Error).message });
+          errors.push({ sessionId, error: (err as Error).message });
         }
       }
 
       if (errors.length > 0) {
         const first = errors[0]!;
-        throw new Error(`${errors.length} span error(s); first: ${first.spanId}: ${first.error}`);
+        throw new Error(`${errors.length} session error(s); first: ${first.sessionId}: ${first.error}`);
       }
       return {
-        message: `${indexed} span(s) indexed`,
-        metrics: { indexed, scanned: spans.length },
+        message: `${indexed} span(s) indexed across ${sessions} session(s)`,
+        metrics: { indexed, sessions, scanned: spans.length },
       };
     },
   };
 }
 
+interface LinkedSpanRow { id: string; sessionId: string; startedAt: number }
+
 /**
- * Find every Span node currently at state `linked` — the queue the
- * indexer job consumes. Skips `indexed` (already done) and `extracted`
- * (linker hasn't run yet).
+ * Find every Span node currently at state `linked` and pull its
+ * `sessionId` + `startedAt` for grouping/sorting. Skips `indexed`
+ * (already done) and `extracted` (linker hasn't run yet). Spans with an
+ * empty `sessionId` fall back to using the spanId as the session key so
+ * they still get processed in isolation.
  */
-function findLinkedSpans(db: Db): string[] {
-  const out: string[] = [];
+function findLinkedSpansWithSession(db: Db): LinkedSpanRow[] {
+  const out: LinkedSpanRow[] = [];
   const ids = db.queryByNamedType(['Span']);
   for (const id of ids) {
     const state = db.getNodeState(id);
-    if (state === 'linked') out.push(id);
+    if (state !== 'linked') continue;
+    let node;
+    try { node = db.loadNodeDeep(id, 1); }
+    catch { continue; }
+    if (node.kind !== 'map') continue;
+
+    const sessionId = readSymbol(node.entries['sessionId']) ?? id;
+    const startedAtStr = readSymbol(node.entries['startedAt']);
+    const startedAt = startedAtStr ? Number(startedAtStr) : NaN;
+    if (!Number.isFinite(startedAt)) continue;
+    out.push({ id, sessionId, startedAt });
   }
   return out;
 }
+
+function readSymbol(node: DeepNode | undefined): string | null {
+  if (!node || node.kind !== 'atom') return null;
+  if (node.atom.kind !== 'symbol') return null;
+  return node.atom.value;
+}
+
 
 function buildSpanLinkJob(): Job {
   return {
