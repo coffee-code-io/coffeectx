@@ -4,7 +4,9 @@ go 1.22.0
 
 require (
 	cuelang.org/go v0.9.2
+	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/spf13/cobra v1.10.2
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -23,5 +25,4 @@ require (
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/oauth2 v0.20.0 // indirect
 	golang.org/x/text v0.15.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

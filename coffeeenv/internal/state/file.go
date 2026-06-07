@@ -2,10 +2,14 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+
+	toml "github.com/pelletier/go-toml/v2"
+	yaml "gopkg.in/yaml.v3"
 
 	"github.com/coffeectx/coffeeenv/internal/sys"
 )
@@ -15,9 +19,13 @@ func init() { Register(&fileHandler{}) }
 type fileHandler struct{}
 
 type fileDesired struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Mode    uint32 `json:"mode"`
+	Path    string         `json:"path"`
+	Content *string        `json:"content"`
+	Data    map[string]any `json:"data"`
+	Format  string         `json:"format"`
+	Mode    uint32         `json:"mode"`
+
+	rendered []byte // final bytes, computed in Decode
 }
 
 type fileObserved struct {
@@ -40,7 +48,41 @@ func (fileHandler) Decode(rs RawState) (Desired, error) {
 	if p.Mode == 0 {
 		p.Mode = 0o644
 	}
+
+	switch {
+	case p.Content != nil && p.Data != nil:
+		return nil, errors.New("file: set either content or data, not both")
+	case p.Content != nil:
+		p.rendered = []byte(*p.Content)
+	case p.Data != nil:
+		b, err := renderData(p.Data, p.Format)
+		if err != nil {
+			return nil, fmt.Errorf("file %q: %w", p.Path, err)
+		}
+		p.rendered = b
+	default:
+		return nil, errors.New("file: content or data is required")
+	}
 	return &p, nil
+}
+
+// renderData marshals a structured subtree in the requested format. All formats
+// must be deterministic (stable key order) so diffs are idempotent.
+func renderData(data map[string]any, format string) ([]byte, error) {
+	switch format {
+	case "", "json":
+		b, err := json.MarshalIndent(data, "", "  ") // map keys sorted
+		if err != nil {
+			return nil, err
+		}
+		return append(b, '\n'), nil
+	case "toml":
+		return toml.Marshal(data)
+	case "yaml":
+		return yaml.Marshal(data)
+	default:
+		return nil, fmt.Errorf("unknown format %q (want json, toml, or yaml)", format)
+	}
 }
 
 func (fileHandler) Read(_ context.Context, desired Desired) (Observed, error) {
@@ -67,10 +109,10 @@ func (fileHandler) Read(_ context.Context, desired Desired) (Observed, error) {
 func (fileHandler) Diff(desired Desired, observed Observed) ([]Action, error) {
 	d := desired.(*fileDesired)
 	o := observed.(*fileObserved)
-	wantHash := sys.HashBytes([]byte(d.Content))
+	wantHash := sys.HashBytes(d.rendered)
 	wantMode := os.FileMode(d.Mode)
 
-	payload := filePayload{path: o.AbsPath, content: []byte(d.Content), mode: wantMode}
+	payload := filePayload{path: o.AbsPath, content: d.rendered, mode: wantMode}
 	switch {
 	case !o.Exists:
 		return []Action{{StateName: d.Path, Kind: "write-file",

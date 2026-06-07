@@ -25,6 +25,17 @@ type envDesired struct {
 	Name   string `json:"name"`
 	Value  string `json:"value"`
 	Target string `json:"target"`
+	// Expand: when true the value is written with double quotes so shell
+	// references like $PATH expand when the file is sourced (used for PATH
+	// prepends, e.g. "<dir>/node_modules/.bin:$PATH"). Default single-quoted
+	// literal.
+	Expand bool `json:"expand"`
+}
+
+// envVar is a managed variable's stored value plus its quoting mode.
+type envVar struct {
+	Value  string
+	Expand bool
 }
 
 // file returns the managed activate-file path for this env var: the explicit
@@ -36,11 +47,11 @@ func (d *envDesired) file() string {
 	return activatePath()
 }
 
-// envObserved is the current value of this var in the managed file ("" if unset)
-// and whether it was present at all.
+// envObserved is the current state of this var in the managed file.
 type envObserved struct {
 	Present bool
 	Value   string
+	Expand  bool
 }
 
 func (envHandler) Type() string { return "env" }
@@ -63,13 +74,13 @@ func (envHandler) Read(_ context.Context, desired Desired) (Observed, error) {
 		return nil, err
 	}
 	v, ok := vars[d.Name]
-	return &envObserved{Present: ok, Value: v}, nil
+	return &envObserved{Present: ok, Value: v.Value, Expand: v.Expand}, nil
 }
 
 func (envHandler) Diff(desired Desired, observed Observed) ([]Action, error) {
 	d := desired.(*envDesired)
 	o := observed.(*envObserved)
-	if o.Present && o.Value == d.Value {
+	if o.Present && o.Value == d.Value && o.Expand == d.Expand {
 		return nil, nil
 	}
 	verb := "set"
@@ -90,7 +101,7 @@ func (envHandler) Apply(_ context.Context, a Action) error {
 	if err != nil {
 		return err
 	}
-	vars[d.Name] = d.Value
+	vars[d.Name] = envVar{Value: d.Value, Expand: d.Expand}
 	return writeActivate(d.file(), vars)
 }
 
@@ -116,8 +127,8 @@ func displayPath(p string) string {
 	return p
 }
 
-func readActivate(path string) (map[string]string, error) {
-	vars := map[string]string{}
+func readActivate(path string) (map[string]envVar, error) {
+	vars := map[string]envVar{}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -137,12 +148,13 @@ func readActivate(path string) (map[string]string, error) {
 		if !ok {
 			continue
 		}
-		vars[strings.TrimSpace(name)] = unquoteShell(strings.TrimSpace(val))
+		value, expand := unquoteShell(strings.TrimSpace(val))
+		vars[strings.TrimSpace(name)] = envVar{Value: value, Expand: expand}
 	}
 	return vars, sc.Err()
 }
 
-func writeActivate(path string, vars map[string]string) error {
+func writeActivate(path string, vars map[string]envVar) error {
 	names := make([]string, 0, len(vars))
 	for n := range vars {
 		names = append(names, n)
@@ -157,18 +169,29 @@ func writeActivate(path string, vars map[string]string) error {
 	return sys.WriteFileAtomic(path, []byte(b.String()), 0o644)
 }
 
-// quoteShell wraps a value in single quotes, escaping embedded single quotes.
-func quoteShell(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+// quoteShell renders a value for the activate file. Expand vars use double
+// quotes so $-references expand when sourced; others use single-quoted literals.
+func quoteShell(v envVar) string {
+	if v.Expand {
+		// Only escape backslash and double-quote; leave $ live for expansion.
+		s := strings.ReplaceAll(v.Value, `\`, `\\`)
+		s = strings.ReplaceAll(s, `"`, `\"`)
+		return `"` + s + `"`
+	}
+	return "'" + strings.ReplaceAll(v.Value, "'", `'\''`) + "'"
 }
 
-func unquoteShell(s string) string {
+// unquoteShell recovers a value and whether it was double-quoted (expandable).
+func unquoteShell(s string) (string, bool) {
 	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
 		inner := s[1 : len(s)-1]
-		return strings.ReplaceAll(inner, `'\''`, "'")
+		return strings.ReplaceAll(inner, `'\''`, "'"), false
 	}
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
+		inner := s[1 : len(s)-1]
+		inner = strings.ReplaceAll(inner, `\"`, `"`)
+		inner = strings.ReplaceAll(inner, `\\`, `\`)
+		return inner, true
 	}
-	return s
+	return s, false
 }

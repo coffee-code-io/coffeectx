@@ -1,16 +1,15 @@
-// A minimal Claude Code chart on the polymorphic framework. The skill, MCP, and
-// AGENTS.md parts are agent-agnostic — swap claude.#Claude for codex.#Codex
-// (see examples/codex-basic) and they render into Codex's layout instead.
+// Identical to examples/claude-basic except the agent target — proving the
+// skill / MCP / AGENTS.md features are polymorphic across agents.
 package env
 
 import (
 	"coffeeenv.dev/lib/agent"
-	"coffeeenv.dev/lib/agent/claude"
+	"coffeeenv.dev/lib/agent/codex"
 )
 
 states: (agent.#Render & {
 	targets: [
-		claude.#Claude,
+		codex.#Codex,
 		agent.#RegisterAgentMd & {text: "# Project\n\nManaged by coffeeenv."},
 		agent.#RegisterSkill & {skill: {
 			name: "hello"
