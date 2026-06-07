@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "coffeectx-index": "./dist/index.js",
+    "coffeectx": "./dist/index.js",
     "coffeectx-setup": "./dist/setup/index.js",
     "coffeectx-ui": "./dist/ui/index.js"
   },
@@ -21,7 +21,8 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "postinstall": "echo '\n  Run npx coffeectx-setup to configure.\n'",
-    "prepublishOnly": "npm run build",
+    "bundle-webui": "node scripts/bundle-webui.mjs",
+    "prepublishOnly": "npm run build && npm run bundle-webui",
     "ui": "node dist/ui/index.js"
   },
   "dependencies": {

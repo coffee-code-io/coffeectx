@@ -6,8 +6,7 @@
     "secrets/packages/*",
     "mcp",
     "indexer",
-    "webui",
-    "coffeeenv"
+    "webui"
   ],
   "scripts": {
     "build": "npm run build --workspaces",

@@ -35,7 +35,7 @@ export function loadConfig(): ResolvedConfig {
   const config = loadUnifiedConfig();
   const enabled = listEnabledProjects(config);
   if (enabled.length === 0) {
-    throw new Error('No enabled projects in config. Run `coffeectx-index init`.');
+    throw new Error('No enabled projects in config. Run `coffeectx init`.');
   }
 
   const envName = process.env['COFFEECTX_PROJECT'];

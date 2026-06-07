@@ -35,7 +35,7 @@ This will walk you through:
 ### Start the scheduler
 
 ```bash
-npx coffeectx-index daemonize
+npx coffeectx daemonize
 ```
 
 The scheduler runs every enabled job by its trigger:
@@ -45,8 +45,8 @@ The scheduler runs every enabled job by its trigger:
 ### Trigger one job manually
 
 ```bash
-npx coffeectx-index job trigger logs --now      # run inline
-npx coffeectx-index job trigger logs            # queue for the running daemon
+npx coffeectx job trigger logs --now      # run inline
+npx coffeectx job trigger logs            # queue for the running daemon
 ```
 
 ### Toggle jobs
@@ -54,11 +54,11 @@ npx coffeectx-index job trigger logs            # queue for the running daemon
 Each job has a config entry under `jobs:` in `~/.coffeecode/config.yaml`. The CLI flips both the config and the live DB state — a running scheduler picks up the change within ~5s.
 
 ```bash
-npx coffeectx-index job list
-npx coffeectx-index job on lsp
-npx coffeectx-index job off lsp-enrichment
-npx coffeectx-index job status              # all jobs
-npx coffeectx-index job status logs         # one job + recent runs
+npx coffeectx job list
+npx coffeectx job on lsp
+npx coffeectx job off lsp-enrichment
+npx coffeectx job status              # all jobs
+npx coffeectx job status logs         # one job + recent runs
 ```
 
 ### Add as MCP server
