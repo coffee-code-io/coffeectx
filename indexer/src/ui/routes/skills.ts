@@ -68,7 +68,7 @@ export async function registerSkillsRoutes(app: FastifyInstance): Promise<void> 
       const skills = registry.map(s => {
         const jobCfg = projectJobs[s.name];
         const envSet = jobCfg?.env ?? {};
-        const authSet = (jobCfg?.parameters?.['auth'] as AuthSettings | undefined) ?? {};
+        const authSet = jobCfg?.parameters?.['auth'] as AuthSettings | undefined;
         return {
           name: s.name,
           description: s.description ?? null,
@@ -84,13 +84,16 @@ export async function registerSkillsRoutes(app: FastifyInstance): Promise<void> 
            *  When real secret material lands it'll move to a separate
            *  store and stay opaque end-to-end. */
           env: { ...envSet },
-          /** Whether `auth.model` is set — minimum bar for "auth configured". */
-          authConfigured: !!authSet.model,
+          /** Whether the auth block is present and has a model (or is
+           *  OAuth, which doesn't require one). */
+          authConfigured: !!authSet && (authSet.authType === 'openai-oauth' || !!authSet.model),
           /** Truncated auth summary for display. apiKey deliberately omitted. */
           auth: {
-            authType: authSet.authType ?? null,
-            model: authSet.model ?? null,
-            hasApiKey: !!authSet.apiKey,
+            authType: authSet?.authType ?? null,
+            provider: authSet?.provider ?? null,
+            url: authSet?.url ?? null,
+            model: authSet?.model ?? null,
+            hasApiKey: !!authSet?.apiKey,
           },
           /** Config-override triggers, if set. UI shows these as the
            *  current schedule overriding the SKILL.md default. */

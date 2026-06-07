@@ -291,9 +291,9 @@ function buildIndexerJob(config: CoffeectxConfig, projectName: string): Job {
       { kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_SKILL_FALLBACK_INTERVAL_MS) },
     ],
     async run(ctx) {
-      const auth = (ctx.parameters['auth'] as AuthSettings | undefined) ?? {};
-      if (!auth.authType) {
-        throw new Error('indexer job requires parameters.auth (authType + model + apiKey)');
+      const auth = ctx.parameters['auth'] as AuthSettings | undefined;
+      if (!auth) {
+        throw new Error('indexer job requires parameters.auth — see indexer/README.md for the auth schema.');
       }
       // Indexer skills surface as `/skill:<name>` routing options in the
       // base prompt. The resource loader still filters them through the
@@ -467,7 +467,10 @@ function buildUserSkillJob(skill: Skill, config: CoffeectxConfig, projectName: s
     defaultEnabled: skill.job?.defaultEnabled ?? false,
     triggers,
     async run(ctx) {
-      const auth = (ctx.parameters['auth'] as AuthSettings | undefined) ?? {};
+      const auth = ctx.parameters['auth'] as AuthSettings | undefined;
+      if (!auth) {
+        throw new Error(`user job "${skill.name}" requires parameters.auth — see indexer/README.md for the auth schema.`);
+      }
       const r = await runUserJob({
         db: ctx.db,
         jobName: skill.name,

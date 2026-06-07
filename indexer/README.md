@@ -27,6 +27,68 @@ npx coffeectx job on <name>      # enable a job
 
 The data directory defaults to `~/.coffeecode/`. Override it by exporting `COFFEECODE_HOME=/some/other/home` — coffeectx then reads/writes `$COFFEECODE_HOME/.coffeecode/` instead.
 
+### Auth schema
+
+Every LLM credential block in `~/.coffeecode/config.yaml` — embeddings, UI agent, every job — uses the same `auth:` shape:
+
+```yaml
+auth:
+  authType: apiKey                 # apiKey | openai-oauth
+  provider: openrouter             # one of: openai | anthropic | openrouter
+  # url: https://my-proxy/v1       # alternative to provider (OpenAI-compatible)
+  model: anthropic/claude-haiku-4.5
+  apiKey: sk-or-v1-...
+```
+
+Two modes:
+
+- **`authType: apiKey`** — set exactly one of `provider:` (alias for a known base URL) or `url:` (custom OpenAI-compatible endpoint), plus `model` and `apiKey`.
+- **`authType: openai-oauth`** — uses pi.dev's OAuth Codex flow. Log in once via pi's CLI; coffeectx reads the stored credentials. No other fields required.
+
+Provider aliases:
+
+| `provider:` | Base URL |
+|---|---|
+| `openai`     | `https://api.openai.com/v1` |
+| `anthropic`  | `https://api.anthropic.com` |
+| `openrouter` | `https://openrouter.ai/api/v1` |
+
+Anthropic doesn't expose an embeddings API — `core.embed.auth.provider: anthropic` is rejected at config load.
+
+Full project example:
+
+```yaml
+projects:
+  my-project:
+    db: /Users/me/.coffeecode/db/my-project.db
+    repoPath: /Users/me/Documents/my-project
+    created: 2026-06-01T00:00:00Z
+    enabled: true
+    core:
+      embed:
+        auth:
+          authType: apiKey
+          provider: openrouter
+          model: openai/text-embedding-3-small
+          apiKey: sk-or-v1-...
+        dimensions: 1536
+    agent:
+      auth:
+        authType: apiKey
+        provider: openrouter
+        model: anthropic/claude-haiku-4.5
+        apiKey: sk-or-v1-...
+    jobs:
+      indexer:
+        enabled: true
+        parameters:
+          auth:
+            authType: apiKey
+            provider: openrouter
+            model: openai/gpt-5.4-nano
+            apiKey: sk-or-v1-...
+```
+
 ## Usage
 
 ### Start the scheduler
@@ -36,8 +98,8 @@ npx coffeectx daemonize
 ```
 
 The scheduler runs every enabled job by its trigger:
-- timer-based jobs (e.g. `logs`, `lsp`) on a configurable interval
-- DB-triggered jobs (e.g. `local-decisions`) when a relevant node is inserted
+- timer-based jobs (e.g. `claude`, `lsp`) on a configurable interval
+- DB-triggered jobs (e.g. `indexer`) when a relevant node is inserted
 
 ### Trigger one job manually
 

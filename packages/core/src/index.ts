@@ -45,8 +45,16 @@ export type {
   JobTriggerKind,
 } from './db.js';
 export { log } from './logger.js';
-export { createEmbedFn, createOpenAIEmbed, createOpenRouterEmbed, createOllamaEmbed, stubEmbed, makeStubEmbed, loadEmbedConfig } from './embed/index.js';
-export type { EmbedConfig, EmbedProvider } from './embed/index.js';
+export { createEmbedFn, createOpenAIEmbed, createOpenRouterEmbed, makeStubEmbed } from './embed/index.js';
+export {
+  validateAuth,
+  resolveAuth,
+  STATIC_PROVIDER_URL,
+  PROVIDER_TO_PI_ID,
+  OAUTH_PI_PROVIDER_ID,
+  CUSTOM_PI_PROVIDER_ID,
+} from './auth.js';
+export type { AuthMode, AuthProviderAlias, ResolvedAuth } from './auth.js';
 export { TypeCache } from './typeCache.js';
 export {
   syncAllTypes,

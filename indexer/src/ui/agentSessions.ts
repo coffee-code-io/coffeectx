@@ -602,18 +602,19 @@ function extractText(content: unknown): string {
 function resolveAuthOrError(projectName: string): { auth: AuthSettings } | { error: AgentNotConfiguredError } {
   const cfg = loadConfig();
   const auth = resolveAgentAuth(cfg, projectName);
-  if (!auth.model) {
+  if (!auth) {
     return {
       error: {
         reason: 'auth-missing',
         message:
           `No agent auth configured for project "${projectName}". ` +
-          `Add \`projects.${projectName}.agent.auth\` (authType + model + apiKey) to ~/.coffeecode/config.yaml.`,
+          `Add \`projects.${projectName}.agent.auth\` to ~/.coffeecode/config.yaml ` +
+          `(see indexer/README.md for the auth schema).`,
       },
     };
   }
   try {
-    buildPiAuth(auth);
+    buildPiAuth(auth, `projects.${projectName}.agent.auth`);
     return { auth };
   } catch (err) {
     return { error: { reason: 'auth-invalid', message: (err as Error).message } };

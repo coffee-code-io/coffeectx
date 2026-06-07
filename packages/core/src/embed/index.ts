@@ -1,78 +1,59 @@
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { parse } from 'yaml';
+/**
+ * Embed factory. One entry point: `createEmbedFn(EmbedSettings)`.
+ *
+ * Embedding uses the same `AuthSettings` schema as every other LLM
+ * credential block in coffeectx (the shape lives in `../auth.ts`). When
+ * `auth` is omitted the factory returns a stub that emits zero vectors —
+ * useful for projects that don't want semantic search.
+ *
+ * Supported `auth` shapes for embeddings:
+ *
+ *   - `authType: apiKey` + `provider: openai | openrouter` → OpenAI-compatible
+ *     embeddings client pointed at the alias's base URL.
+ *   - `authType: apiKey` + `url: <custom>` → same client, custom base URL.
+ *   - `authType: apiKey` + `provider: anthropic` → rejected: Anthropic has no
+ *     embeddings API.
+ *   - `authType: openai-oauth` → rejected: OAuth-only Codex flow doesn't
+ *     authorize the embeddings endpoint.
+ */
+
 import type { EmbedFn } from '../types.js';
-import { COFFEECODE_DIR } from '../config.js';
-import { createOpenAIEmbed, createOpenRouterEmbed } from './openai.js';
-import { createOllamaEmbed } from './ollama.js';
+import type { EmbedSettings } from '../config.js';
+import { resolveAuth, type AuthSettings } from '../auth.js';
+import { createOpenAIEmbed } from './openai.js';
 
 export { createOpenAIEmbed, createOpenRouterEmbed } from './openai.js';
-export { createOllamaEmbed } from './ollama.js';
 
-export type EmbedProvider = 'stub' | 'openai' | 'openrouter' | 'ollama';
+const DEFAULT_DIMS = 128;
 
-export interface EmbedConfig {
-  provider: EmbedProvider;
-  model?: string;
-  apiKey?: string;
-  baseUrl?: string;
-  /** Target embedding dimension. Defaults to 1536. */
-  dimensions?: number;
-}
-
-/** Create a stub EmbedFn that returns a zero vector of the given dimension. */
-export function makeStubEmbed(dims = 1536): EmbedFn {
+/** Stub EmbedFn that returns a zero vector of the given dimension. Used as
+ *  the fallback when a project doesn't configure embeddings. */
+export function makeStubEmbed(dims = DEFAULT_DIMS): EmbedFn {
   return () => Promise.resolve(new Float32Array(dims));
 }
 
-/** Stub that returns a 1536-dim zero vector — useful for tests and non-semantic indexing. */
-export const stubEmbed: EmbedFn = makeStubEmbed(1536);
-
 /**
- * Create an EmbedFn from a provider config object.
- * Throws if the provider requires credentials that are not present.
+ * Build an EmbedFn from an `EmbedSettings` block. Throws on unsupported
+ * auth shapes (Anthropic, OAuth) so the error surfaces at startup rather
+ * than the first embedding call.
  */
-export function createEmbedFn(cfg: EmbedConfig): EmbedFn {
-  switch (cfg.provider) {
-    case 'openai':
-      return createOpenAIEmbed(cfg);
-    case 'openrouter':
-      return createOpenRouterEmbed(cfg);
-    case 'ollama':
-      return createOllamaEmbed(cfg);
-    case 'stub':
-    default:
-      return makeStubEmbed(cfg.dimensions ?? 1536);
+export function createEmbedFn(cfg: EmbedSettings): EmbedFn {
+  const dims = cfg.dimensions ?? DEFAULT_DIMS;
+  if (!cfg.auth) return makeStubEmbed(dims);
+
+  const auth: AuthSettings = cfg.auth;
+  if (auth.authType === 'openai-oauth') {
+    throw new Error('embed.auth: openai-oauth is not supported for embeddings — set authType: apiKey.');
   }
-}
-
-const CONFIG_PATH = join(COFFEECODE_DIR, 'config.yaml');
-const AUTH_PATH = join(COFFEECODE_DIR, 'auth.yaml');
-
-/**
- * Load the embed configuration from ~/.coffeecode/config.yaml (and auth.yaml for credentials).
- * Falls back to stub provider if no config exists.
- */
-export function loadEmbedConfig(): EmbedConfig {
-  let cfg: EmbedConfig = { provider: 'stub' };
-
-  if (existsSync(CONFIG_PATH)) {
-    try {
-      const parsed = parse(readFileSync(CONFIG_PATH, 'utf-8')) as Record<string, unknown> | null;
-      const embed = parsed?.['embed'] as Partial<EmbedConfig> | undefined;
-      if (embed) cfg = { provider: 'stub', ...embed } as EmbedConfig;
-    } catch { /* fall through to defaults */ }
+  if (auth.authType === 'apiKey' && auth.provider === 'anthropic') {
+    throw new Error('embed.auth: Anthropic has no embeddings API — use provider: openai or openrouter, or set a custom url.');
   }
 
-  // Fall back to auth.yaml for API credentials.
-  if (!cfg.apiKey && existsSync(AUTH_PATH)) {
-    try {
-      const parsed = parse(readFileSync(AUTH_PATH, 'utf-8')) as Record<string, unknown> | null;
-      const auth = (parsed?.['auth'] as Record<string, unknown> | undefined) ?? (parsed ?? {});
-      if (!cfg.apiKey && auth['apiKey']) cfg.apiKey = auth['apiKey'] as string;
-      if (!cfg.baseUrl && auth['baseUrl']) cfg.baseUrl = auth['baseUrl'] as string;
-    } catch { /* ignore */ }
-  }
-
-  return cfg;
+  const resolved = resolveAuth(auth);
+  return createOpenAIEmbed({
+    apiKey: resolved.apiKey,
+    model: resolved.model,
+    baseUrl: resolved.baseUrl,
+    dimensions: dims,
+  });
 }

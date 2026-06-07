@@ -9,7 +9,7 @@
  *       db: <path>
  *       repoPath: <path>                    # for MCP cwd routing + default for LSP jobs
  *       created: <iso-date>
- *       core: { embed: { provider, model, apiKey, baseUrl, dimensions } }
+ *       core: { embed: { auth: AuthSettings, dimensions? } }
  *       mcp:  { tools: { search, exact, regex, raw_query, load_node, insert } }
  *       skills: { uiAgent?: {include?,exclude?}, indexingAgents?: {...}, jobs?: {...} }
  *       jobs:
@@ -34,7 +34,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from
 import { homedir } from 'node:os';
 import { join, resolve as pathResolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import type { EmbedProvider } from './embed/index.js';
+import { validateAuth, type AuthSettings } from './auth.js';
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -55,32 +55,21 @@ export const DB_DIR = join(COFFEECODE_DIR, 'db');
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Embedding configuration for a project. Auth shape is shared with every
+ * other LLM credential block in the config (see {@link AuthSettings}); the
+ * only embed-specific knob is `dimensions`.
+ *
+ * `auth` is optional — when unset, `createEmbedFn` returns a stub that
+ * emits zero vectors. Useful for projects that don't want semantic search.
+ */
 export interface EmbedSettings {
-  provider: EmbedProvider;
-  model?: string;
-  baseUrl?: string;
-  apiKey?: string;
+  auth?: AuthSettings;
   /** Target embedding dimension. Defaults to 128. Must match the live DB. */
   dimensions?: number;
 }
 
-/**
- * Per-job LLM credentials. Mapped to pi.dev's provider/model selection +
- * runtime auth storage at job-run time by `indexer/src/agentRun/auth.ts`.
- */
-export interface AuthSettings {
-  /** pi provider id, e.g. 'openai' | 'anthropic' | 'openrouter' | 'google' | 'xai' | … */
-  authType?: string;
-  /** Provider-specific model id, e.g. 'gpt-4o-mini' or 'claude-sonnet-4-5'. */
-  model?: string;
-  apiKey?: string;
-  /**
-   * Optional override of the provider's default base URL. Reserved for
-   * future use — pi resolves base URLs from the provider's built-in config
-   * today; this field is currently ignored.
-   */
-  baseUrl?: string;
-}
+export type { AuthSettings } from './auth.js';
 
 export interface ToolsSettings {
   search: boolean;
@@ -212,7 +201,7 @@ export interface CoffeectxConfig {
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_EMBED: EmbedSettings = { provider: 'stub', dimensions: 128 };
+const DEFAULT_EMBED: EmbedSettings = { dimensions: 128 };
 
 const DEFAULT_TOOLS: ToolsSettings = {
   search: true, exact: true, regex: true, raw_query: true,
@@ -246,9 +235,38 @@ export function loadConfig(): CoffeectxConfig {
     if (p.enabled === undefined) p.enabled = true;
   }
 
+  // Strict-validate every auth block. Old-shape configs (missing `authType`
+  // or carrying legacy `provider`/`baseUrl` directly on the embed map)
+  // throw with a path so the user knows exactly where to edit.
+  validateAllAuthBlocks(projects);
+
   const types: CoffeectxConfig['types'] = { ...(raw.types ?? {}) };
 
   return { active: raw.active, projects, types, secrets: raw.secrets, debug: raw.debug };
+}
+
+/** Walk every auth-bearing path in `projects` and validate the auth shape.
+ *  Embed `auth` is optional (stub fallback); when set, it must be valid.
+ *  Agent and job-parameter `auth` blocks are likewise optional — but when
+ *  present must validate. Skipping silently lets the runtime catch the
+ *  problem later with a much worse error message. */
+function validateAllAuthBlocks(projects: Record<string, ProjectEntry>): void {
+  for (const [pname, p] of Object.entries(projects)) {
+    const embedAuth = p.core?.embed?.auth;
+    if (embedAuth !== undefined) {
+      validateAuth(embedAuth, `projects.${pname}.core.embed.auth`);
+    }
+    const agentAuth = p.agent?.auth;
+    if (agentAuth !== undefined) {
+      validateAuth(agentAuth, `projects.${pname}.agent.auth`);
+    }
+    for (const [jname, job] of Object.entries(p.jobs ?? {})) {
+      const jobAuth = job.parameters?.['auth'];
+      if (jobAuth !== undefined) {
+        validateAuth(jobAuth, `projects.${pname}.jobs.${jname}.parameters.auth`);
+      }
+    }
+  }
 }
 
 /** Save the full config back to ~/.coffeecode/config.yaml. */
@@ -278,18 +296,14 @@ export function dbPathForName(name: string): string {
   return join(DB_DIR, `${name}.db`);
 }
 
-/** Effective embed settings for a project: project.core.embed → defaults. */
+/** Effective embed settings for a project: project.core.embed → defaults.
+ *  `auth` may be missing — `createEmbedFn` falls back to a stub when so. */
 export function resolveProjectEmbed(cfg: CoffeectxConfig, projectName: string): EmbedSettings {
   const merged: EmbedSettings = {
     ...DEFAULT_EMBED,
     ...(cfg.projects[projectName]?.core?.embed ?? {}),
   };
   if (!merged.dimensions) merged.dimensions = 128;
-  // Env override (cheap escape hatch for development).
-  const envProvider = process.env['COFFEECTX_EMBED_PROVIDER'] as EmbedProvider | undefined;
-  if (envProvider && ['stub', 'openai', 'openrouter', 'ollama'].includes(envProvider)) {
-    merged.provider = envProvider;
-  }
   return merged;
 }
 
@@ -304,14 +318,17 @@ export function resolveProjectTools(cfg: CoffeectxConfig, projectName: string): 
   return merged;
 }
 
-/** Effective auth for a particular (project, job): only project.jobs[name].parameters.auth. */
-export function resolveJobAuth(cfg: CoffeectxConfig, projectName: string, jobName: string): AuthSettings {
-  return (cfg.projects[projectName]?.jobs?.[jobName]?.parameters?.['auth'] as AuthSettings | undefined) ?? {};
+/** Effective auth for a particular (project, job): only project.jobs[name].parameters.auth.
+ *  Returns `null` when no auth is configured — callers decide whether that's
+ *  fatal (jobs that need an LLM) or fine (jobs that don't). */
+export function resolveJobAuth(cfg: CoffeectxConfig, projectName: string, jobName: string): AuthSettings | null {
+  return (cfg.projects[projectName]?.jobs?.[jobName]?.parameters?.['auth'] as AuthSettings | undefined) ?? null;
 }
 
-/** Effective auth for the UI agent: project.agent.auth. */
-export function resolveAgentAuth(cfg: CoffeectxConfig, projectName: string): AuthSettings {
-  return cfg.projects[projectName]?.agent?.auth ?? {};
+/** Effective auth for the UI agent: project.agent.auth. Returns `null` when
+ *  unset — the webui shows a "not configured" message in that case. */
+export function resolveAgentAuth(cfg: CoffeectxConfig, projectName: string): AuthSettings | null {
+  return cfg.projects[projectName]?.agent?.auth ?? null;
 }
 
 /** Secrets project name for this coffeectx project — `secretsProject` override or the project name itself. */

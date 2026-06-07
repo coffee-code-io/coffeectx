@@ -12,7 +12,13 @@ import { registerUpsertEntriesTool } from './tools/upsertEntries.js';
 import { registerResolveSymbolsTool } from './tools/resolveSymbols.js';
 
 const resolved = loadConfig();
-log(`[mcp] start project=${resolved.projectName} cwd=${process.cwd()} provider=${resolved.embed.provider} dbPath=${resolved.dbPath} pid=${process.pid}`);
+const embedAuth = resolved.embed.auth;
+const embedLabel = embedAuth
+  ? embedAuth.authType === 'openai-oauth'
+    ? 'openai-oauth'
+    : (embedAuth.provider ?? embedAuth.url ?? '<unset>')
+  : 'stub';
+log(`[mcp] start project=${resolved.projectName} cwd=${process.cwd()} embed=${embedLabel} dbPath=${resolved.dbPath} pid=${process.pid}`);
 log(`[mcp] tools config: ${JSON.stringify(resolved.tools)}`);
 
 const embed = createEmbedFn(resolved.embed);

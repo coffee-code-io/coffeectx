@@ -79,15 +79,16 @@ export async function promptProjectName(): Promise<string> {
 // abandoning the whole flow. CancelError (ESC) from `prompt.ts` is treated as
 // "skip this block".
 
-const PROVIDER_OPTIONS = ['anthropic', 'openai', 'openrouter', 'google', 'xai'] as const;
-type ProviderId = typeof PROVIDER_OPTIONS[number];
+/** Interactive picker for `auth.provider` — same static-alias list defined
+ *  by the unified auth schema (`packages/core/src/auth.ts`). Plus the
+ *  OAuth shortcut, which short-circuits the model+key prompts. */
+const AUTH_MODE_OPTIONS = ['openrouter', 'anthropic', 'openai', 'openai-oauth'] as const;
+type AuthModeOption = typeof AUTH_MODE_OPTIONS[number];
 
-const PROVIDER_DEFAULT_MODEL: Record<ProviderId, string> = {
+const PROVIDER_DEFAULT_MODEL: Record<Exclude<AuthModeOption, 'openai-oauth'>, string> = {
   anthropic:  'claude-sonnet-4-6',
   openai:     'gpt-4o-mini',
   openrouter: 'anthropic/claude-sonnet-4-5',
-  google:     'gemini-2.0-flash',
-  xai:        'grok-2-latest',
 };
 
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
@@ -107,23 +108,26 @@ export async function interactiveSeedJobs(projectName: string, repoPath?: string
   if (!process.stdin.isTTY) return;
 
   // ── Coding-agent auth ──────────────────────────────────────────────────────
-  console.log('\nCoding-agent auth (used by local-decisions and the UI agent).');
+  console.log('\nCoding-agent auth (used by the indexer job and the UI agent).');
   let auth: AuthSettings | null = null;
   try {
     if (await confirm('  Configure a coding agent now?', true)) {
-      const providerLabel = await choose(
-        '  Provider',
-        PROVIDER_OPTIONS.map(p => p),
+      const mode = await choose(
+        '  Provider (or openai-oauth for the Codex login flow)',
+        AUTH_MODE_OPTIONS.map(p => p),
         0,
-      );
-      const provider = providerLabel as ProviderId;
-      const model = await ask('  Model', PROVIDER_DEFAULT_MODEL[provider]);
-      let apiKey = '';
-      while (!apiKey) {
-        apiKey = await ask('  API key (visible in config.yaml)');
-        if (!apiKey) console.log('  API key cannot be empty (or ESC to skip auth).');
+      ) as AuthModeOption;
+      if (mode === 'openai-oauth') {
+        auth = { authType: 'openai-oauth' };
+      } else {
+        const model = await ask('  Model', PROVIDER_DEFAULT_MODEL[mode]);
+        let apiKey = '';
+        while (!apiKey) {
+          apiKey = await ask('  API key (visible in config.yaml)');
+          if (!apiKey) console.log('  API key cannot be empty (or ESC to skip auth).');
+        }
+        auth = { authType: 'apiKey', provider: mode, model, apiKey };
       }
-      auth = { authType: provider, model, apiKey };
     }
   } catch (err) {
     if (!(err instanceof CancelError)) throw err;
@@ -163,11 +167,11 @@ export async function interactiveSeedJobs(projectName: string, repoPath?: string
           ...(claudePath ? { path: claudePath } : {}),
         },
       };
-      jobs['local-decisions'] = {
-        ...(jobs['local-decisions'] ?? {}),
+      jobs['indexer'] = {
+        ...(jobs['indexer'] ?? {}),
         enabled: true,
         parameters: {
-          ...(jobs['local-decisions']?.parameters ?? {}),
+          ...(jobs['indexer']?.parameters ?? {}),
           auth,
         },
       };
@@ -187,6 +191,6 @@ export async function interactiveSeedJobs(projectName: string, repoPath?: string
   });
 
   console.log('\nSeeded job config:');
-  if (auth) console.log('  - claude (enabled) + local-decisions (enabled)');
+  if (auth) console.log('  - claude (enabled) + indexer (enabled)');
   if (lspCommand) console.log('  - lsp (enabled)');
 }

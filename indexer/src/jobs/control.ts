@@ -112,12 +112,15 @@ export function setProjectJobConfig(
 
     if (patch.auth !== undefined) {
       const params = { ...(next.parameters ?? {}) };
-      // Strip empty-string fields from the auth block; same reasoning as env.
-      const cleanedAuth: AuthSettings = {};
-      if (patch.auth.authType) cleanedAuth.authType = patch.auth.authType;
+      // Strip empty-string fields; same reasoning as env. `authType` is
+      // required by the schema and validated downstream — passing through
+      // whatever the caller supplied so a missing/empty value triggers the
+      // load-time validation error instead of silently dropping the auth.
+      const cleanedAuth: AuthSettings = { authType: patch.auth.authType };
+      if (patch.auth.provider) cleanedAuth.provider = patch.auth.provider;
+      if (patch.auth.url)      cleanedAuth.url      = patch.auth.url;
       if (patch.auth.model)    cleanedAuth.model    = patch.auth.model;
       if (patch.auth.apiKey)   cleanedAuth.apiKey   = patch.auth.apiKey;
-      if (patch.auth.baseUrl)  cleanedAuth.baseUrl  = patch.auth.baseUrl;
       params['auth'] = cleanedAuth;
       next.parameters = params;
     }
