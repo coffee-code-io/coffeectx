@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { Db, syncAllTypes, loadConfig, updateConfig } from '@coffeectx/core';
 import type { SyncResult, AuthSettings } from '@coffeectx/core';
 import { DB_DIR, dbPathForName, registerProject, setProjectLogsPath, sanitizeName } from './projects.js';
-import { ask, choose, confirm, CancelError } from './setup/prompt.js';
+import { ask, choose, confirm, CancelError } from './prompt.js';
 
 export interface InitResult {
   name: string;

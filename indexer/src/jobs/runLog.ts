@@ -12,9 +12,9 @@
 
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
+import { COFFEECODE_DIR } from '@coffeectx/core';
 
-export const LOG_ROOT = join(homedir(), '.coffeecode', 'logs');
+export const LOG_ROOT = join(COFFEECODE_DIR, 'logs');
 
 /** Where the log file for a given project + run id lives. */
 export function logPathFor(projectName: string, runId: number): string {

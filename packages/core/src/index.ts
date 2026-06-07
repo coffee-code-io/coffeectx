@@ -17,6 +17,7 @@ export {
   resolveProjectByCwd,
   listEnabledProjects,
   COFFEECODE_DIR,
+  COFFEECODE_HOME,
   CONFIG_PATH,
   DB_DIR,
 } from './config.js';

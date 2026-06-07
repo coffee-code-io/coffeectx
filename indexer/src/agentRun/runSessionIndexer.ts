@@ -30,11 +30,10 @@
 
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { createAgentSession, SessionManager } from '@earendil-works/pi-coding-agent';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { AuthSettings, Db, Skill } from '@coffeectx/core';
-import { formatSpanMd } from '@coffeectx/core';
+import { COFFEECODE_DIR, formatSpanMd } from '@coffeectx/core';
 import { buildPiAuth } from './auth.js';
 import { buildGraphTools } from './piTools.js';
 import { buildResourceLoader } from './skillResourceLoader.js';
@@ -42,7 +41,7 @@ import { PROJECT_ROOT, ProviderError } from './common.js';
 import { maybeExecElevatedTool, setSecretsProjectEnv } from './secretsTool.js';
 import { sealAndPropagateComments } from './sealComments.js';
 
-const SESSION_ROOT = join(homedir(), '.coffeecode', 'sessions');
+const SESSION_ROOT = join(COFFEECODE_DIR, 'sessions');
 
 export interface RunSessionIndexerOptions {
   /** Open Db handle (the scheduler's). */

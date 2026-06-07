@@ -19,10 +19,10 @@
 
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { createAgentSession, SessionManager } from '@earendil-works/pi-coding-agent';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { AuthSettings, Db } from '@coffeectx/core';
+import { COFFEECODE_DIR } from '@coffeectx/core';
 import { buildPiAuth } from './auth.js';
 import { buildGraphTools } from './piTools.js';
 import { buildResourceLoader } from './skillResourceLoader.js';
@@ -34,7 +34,7 @@ import {
 } from './toolPolicy.js';
 import { maybeExecElevatedTool, setSecretsProjectEnv } from './secretsTool.js';
 
-const SESSION_ROOT = join(homedir(), '.coffeecode', 'sessions');
+const SESSION_ROOT = join(COFFEECODE_DIR, 'sessions');
 
 export interface RunUserJobOptions {
   /** Open Db handle (the scheduler's). */

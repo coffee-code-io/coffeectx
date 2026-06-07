@@ -19,7 +19,6 @@
  */
 
 import { mkdirSync, readdirSync, existsSync, statSync, rmSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
@@ -30,6 +29,7 @@ import {
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import {
+  COFFEECODE_DIR,
   loadConfig,
   resolveAgentAuth,
   type AuthSettings,
@@ -41,7 +41,7 @@ import { buildGraphTools, buildNavigateTool } from '../agentRun/piTools.js';
 import { maybeExecElevatedTool, setSecretsProjectEnv } from '../agentRun/secretsTool.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SESSION_ROOT = join(homedir(), '.coffeecode', 'sessions');
+const SESSION_ROOT = join(COFFEECODE_DIR, 'sessions');
 const UI_AGENT_PROMPT_PATH = resolve(__dirname, '../../prompts/ui-agent.md');
 /** The agent's cwd. Matches what `runSkillInteractive` uses. */
 const PROJECT_ROOT = resolve(__dirname, '../../..');

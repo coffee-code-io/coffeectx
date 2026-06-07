@@ -1,8 +1,8 @@
 import { readFileSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import type { EmbedFn } from '../types.js';
+import { COFFEECODE_DIR } from '../config.js';
 import { createOpenAIEmbed, createOpenRouterEmbed } from './openai.js';
 import { createOllamaEmbed } from './ollama.js';
 
@@ -46,9 +46,8 @@ export function createEmbedFn(cfg: EmbedConfig): EmbedFn {
   }
 }
 
-const CONFIG_DIR = join(homedir(), '.coffeecode');
-const CONFIG_PATH = join(CONFIG_DIR, 'config.yaml');
-const AUTH_PATH = join(CONFIG_DIR, 'auth.yaml');
+const CONFIG_PATH = join(COFFEECODE_DIR, 'config.yaml');
+const AUTH_PATH = join(COFFEECODE_DIR, 'auth.yaml');
 
 /**
  * Load the embed configuration from ~/.coffeecode/config.yaml (and auth.yaml for credentials).

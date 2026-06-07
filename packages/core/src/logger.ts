@@ -1,13 +1,12 @@
 import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { COFFEECODE_DIR } from './config.js';
 
-const LOG_DIR = join(homedir(), '.coffeecode');
-const LOG_PATH = join(LOG_DIR, 'coffeectx.log');
+const LOG_PATH = join(COFFEECODE_DIR, 'coffeectx.log');
 
 export function log(message: string): void {
   try {
-    if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+    if (!existsSync(COFFEECODE_DIR)) mkdirSync(COFFEECODE_DIR, { recursive: true });
     appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
   } catch { /* ignore */ }
 }

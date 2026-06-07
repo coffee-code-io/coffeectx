@@ -21,7 +21,7 @@
 import { createReadStream, statSync, readdirSync, realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join, resolve, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { COFFEECODE_DIR } from '@coffeectx/core';
 import type { RawContent, RawLogMessage } from '../reader.js';
 import type {
   AgentLogProvider,
@@ -40,7 +40,7 @@ export interface PiProviderOptions {
  * under `~/.coffeecode/sessions/`; indexing them creates a feedback loop.
  */
 const ALWAYS_EXCLUDE_DIRS = new Set<string>([
-  realpathOrSelf(join(homedir(), '.coffeecode', 'sessions')),
+  realpathOrSelf(join(COFFEECODE_DIR, 'sessions')),
 ]);
 
 function realpathOrSelf(p: string): string {

@@ -8,10 +8,10 @@
 
 import { readFileSync, writeFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { COFFEECODE_DIR } from '@coffeectx/core';
 
-const HASHES_PATH = join(homedir(), '.coffeecode', 'file-hashes.json');
+const HASHES_PATH = join(COFFEECODE_DIR, 'file-hashes.json');
 
 export interface StatFingerprint {
   mtime: number;

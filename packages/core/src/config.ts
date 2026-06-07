@@ -38,7 +38,18 @@ import type { EmbedProvider } from './embed/index.js';
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
-export const COFFEECODE_DIR = join(homedir(), '.coffeecode');
+/**
+ * Home directory under which `.coffeecode/` lives. Defaults to `$HOME`;
+ * overridable via the `COFFEECODE_HOME` env var (useful for tests, sandbox
+ * tooling, and machines where the per-user data dir lives off `$HOME`).
+ *
+ * Resolved once at module load; restart the process to pick up a new value.
+ */
+export const COFFEECODE_HOME = process.env['COFFEECODE_HOME'] && process.env['COFFEECODE_HOME'].length > 0
+  ? process.env['COFFEECODE_HOME']
+  : homedir();
+
+export const COFFEECODE_DIR = join(COFFEECODE_HOME, '.coffeecode');
 export const CONFIG_PATH = join(COFFEECODE_DIR, 'config.yaml');
 export const DB_DIR = join(COFFEECODE_DIR, 'db');
 

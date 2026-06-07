@@ -16,19 +16,16 @@ npm install -g @coffeectx/indexer
 
 ## Setup
 
-Run the interactive setup wizard:
+Initialise a project DB and edit `~/.coffeecode/config.yaml` directly. The CLI has discrete helpers for the pieces you'll need:
 
 ```bash
-npx coffeectx-setup
+npx coffeectx init               # create + register a project (prompts for name)
+npx coffeectx sync-types         # sync built-in YAML types into the active DB
+npx coffeectx job list           # see registered jobs (LSP, plans, indexer, …)
+npx coffeectx job on <name>      # enable a job
 ```
 
-This will walk you through:
-- LLM provider and model selection — any model available through OpenRouter, OpenAI, or Anthropic can be used for indexing (including custom model IDs)
-- Embedding model configuration
-- Project setup (point to your repo paths)
-- Optional scheduler service (launchd / systemd)
-- MCP server registration for Claude Desktop
-- CLAUDE.md instructions
+The data directory defaults to `~/.coffeecode/`. Override it by exporting `COFFEECODE_HOME=/some/other/home` — coffeectx then reads/writes `$COFFEECODE_HOME/.coffeecode/` instead.
 
 ## Usage
 
@@ -73,8 +70,6 @@ Add to your agent's MCP config:
   }
 }
 ```
-
-The setup wizard (`coffeectx-setup`) can do this for you automatically.
 
 ## Features
 
