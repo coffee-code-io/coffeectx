@@ -14,7 +14,7 @@ var (
 	planJSON        bool
 	planVenv        string
 	planMaterialize string
-	planValues      string
+	planValues      []string
 )
 
 var planCmd = &cobra.Command{
@@ -28,11 +28,16 @@ Modes:
   plan --materialize <name>    re-render the venv's chart against the real system`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		t, err := resolveTarget(firstArg(args), planVenv, planMaterialize, planValues)
+		values, err := parseValues(planValues)
 		if err != nil {
 			return err
 		}
-		p, err := computePlan(cmd.Context(), t)
+		t, err := resolveTarget(firstArg(args), planVenv, planMaterialize, values)
+		if err != nil {
+			return err
+		}
+		// plan never prompts: a nil PromptFunc errors listing missing inputs.
+		p, _, err := computePlan(cmd.Context(), t, nil)
 		if err != nil {
 			return err
 		}
@@ -49,7 +54,7 @@ func init() {
 	planCmd.Flags().BoolVar(&planJSON, "json", false, "emit the action list as JSON")
 	planCmd.Flags().StringVar(&planVenv, "venv", "", "render into the named venv (engine=local)")
 	planCmd.Flags().StringVar(&planMaterialize, "materialize", "", "re-render the named venv's chart globally")
-	planCmd.Flags().StringVarP(&planValues, "values", "f", "", "CUE values file unified into the chart")
+	planCmd.Flags().StringArrayVarP(&planValues, "value", "V", nil, "set an input value: key=val (repeatable)")
 }
 
 func firstArg(args []string) string {

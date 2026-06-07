@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/coffeectx/coffeeenv/internal/cuelib"
 	"github.com/coffeectx/coffeeenv/internal/state"
 	"github.com/coffeectx/coffeeenv/internal/venv"
 )
@@ -18,7 +18,7 @@ var (
 	autoApprove      bool
 	applyVenv        string
 	applyMaterialize string
-	applyValues      string
+	applyValues      []string
 )
 
 var applyCmd = &cobra.Command{
@@ -32,11 +32,22 @@ Modes:
   apply --materialize <name>    re-render the venv's chart against the real system`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		t, err := resolveTarget(firstArg(args), applyVenv, applyMaterialize, applyValues)
+		values, err := parseValues(applyValues)
 		if err != nil {
 			return err
 		}
-		p, err := computePlan(cmd.Context(), t)
+		t, err := resolveTarget(firstArg(args), applyVenv, applyMaterialize, values)
+		if err != nil {
+			return err
+		}
+		// apply prompts for unresolved inputs only on a TTY; otherwise a nil
+		// PromptFunc errors listing the missing inputs. materialize never prompts.
+		var prompt cuelib.PromptFunc
+		if applyMaterialize == "" && stdinIsTTY() {
+			prompt = interactivePrompt
+		}
+
+		p, resolvedValues, err := computePlan(cmd.Context(), t, prompt)
 		if err != nil {
 			return err
 		}
@@ -44,6 +55,11 @@ Modes:
 		fmt.Printf("Target: %s\n", t.label)
 		if len(p.Actions) == 0 {
 			fmt.Printf("Nothing to do. %d state(s) already up to date.\n", p.Unchanged)
+			if t.venv != nil {
+				if err := recordManifest(*t.venv, t, resolvedValues); err != nil {
+					return fmt.Errorf("record venv manifest: %w", err)
+				}
+			}
 			return nil
 		}
 
@@ -66,7 +82,7 @@ Modes:
 		fmt.Printf("\nApplied %d change(s).\n", len(p.Actions))
 
 		if t.venv != nil {
-			if err := recordManifest(*t.venv, t); err != nil {
+			if err := recordManifest(*t.venv, t, resolvedValues); err != nil {
 				return fmt.Errorf("record venv manifest: %w", err)
 			}
 		}
@@ -79,24 +95,37 @@ func init() {
 	applyCmd.Flags().BoolVar(&autoApprove, "auto-approve", false, "apply without prompting")
 	applyCmd.Flags().StringVar(&applyVenv, "venv", "", "install into the named venv (engine=local)")
 	applyCmd.Flags().StringVar(&applyMaterialize, "materialize", "", "re-render the named venv's chart globally")
-	applyCmd.Flags().StringVarP(&applyValues, "values", "f", "", "CUE values file unified into the chart")
+	applyCmd.Flags().StringArrayVarP(&applyValues, "value", "V", nil, "set an input value: key=val (repeatable)")
 }
 
-// recordManifest writes which chart+values were rendered into the venv.
-func recordManifest(v venv.Venv, t target) error {
-	values := t.opts.ValuesFile
-	if values != "" {
-		if abs, err := filepath.Abs(values); err == nil {
-			values = abs
-		}
-	}
+// recordManifest writes which chart + resolved values were rendered into the venv.
+func recordManifest(v venv.Venv, t target, values map[string]string) error {
 	return v.WriteManifest(venv.Manifest{
-		Name:       v.Name,
-		Chart:      t.chartName,
-		ValuesFile: values,
-		Engine:     "local",
-		BuiltAt:    time.Now().UTC().Format(time.RFC3339),
+		Name:    v.Name,
+		Chart:   t.chartName,
+		Values:  values,
+		Engine:  "local",
+		BuiltAt: time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// interactivePrompt asks the user for an input value on stdin.
+func interactivePrompt(in cuelib.Input) (string, error) {
+	fmt.Printf("%s ", in.Prompt)
+	sc := bufio.NewScanner(os.Stdin)
+	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("no input provided for %q", in.Name)
+	}
+	return strings.TrimSpace(sc.Text()), nil
+}
+
+// stdinIsTTY reports whether stdin is an interactive terminal.
+func stdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 // confirm prompts for a y/N answer on stdin.

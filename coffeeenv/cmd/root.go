@@ -4,6 +4,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -44,14 +45,15 @@ type target struct {
 	chartName string
 	chartDir  string
 	opts      cuelib.Opts
-	venv      *venv.Venv // non-nil only in --venv mode (record manifest on apply)
+	given     map[string]string // input values from --value (or the venv manifest)
+	venv      *venv.Venv        // non-nil only in --venv mode (record manifest on apply)
 	label     string
 }
 
 // resolveTarget turns the plan/apply flags into a concrete target. The three
 // modes (default global, --venv local, --materialize global-from-manifest) are
 // mutually exclusive.
-func resolveTarget(chartArg, venvName, materialize, valuesFile string) (target, error) {
+func resolveTarget(chartArg, venvName, materialize string, values map[string]string) (target, error) {
 	switch {
 	case materialize != "":
 		if venvName != "" || chartArg != "" {
@@ -78,7 +80,8 @@ func resolveTarget(chartArg, venvName, materialize, valuesFile string) (target, 
 		return target{
 			chartName: m.Chart,
 			chartDir:  c.Dir,
-			opts:      cuelib.Opts{Engine: "global", Root: "~", ValuesFile: m.ValuesFile},
+			opts:      cuelib.Opts{Engine: "global", Root: "~"},
+			given:     m.Values,
 			label:     fmt.Sprintf("materialize %s (chart %s)", materialize, m.Chart),
 		}, nil
 
@@ -97,7 +100,8 @@ func resolveTarget(chartArg, venvName, materialize, valuesFile string) (target, 
 		return target{
 			chartName: c.Name,
 			chartDir:  c.Dir,
-			opts:      cuelib.Opts{Engine: "local", Root: v.Dir, ValuesFile: valuesFile},
+			opts:      cuelib.Opts{Engine: "local", Root: v.Dir},
+			given:     values,
 			venv:      &v,
 			label:     fmt.Sprintf("venv %s (chart %s)", venvName, c.Name),
 		}, nil
@@ -110,10 +114,27 @@ func resolveTarget(chartArg, venvName, materialize, valuesFile string) (target, 
 		return target{
 			chartName: c.Name,
 			chartDir:  c.Dir,
-			opts:      cuelib.Opts{Engine: "global", Root: "~", ValuesFile: valuesFile},
+			opts:      cuelib.Opts{Engine: "global", Root: "~"},
+			given:     values,
 			label:     fmt.Sprintf("chart %s", c.Name),
 		}, nil
 	}
+}
+
+// parseValues turns repeated --value key=val flags into a map.
+func parseValues(pairs []string) (map[string]string, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	m := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		k, v, ok := strings.Cut(p, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("invalid --value %q (want key=val)", p)
+		}
+		m[k] = v
+	}
+	return m, nil
 }
 
 // resolveChart resolves a chart by name, defaulting to the sole chart when the
@@ -143,15 +164,18 @@ func resolveChart(name string) (chart.Chart, error) {
 	return c, nil
 }
 
-// computePlan evaluates a target's chart and diffs it against the system.
-func computePlan(ctx context.Context, t target) (state.Plan, error) {
-	raws, err := cuelib.EvalStates(t.chartDir, t.opts)
+// computePlan resolves a target's chart inputs, decodes the states, and diffs
+// them against the system. It returns the plan and the resolved values map (for
+// recording into a venv manifest). prompt is nil for non-interactive callers.
+func computePlan(ctx context.Context, t target, prompt cuelib.PromptFunc) (state.Plan, map[string]string, error) {
+	r, err := cuelib.Resolve(t.chartDir, t.opts, t.given, prompt)
 	if err != nil {
-		return state.Plan{}, err
+		return state.Plan{}, nil, err
 	}
-	resolved, err := state.DecodeStates(raws)
+	resolved, err := state.DecodeStates(r.States)
 	if err != nil {
-		return state.Plan{}, err
+		return state.Plan{}, nil, err
 	}
-	return state.Engine{}.Plan(ctx, resolved)
+	p, err := state.Engine{}.Plan(ctx, resolved)
+	return p, r.Values, err
 }

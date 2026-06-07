@@ -22,61 +22,58 @@ import (
 // its own cue.mod/module.cue.
 const userModule = "coffeeenv.dev/user"
 
-// Opts carries the engine context injected into CUE and any extra values file.
+// Opts carries the engine context injected into CUE.
 type Opts struct {
-	Engine     string // "global" | "local"
-	Root       string // "~" for global; the venv dir for local
-	ValuesFile string // optional path to a CUE values file unified into the chart
+	Engine string // "global" | "local"
+	Root   string // "~" for global; the venv dir for local
 }
 
-// EvalStates loads the chart's *.cue from chartDir, overlays the embedded
-// library so `import "coffeeenv.dev/lib/..."` resolves, injects the engine
-// context, evaluates, and returns the decoded flat states list.
-func EvalStates(chartDir string, opts Opts) ([]state.RawState, error) {
+// buildBase loads the chart's *.cue from chartDir, overlays the embedded library
+// so `import "coffeeenv.dev/lib/..."` resolves, injects the engine context, and
+// builds the (possibly non-concrete) value. It validates the whole value so
+// assertions in hidden fields (e.g. context.#Require) surface; non-concreteness
+// is NOT an error here — inputs are filled later by Resolve.
+func buildBase(chartDir string, opts Opts) (*cue.Context, cue.Value, error) {
 	venvAbs, err := filepath.Abs(chartDir)
 	if err != nil {
-		return nil, err
+		return nil, cue.Value{}, err
 	}
 
 	overlay := map[string]load.Source{}
 	if err := mountEmbed(overlay, venvAbs); err != nil {
-		return nil, fmt.Errorf("mount cue library: %w", err)
+		return nil, cue.Value{}, fmt.Errorf("mount cue library: %w", err)
 	}
 	ensureUserModule(overlay, venvAbs)
 	injectContext(overlay, venvAbs, opts)
-	if err := injectValues(overlay, venvAbs, opts); err != nil {
-		return nil, err
-	}
 
 	cfg := &load.Config{Dir: venvAbs, Overlay: overlay}
 	insts := load.Instances([]string{"."}, cfg)
 	if len(insts) == 0 {
-		return nil, fmt.Errorf("no CUE instances found in %s", venvAbs)
+		return nil, cue.Value{}, fmt.Errorf("no CUE instances found in %s", venvAbs)
 	}
 	inst := insts[0]
 	if inst.Err != nil {
-		return nil, fmt.Errorf("load CUE: %w", inst.Err)
+		return nil, cue.Value{}, fmt.Errorf("load CUE: %w", inst.Err)
 	}
 
 	ctx := cuecontext.New()
 	v := ctx.BuildInstance(inst)
 	if err := v.Err(); err != nil {
-		return nil, fmt.Errorf("build CUE: %w", err)
+		return nil, cue.Value{}, fmt.Errorf("build CUE: %w", err)
 	}
-	// Validate the whole value so assertions in hidden fields (e.g.
-	// context.#Require) surface even when `states` doesn't reference them.
 	if err := v.Validate(); err != nil {
-		return nil, fmt.Errorf("evaluate CUE: %w", err)
+		return nil, cue.Value{}, fmt.Errorf("evaluate CUE: %w", err)
 	}
+	return ctx, v, nil
+}
 
-	statesV := v.LookupPath(cue.ParsePath("states"))
-	if !statesV.Exists() {
-		return nil, fmt.Errorf("CUE evaluates to no top-level `states` field")
+// EvalStates is a convenience wrapper for charts with no unresolved inputs.
+func EvalStates(chartDir string, opts Opts) ([]state.RawState, error) {
+	r, err := Resolve(chartDir, opts, nil, nil)
+	if err != nil {
+		return nil, err
 	}
-	if err := statesV.Validate(cue.Concrete(true)); err != nil {
-		return nil, fmt.Errorf("`states` is not concrete: %w", err)
-	}
-	return decodeRawStates(statesV)
+	return r.States, nil
 }
 
 // mountEmbed walks the embedded lib/ tree and overlays every package file under
@@ -122,20 +119,6 @@ func injectContext(overlay map[string]load.Source, venvAbs string, opts Opts) {
 	path := filepath.Join(pkgRoot, "context", "inject.cue")
 	src := fmt.Sprintf("package context\nengine: %q\nroot: %q\n", opts.Engine, root)
 	overlay[path] = load.FromString(src)
-}
-
-// injectValues overlays a user-supplied values file into the chart instance so
-// it unifies with the chart (convention: charts and values are `package env`).
-func injectValues(overlay map[string]load.Source, venvAbs string, opts Opts) error {
-	if opts.ValuesFile == "" {
-		return nil
-	}
-	data, err := os.ReadFile(opts.ValuesFile)
-	if err != nil {
-		return fmt.Errorf("read values file: %w", err)
-	}
-	overlay[filepath.Join(venvAbs, "coffeeenv_values.cue")] = load.FromBytes(data)
-	return nil
 }
 
 // ensureUserModule overlays a minimal cue.mod/module.cue for the chart if one is

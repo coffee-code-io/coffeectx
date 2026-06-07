@@ -78,11 +78,11 @@ func (v Venv) Exists() bool {
 
 // Manifest records which chart and values were rendered into the venv.
 type Manifest struct {
-	Name       string `json:"name"`
-	Chart      string `json:"chart,omitempty"`
-	ValuesFile string `json:"valuesFile,omitempty"`
-	Engine     string `json:"engine"`
-	BuiltAt    string `json:"builtAt,omitempty"`
+	Name    string            `json:"name"`
+	Chart   string            `json:"chart,omitempty"`
+	Values  map[string]string `json:"values,omitempty"`
+	Engine  string            `json:"engine"`
+	BuiltAt string            `json:"builtAt,omitempty"`
 }
 
 // Create initializes an empty venv: directories, an activate script, and an
