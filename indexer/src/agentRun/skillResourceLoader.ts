@@ -16,10 +16,9 @@
  * through untouched.
  */
 
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import {
   DefaultResourceLoader,
+  getAgentDir,
   type ResourceLoader,
 } from '@earendil-works/pi-coding-agent';
 import {
@@ -43,8 +42,10 @@ export interface BuildResourceLoaderOptions {
    */
   cwd: string;
   /**
-   * `agentDir` — pi's `~/.pi/agent` equivalent. The default works for
-   * our use (we don't ship coffeectx skills via pi's per-user dir).
+   * `agentDir` — pi's `~/.pi/agent` equivalent. Defaults to whatever pi
+   * itself resolves via its `PI_CODING_AGENT_DIR` env var (set inside
+   * `@coffeectx/core` to `$COFFEECODE_DIR/.pi/agent`), so coffeectx and
+   * pi state stay co-located.
    */
   agentDir?: string;
   /**
@@ -58,7 +59,7 @@ export interface BuildResourceLoaderOptions {
 
 export async function buildResourceLoader(opts: BuildResourceLoaderOptions): Promise<ResourceLoader> {
   const filter = resolveSkillFilter(loadConfig(), opts.projectName, opts.target);
-  const agentDir = opts.agentDir ?? join(homedir(), '.pi', 'agent');
+  const agentDir = opts.agentDir ?? getAgentDir();
 
   const loader = new DefaultResourceLoader({
     cwd: opts.cwd,

@@ -2,10 +2,17 @@
 /**
  * coffeectx-index CLI
  *
+
  * Project commands:
  *   init [--name <name>] [--repo <path>]   Create a new project DB
  *   use <name>                              Switch the active project
  *   list-projects                           List all registered projects
+ *
+ * Auth:
+ *   login <provider>                        Run an OAuth login flow. Supported:
+ *                                           `openai-oauth`. Persists credentials
+ *                                           under `$COFFEECODE_HOME/.coffeecode/.pi/agent/auth.json`
+ *                                           — does NOT modify config.yaml.
  *
  * Type/query commands (active project):
  *   sync-types [--user-dir <path>]          Sync built-in YAML types
@@ -159,6 +166,25 @@ if (command === 'use') {
   try {
     setActiveProject(name);
     console.log(`Active project: "${name}"`);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+// ── login (OAuth flow; does not require a project) ────────────────────────────
+
+if (command === 'login') {
+  const provider = positional(1);
+  if (!provider) {
+    console.error('Usage: coffeectx-index login <provider>');
+    console.error('  Supported: openai-oauth');
+    process.exit(1);
+  }
+  try {
+    const { runLogin } = await import('./login.js');
+    await runLogin(provider);
   } catch (err) {
     console.error((err as Error).message);
     process.exit(1);

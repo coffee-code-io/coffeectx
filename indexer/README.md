@@ -25,7 +25,7 @@ npx coffeectx job list           # see registered jobs (LSP, plans, indexer, …
 npx coffeectx job on <name>      # enable a job
 ```
 
-The data directory defaults to `~/.coffeecode/`. Override it by exporting `COFFEECODE_HOME=/some/other/home` — coffeectx then reads/writes `$COFFEECODE_HOME/.coffeecode/` instead.
+The data directory defaults to `~/.coffeecode/`. Override it by exporting `COFFEECODE_HOME=/some/other/home` — coffeectx then reads/writes `$COFFEECODE_HOME/.coffeecode/` instead. Pi.dev's per-user state (auth tokens, settings, themes, …) is co-located under `$COFFEECODE_HOME/.coffeecode/.pi/agent/`, so a single env var moves both coffeectx and pi state together. (If you've already set `PI_CODING_AGENT_DIR` manually, your override wins.)
 
 ### Auth schema
 
@@ -43,7 +43,7 @@ auth:
 Two modes:
 
 - **`authType: apiKey`** — set exactly one of `provider:` (alias for a known base URL) or `url:` (custom OpenAI-compatible endpoint), plus `model` and `apiKey`.
-- **`authType: openai-oauth`** — uses pi.dev's OAuth Codex flow. Log in once via pi's CLI; coffeectx reads the stored credentials. No other fields required.
+- **`authType: openai-oauth`** — uses pi.dev's OAuth Codex flow. Log in once with `npx coffeectx login openai-oauth` (or pi's own CLI); coffeectx reads the stored credentials at `$COFFEECODE_HOME/.coffeecode/.pi/agent/auth.json`. No other fields required. `login` writes only to that auth file — `~/.coffeecode/config.yaml` is untouched, so you can mix `openai-oauth` for one bucket with `apiKey` for another.
 
 Provider aliases:
 

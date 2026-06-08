@@ -53,6 +53,22 @@ export const COFFEECODE_DIR = join(COFFEECODE_HOME, '.coffeecode');
 export const CONFIG_PATH = join(COFFEECODE_DIR, 'config.yaml');
 export const DB_DIR = join(COFFEECODE_DIR, 'db');
 
+/**
+ * Resolved location of pi.dev's per-user state (auth.json, settings.json,
+ * sessions, themes, …). Co-located under `$COFFEECODE_DIR/.pi/agent` so a
+ * single `COFFEECODE_HOME` override moves both coffeectx and pi state.
+ *
+ * Pi resolves every one of its paths off the `PI_CODING_AGENT_DIR` env var
+ * (see `getAgentDir()` in @earendil-works/pi-coding-agent — it reads
+ * `process.env[ENV_AGENT_DIR]` at call time and falls back to
+ * `~/.pi/agent/`). We set the env var here as a module-load side-effect,
+ * unless the user already exported a value (their intent wins).
+ */
+export const PI_AGENT_DIR = join(COFFEECODE_DIR, '.pi', 'agent');
+if (!process.env['PI_CODING_AGENT_DIR']) {
+  process.env['PI_CODING_AGENT_DIR'] = PI_AGENT_DIR;
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /**
