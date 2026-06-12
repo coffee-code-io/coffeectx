@@ -38,3 +38,5 @@ pids
 /.idea
 .settings
 .claude
+
+indexer/webui-dist
