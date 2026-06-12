@@ -1,6 +1,6 @@
 {
   "name": "@coffeectx/server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for efficient retrieval of memories, architecture, and local decisions",
   "type": "module",
   "main": "./dist/index.js",

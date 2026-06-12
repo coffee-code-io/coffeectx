@@ -1,6 +1,6 @@
 {
   "name": "@coffeectx/test-utils",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Record / backup / replay harness for tuning agent-log span heuristics and the LSP pipeline.",
   "type": "module",
   "main": "./dist/index.js",

@@ -1,11 +1,13 @@
 {
   "name": "@coffeectx/tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared knowledge-graph tool implementations used by both the MCP server and the in-process pi agent.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -17,5 +19,8 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "typescript": "^5.4.5"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -1,11 +1,14 @@
 {
   "name": "@coffeectx/pi-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "pi.dev extension that exposes the coffeectx knowledge graph as tools. Install + reference from ~/.pi/agent/extensions/.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -23,5 +26,8 @@
     "@earendil-works/pi-coding-agent": "*",
     "@types/node": "^20.14.0",
     "typescript": "^5.4.5"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
