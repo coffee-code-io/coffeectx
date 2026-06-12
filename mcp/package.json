@@ -1,6 +1,6 @@
 {
   "name": "@coffeectx/server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server for efficient retrieval of memories, architecture, and local decisions",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,8 +19,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "@coffeectx/core": "^0.1.0",
-    "@coffeectx/tools": "^0.1.0",
+    "@coffeectx/core": "^0.1.2",
+    "@coffeectx/tools": "^0.1.2",
     "yaml": "^2.7.0",
     "zod": "^3.25.0"
   },

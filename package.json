@@ -13,14 +13,15 @@
     "dev": "npm run dev --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
+    "bump": "node scripts/bump-version.mjs",
     "publish-all": "bash scripts/publish-all.sh"
   },
   "devDependencies": {
     "typescript": "^5.4.5"
   },
   "dependencies": {
-    "@coffeectx/core": "^0.1.0",
-    "@coffeectx/indexer": "^0.1.0",
-    "@coffeectx/server": "^0.1.0"
+    "@coffeectx/core": "^0.1.2",
+    "@coffeectx/indexer": "^0.1.2",
+    "@coffeectx/server": "^0.1.2"
   }
 }
