@@ -24,22 +24,11 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
 import type { Db, InsertEntry, DeepNode } from '@coffeectx/core';
 import { LspClient, SymbolKind, type DocumentSymbol, type SymbolInformation } from './client.js';
 import type { SnapshotSupervisor, SnapshotEntry } from './snapshotSupervisor.js';
 import { Progress } from '../jobs/progress.js';
-
-// Extensions the indexer will process (used only for the first-run disk walk).
-const SOURCE_EXTENSIONS = new Set([
-  'ts', 'tsx', 'js', 'mjs', 'cjs', 'jsx',
-  'py', 'rs', 'go', 'java', 'cs', 'cpp', 'cc', 'c', 'rb',
-]);
-
-const SKIP_DIRS = new Set([
-  'node_modules', '.git', 'dist', 'build', 'out', '.next', '__pycache__', 'target',
-]);
 
 const LEAF_TYPES = new Set(['LspMethod', 'LspConstructor', 'LspFunction']);
 const ENUM_LIKE_TYPES = new Set(['LspEnum', 'LspInterface']);
@@ -343,45 +332,6 @@ function buildExistingIndex(db: Db): ExistingIndex {
   return { byKey, byFile };
 }
 
-// ── File selection ────────────────────────────────────────────────────────────
-
-interface FileToIndex {
-  relPath: string;
-  /** Absolute path to the source bytes we'll feed to the LSP server. May be
-   *  inside the repo (first-run walk) or under the snapshot store. */
-  bytesPath: string;
-  /** ts of the snapshot we ended up using; undefined when read from disk. */
-  consumedTs?: number;
-}
-
-function loadCoffeeignore(rootPath: string): Set<string> {
-  const ignorePath = join(rootPath, '.coffeeignore');
-  if (!existsSync(ignorePath)) return new Set();
-  return new Set(
-    readFileSync(ignorePath, 'utf-8')
-      .split('\n').map(l => l.trim()).filter(l => l.length > 0 && !l.startsWith('#')),
-  );
-}
-
-function walkRepo(rootPath: string): string[] {
-  const extraSkip = loadCoffeeignore(rootPath);
-  const out: string[] = [];
-  function walk(dir: string): void {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith('.')) continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name) && !extraSkip.has(entry.name)) walk(full);
-      } else if (entry.isFile()) {
-        const ext = entry.name.split('.').pop() ?? '';
-        if (SOURCE_EXTENSIONS.has(ext)) out.push(full);
-      }
-    }
-  }
-  walk(rootPath);
-  return out;
-}
-
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 export async function indexWithLsp(
@@ -406,34 +356,31 @@ export async function indexWithLsp(
   // `new`. Promoted to `final` at the end of the run.
   const newNodesThisRun = new Map<string, string>();   // id → typeName
 
-  // Build the (relPath, snapshots) list. With a supervisor we drain its
-  // index since the last consumed ts (the supervisor's initial scan
-  // populates a snapshot per source file on daemon start, so even a
-  // fresh DB has snapshots to consume). Without a supervisor — manual CLI
-  // runs of indexWithLsp — we fall back to a direct disk walk.
+  // Snapshot-only: LSP is a pure consumer of the supervisor's index. Init
+  // and the daemon both populate snapshots; a missing supervisor here is a
+  // misconfiguration (manual CLI smoke run with no supervisor wired up),
+  // not something to paper over by reading the live repo.
   //
   // When `cutoffMs` is set we drop snapshots with `ts > cutoffMs` from each
   // file's candidate list. A file with NO snapshot ≤ cutoff is deferred:
   // its newer snapshots stay in the supervisor's index, untouched, until
   // the next span close pushes the cutoff forward.
+  if (!supervisor) {
+    result.skipped = true;
+    return result;
+  }
   const planned: Array<{ relPath: string; snapshots: SnapshotEntry[] }> = [];
   let maxTs = lastConsumedTs;
-  if (supervisor) {
-    const drained = supervisor.drainSince(repoPath, lastConsumedTs);
-    for (const [relPath, entries] of drained) {
-      const eligible = cutoffMs == null ? entries : entries.filter(e => e.ts <= cutoffMs);
-      if (eligible.length === 0) continue;
-      planned.push({ relPath, snapshots: eligible });
-      for (const e of eligible) if (e.ts > maxTs) maxTs = e.ts;
-    }
-    if (planned.length === 0) {
-      result.skipped = true;
-      return result;
-    }
-  } else {
-    for (const abs of walkRepo(repoPath)) {
-      planned.push({ relPath: relative(repoPath, abs), snapshots: [{ relPath: relative(repoPath, abs), ts: 0, snapshotPath: abs, mtimeMs: 0 }] });
-    }
+  const drained = supervisor.drainSince(repoPath, lastConsumedTs);
+  for (const [relPath, entries] of drained) {
+    const eligible = cutoffMs == null ? entries : entries.filter(e => e.ts <= cutoffMs);
+    if (eligible.length === 0) continue;
+    planned.push({ relPath, snapshots: eligible });
+    for (const e of eligible) if (e.ts > maxTs) maxTs = e.ts;
+  }
+  if (planned.length === 0) {
+    result.skipped = true;
+    return result;
   }
 
   result.files = planned.length;
@@ -685,9 +632,11 @@ async function applyFileRecordsAtSnapshot(
     }
 
     // Different span (or final/linked). Bump a fresh new-state version.
+    // createdAt == updatedAt == source mtime so this version's lifetime
+    // brackets the actual repo-file change, not when we got around to indexing.
     const r = await db.insertEntries([{
       id: existing.id, type: rec.typeName, data,
-      bumpVersion: true, createdAt: snapshotTs,
+      bumpVersion: true, createdAt: snapshotTs, updatedAt: snapshotTs,
     } as InsertEntry]);
     pushErrors(result, relPath, r.errors);
     const newId = r.ids[0];
@@ -735,7 +684,7 @@ async function applyFileRecordsAtSnapshot(
     try {
       const r = await db.insertEntries([{
         id: existing.id, type: existing.typeName, data: {},
-        delete: true, bumpVersion: true, createdAt: snapshotTs,
+        delete: true, bumpVersion: true, createdAt: snapshotTs, updatedAt: snapshotTs,
       } as InsertEntry]);
       pushErrors(result, relPath, r.errors);
       const newId = r.ids[0];

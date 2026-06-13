@@ -16,10 +16,19 @@ npm install -g @coffeectx/indexer
 
 ## Setup
 
-Initialise a project DB and edit `~/.coffeecode/config.yaml` directly. The CLI has discrete helpers for the pieces you'll need:
+```bash
+cd /path/to/your/repo
+npx coffeectx init my-project    # enrol the repo (see flow below)
+```
+
+`init <name>` is a single-positional-arg enrol command. Two paths:
+
+- **First time** (name not in `~/.coffeecode/config.yaml`): TTY prompts for six things — repo path (default `cwd`), LSP command (default `typescript-language-server --stdio`), which agent's logs to import (`claude` / `codex` / `pi` / `none`), embedding auth (apiKey only), indexer auth (apiKey or `openai-oauth`), UI agent auth (apiKey or `openai-oauth`). Then writes config, creates the project DB, syncs builtin types, and takes the first repo snapshot under `~/.coffeecode/snapshots/<name>/` so the `lsp` job has something to read on its first run. The `lsp`, `plans`, `span-link`, and `indexer` jobs are enabled by default; the chosen agent-log job (`claude`/`codex`/`pi`) is enabled with the derived path, the other two are registered with `enabled: false`.
+- **Existing name**: skips prompts. Re-syncs builtin types into the DB (creates the DB if it's missing) and runs the first-snapshot pass against the configured `repoPath`. Idempotent — safe to re-invoke whenever you want to bootstrap from config alone (after a clone, or to seed snapshots manually).
+
+Other helpers:
 
 ```bash
-npx coffeectx init               # create + register a project (prompts for name)
 npx coffeectx sync-types         # sync built-in YAML types into the active DB
 npx coffeectx job list           # see registered jobs (LSP, plans, indexer, …)
 npx coffeectx job on <name>      # enable a job

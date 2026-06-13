@@ -50,20 +50,6 @@ export function setProjectRepo(name: string, repoPath: string): void {
   });
 }
 
-/** Set or clear `parameters.logsPath` on this project's `logs` job. */
-export function setProjectLogsPath(name: string, logsPath: string | undefined): void {
-  updateConfig(cfg => {
-    const entry = cfg.projects[name];
-    if (!entry) throw new Error(`Project "${name}" not found`);
-    if (!entry.jobs) entry.jobs = {};
-    if (!entry.jobs['logs']) entry.jobs['logs'] = {};
-    const job = entry.jobs['logs'];
-    if (!job.parameters) job.parameters = {};
-    if (logsPath === undefined) delete job.parameters['logsPath'];
-    else job.parameters['logsPath'] = logsPath;
-  });
-}
-
 /** Set or clear `parameters.logsNewerThan` on this project's `logs` job. */
 export function setProjectLogsNewerThan(name: string, newerThan: string | undefined): void {
   updateConfig(cfg => {

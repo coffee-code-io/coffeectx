@@ -1,40 +1,119 @@
+/**
+ * `coffeectx init <name>` — single-positional-arg enrolment.
+ *
+ * Two paths:
+ *   - Project name UNKNOWN: TTY-only. Six prompts (repoPath, lspCommand,
+ *     agent-logs source, embed auth, indexer auth, UI auth), then write
+ *     config + create DB + sync types + take the first snapshot of the repo
+ *     so the LSP job (a strict snapshot consumer post-refactor) has
+ *     something to read before the daemon comes up.
+ *   - Project name KNOWN: skip prompts. Just ensure the DB exists with the
+ *     current type set and run the first-snapshot pass. Idempotent — safe
+ *     to invoke as a "bootstrap me" command on an existing config.
+ */
+
 import { mkdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { createInterface } from 'node:readline';
-import { Db, syncAllTypes, loadConfig, updateConfig } from '@coffeectx/core';
-import type { SyncResult, AuthSettings } from '@coffeectx/core';
-import { DB_DIR, dbPathForName, registerProject, setProjectLogsPath, sanitizeName } from './projects.js';
-import { ask, choose, confirm, CancelError } from './prompt.js';
+import { join, resolve } from 'node:path';
+import {
+  Db, syncAllTypes, loadConfig, updateConfig, validateAuth,
+} from '@coffeectx/core';
+import type { AuthSettings, JobConfig, ProjectEntry, SyncResult } from '@coffeectx/core';
+import { DB_DIR, dbPathForName, sanitizeName } from './projects.js';
+import { ask, choose, CancelError, close as closePrompt } from './prompt.js';
+import { runFirstSnapshot } from './lsp/snapshotSupervisor.js';
+
+const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
+const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
+const DEFAULT_CODEX_STATE_PATH = join(homedir(), '.codex', 'state_5.sqlite');
+const DEFAULT_PLANS_DIR = join(homedir(), '.claude', 'plans');
+
+const AGENT_LOG_KINDS = ['claude', 'codex', 'pi', 'none'] as const;
+type AgentLogKind = typeof AGENT_LOG_KINDS[number];
+
+const EMBED_PROVIDERS = ['openai', 'openrouter'] as const;
+const AGENT_AUTH_MODES = ['openai', 'anthropic', 'openrouter', 'openai-oauth'] as const;
+type AgentAuthMode = typeof AGENT_AUTH_MODES[number];
+
+const PROVIDER_DEFAULT_MODEL: Record<'openai' | 'anthropic' | 'openrouter', string> = {
+  anthropic:  'claude-sonnet-4-6',
+  openai:     'gpt-4o-mini',
+  openrouter: 'anthropic/claude-sonnet-4-5',
+};
+
+const DEFAULT_EMBED_MODEL_BY_PROVIDER: Record<'openai' | 'openrouter', string> = {
+  openai:     'text-embedding-3-small',
+  openrouter: 'text-embedding-3-small',
+};
+
+export interface InitParams {
+  repoPath: string;
+  lspCommand: string;
+  agentLogs: { kind: Exclude<AgentLogKind, 'none'>; path: string } | null;
+  embedAuth: AuthSettings;     // always apiKey-mode
+  indexerAuth: AuthSettings;
+  uiAuth: AuthSettings;
+}
 
 export interface InitResult {
   name: string;
   dbPath: string;
   repoPath?: string;
-  /** Convenience echo: the value written to `jobs.logs.parameters.logsPath`. */
-  logsPath?: string;
   alreadyExisted: boolean;
   sync: SyncResult;
+  snapshotted: boolean;
 }
 
-/**
- * Initialize a new project database.
- *
- * - Creates ~/.coffeecode/db/<name>.db
- * - Runs schema DDL and syncs all built-in types
- * - Registers the project in ~/.coffeecode/projects.yaml
- * - Sets it as active if no other project is active yet
- */
-export function initProject(name: string, repoPath?: string, logsPath?: string): InitResult {
+/** Top-level entry point invoked from the CLI dispatcher. */
+export async function runInit(name: string): Promise<InitResult> {
   const safe = sanitizeName(name);
   if (!safe) throw new Error(`"${name}" is not a valid project name`);
 
-  mkdirSync(DB_DIR, { recursive: true });
+  const cfg = loadConfig();
+  const existing = cfg.projects[safe];
+
+  if (existing) {
+    // Idempotent re-init: types + DB + first-snapshot only. No prompts,
+    // no config writes — anything else risks clobbering a hand-edited
+    // config.yaml.
+    console.log(`Re-initialising existing project "${safe}".`);
+    const res = await bootstrapDbAndSnapshot(safe, existing.db, existing.repoPath);
+    return { name: safe, alreadyExisted: true, ...res };
+  }
+
+  if (!process.stdin.isTTY) {
+    throw new Error(
+      `project "${safe}" not in config. New-project init needs a TTY for the setup prompts.`,
+    );
+  }
+
+  let params: InitParams;
+  try {
+    params = await promptInitParams();
+  } catch (err) {
+    if (err instanceof CancelError) {
+      throw new Error('init cancelled — no config or DB changes written.');
+    }
+    throw err;
+  } finally {
+    closePrompt();
+  }
 
   const dbPath = dbPathForName(safe);
-  const alreadyExisted = existsSync(dbPath);
+  writeInitConfig(safe, dbPath, params);
+  const res = await bootstrapDbAndSnapshot(safe, dbPath, params.repoPath);
+  return { name: safe, alreadyExisted: false, ...res };
+}
 
-  // Db constructor creates tables on first open
+// ── DB + first-snapshot bootstrap ────────────────────────────────────────────
+
+async function bootstrapDbAndSnapshot(
+  name: string,
+  dbPath: string,
+  repoPath?: string,
+): Promise<Omit<InitResult, 'name' | 'alreadyExisted'>> {
+  mkdirSync(DB_DIR, { recursive: true });
+
   const cfg = loadConfig();
   const db = new Db({ path: dbPath, embed: async () => new Float32Array(128) });
   const sync = syncAllTypes(db, {
@@ -42,155 +121,191 @@ export function initProject(name: string, repoPath?: string, logsPath?: string):
     userDir: cfg.types.userDir,
   });
   db.close();
-
-  registerProject(safe, dbPath, repoPath);
-  if (logsPath) setProjectLogsPath(safe, logsPath);
-
-  return { name: safe, dbPath, repoPath, logsPath, alreadyExisted, sync };
-}
-
-/** Prompt for a project name interactively (TTY only). */
-export async function promptProjectName(): Promise<string> {
-  if (!process.stdin.isTTY) {
-    throw new Error('stdin is not a TTY — pass --name <name> explicitly');
-  }
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => {
-    rl.question('Project name: ', answer => {
-      rl.close();
-      resolve(answer.trim());
-    });
-  });
-}
-
-// ── Interactive init (TTY only) ──────────────────────────────────────────────
-//
-// `retrival-index init` extends the bare `initProject(...)` with two optional
-// prompt blocks:
-//   1. Coding-agent auth (provider / model / apiKey) — seeds the `claude` and
-//      `local-decisions` jobs with `parameters.auth = {...}`. Skip → those
-//      jobs land disabled-and-unconfigured (the user can fill them in via the
-//      Scheduler tab's Configure & enable later).
-//   2. LSP command — seeds the `lsp` job with `parameters.lspCommand` and the
-//      project's `repoPath` (if known). Skip → lsp stays unconfigured.
-//
-// Each block is wrapped in its own confirm() so users can opt out without
-// abandoning the whole flow. CancelError (ESC) from `prompt.ts` is treated as
-// "skip this block".
-
-/** Interactive picker for `auth.provider` — same static-alias list defined
- *  by the unified auth schema (`packages/core/src/auth.ts`). Plus the
- *  OAuth shortcut, which short-circuits the model+key prompts. */
-const AUTH_MODE_OPTIONS = ['openrouter', 'anthropic', 'openai', 'openai-oauth'] as const;
-type AuthModeOption = typeof AUTH_MODE_OPTIONS[number];
-
-const PROVIDER_DEFAULT_MODEL: Record<Exclude<AuthModeOption, 'openai-oauth'>, string> = {
-  anthropic:  'claude-sonnet-4-6',
-  openai:     'gpt-4o-mini',
-  openrouter: 'anthropic/claude-sonnet-4-5',
-};
-
-const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
-const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
-
-/** `/Users/dima/foo` → `-Users-dima-foo` (Claude's slug convention). */
-function repoPathToClaudeDir(repoPath: string): string {
-  return join(CLAUDE_PROJECTS_DIR, repoPath.replace(/\//g, '-'));
-}
-
-/**
- * Run the interactive seed flow on top of an already-initialised project.
- * Safe to call repeatedly: every prompt block is optional, and we only patch
- * the fields the user provides — existing config is preserved.
- */
-export async function interactiveSeedJobs(projectName: string, repoPath?: string): Promise<void> {
-  if (!process.stdin.isTTY) return;
-
-  // ── Coding-agent auth ──────────────────────────────────────────────────────
-  console.log('\nCoding-agent auth (used by the indexer job and the UI agent).');
-  let auth: AuthSettings | null = null;
-  try {
-    if (await confirm('  Configure a coding agent now?', true)) {
-      const mode = await choose(
-        '  Provider (or openai-oauth for the Codex login flow)',
-        AUTH_MODE_OPTIONS.map(p => p),
-        0,
-      ) as AuthModeOption;
-      if (mode === 'openai-oauth') {
-        auth = { authType: 'openai-oauth' };
-      } else {
-        const model = await ask('  Model', PROVIDER_DEFAULT_MODEL[mode]);
-        let apiKey = '';
-        while (!apiKey) {
-          apiKey = await ask('  API key (visible in config.yaml)');
-          if (!apiKey) console.log('  API key cannot be empty (or ESC to skip auth).');
-        }
-        auth = { authType: 'apiKey', provider: mode, model, apiKey };
-      }
+  console.log(`  DB:    ${dbPath}`);
+  console.log(`  Types: synced ${sync.types.synced.length} types`);
+  if (sync.types.errors.length > 0) {
+    console.error('  Sync errors:');
+    for (const { name: n, error } of sync.types.errors) {
+      console.error(`    ${n}: ${error}`);
     }
-  } catch (err) {
-    if (!(err instanceof CancelError)) throw err;
-    console.log('  (skipped)');
   }
 
-  // ── LSP server ─────────────────────────────────────────────────────────────
-  console.log('\nLSP server (powers the `lsp` job — source indexing).');
-  let lspCommand: string | null = null;
-  try {
-    if (await confirm('  Configure an LSP server now?', !!repoPath)) {
-      lspCommand = (await ask('  LSP command', DEFAULT_LSP_COMMAND)).trim();
-      if (!lspCommand) lspCommand = null;
+  let snapshotted = false;
+  if (repoPath && existsSync(repoPath)) {
+    console.log(`  Snapshot: bootstrapping from ${repoPath}…`);
+    try {
+      await runFirstSnapshot(name, repoPath);
+      snapshotted = true;
+      console.log(`  Snapshot: done.`);
+    } catch (err) {
+      console.error(`  Snapshot: failed — ${(err as Error).message}`);
     }
-  } catch (err) {
-    if (!(err instanceof CancelError)) throw err;
-    console.log('  (skipped)');
+  } else if (repoPath) {
+    console.warn(`  Snapshot: skipped — repoPath does not exist: ${repoPath}`);
+  } else {
+    console.warn(`  Snapshot: skipped — no repoPath configured for this project`);
   }
 
-  if (!auth && !lspCommand) return; // nothing to write
+  return { dbPath, repoPath, sync, snapshotted };
+}
 
+// ── Prompts ──────────────────────────────────────────────────────────────────
+
+async function promptInitParams(): Promise<InitParams> {
+  console.log('\nNew project — answer six prompts to enrol it. ESC at any step cancels.\n');
+
+  // 1. Repo path
+  const repoAnswer = await ask('Repo path', process.cwd());
+  const repoPath = resolve(repoAnswer);
+
+  // 2. LSP command
+  const lspAnswer = await ask('LSP command', DEFAULT_LSP_COMMAND);
+  const lspCommand = lspAnswer.trim() || DEFAULT_LSP_COMMAND;
+
+  // 3. Which agent logs to import
+  const agentLogs = await promptAgentLogs(repoPath);
+
+  // 4. Embed auth (apiKey only)
+  console.log('\nEmbedding auth (apiKey only — OAuth/Codex tokens do not work for embeddings).');
+  const embedAuth = await promptEmbedAuth();
+
+  // 5. Indexer auth (apiKey or openai-oauth)
+  console.log('\nIndexer auth (used by the per-Span indexer job).');
+  const indexerAuth = await promptAgentAuth();
+
+  // 6. UI agent auth (apiKey or openai-oauth)
+  console.log('\nUI agent auth (used by the right-sidebar chat in the webui).');
+  const uiAuth = await promptAgentAuth();
+
+  return { repoPath, lspCommand, agentLogs, embedAuth, indexerAuth, uiAuth };
+}
+
+async function promptAgentLogs(
+  repoPath: string,
+): Promise<InitParams['agentLogs']> {
+  const kind = await choose(
+    'Import agent logs from',
+    AGENT_LOG_KINDS.map(k => k),
+    0,
+  ) as AgentLogKind;
+  if (kind === 'none') return null;
+  const defaultPath = defaultAgentLogPath(kind, repoPath);
+  const answered = await ask('  Path', defaultPath);
+  return { kind, path: resolve(answered) };
+}
+
+function defaultAgentLogPath(kind: Exclude<AgentLogKind, 'none'>, repoPath: string): string {
+  if (kind === 'claude') {
+    return join(CLAUDE_PROJECTS_DIR, repoPath.replace(/\//g, '-'));
+  }
+  if (kind === 'codex') return DEFAULT_CODEX_STATE_PATH;
+  return ''; // pi has no sensible default — user must supply
+}
+
+async function promptEmbedAuth(): Promise<AuthSettings> {
+  const provider = await choose(
+    '  Provider',
+    EMBED_PROVIDERS.map(p => p),
+    0,
+  ) as 'openai' | 'openrouter';
+  const model = await ask('  Model', DEFAULT_EMBED_MODEL_BY_PROVIDER[provider]);
+  const apiKey = await askNonEmpty('  API key (visible in config.yaml)');
+  const auth: AuthSettings = { authType: 'apiKey', provider, model, apiKey };
+  validateAuth(auth, '<embed>');
+  return auth;
+}
+
+async function promptAgentAuth(): Promise<AuthSettings> {
+  const mode = await choose(
+    '  Provider (or openai-oauth for the Codex login flow)',
+    AGENT_AUTH_MODES.map(m => m),
+    0,
+  ) as AgentAuthMode;
+  let auth: AuthSettings;
+  if (mode === 'openai-oauth') {
+    auth = { authType: 'openai-oauth' };
+  } else {
+    const model = await ask('  Model', PROVIDER_DEFAULT_MODEL[mode]);
+    const apiKey = await askNonEmpty('  API key (visible in config.yaml)');
+    auth = { authType: 'apiKey', provider: mode, model, apiKey };
+  }
+  validateAuth(auth, '<agent>');
+  return auth;
+}
+
+async function askNonEmpty(label: string): Promise<string> {
+  // Loop until non-empty. ESC still propagates (caller catches CancelError
+  // and aborts init without writing anything).
+  for (;;) {
+    const v = await ask(label);
+    if (v.length > 0) return v;
+    console.log(`  ${label.trim()} cannot be empty (ESC to cancel init).`);
+  }
+}
+
+// ── Config write ─────────────────────────────────────────────────────────────
+
+function writeInitConfig(name: string, dbPath: string, params: InitParams): void {
   updateConfig(cfg => {
-    const entry = cfg.projects[projectName];
-    if (!entry) throw new Error(`Project "${projectName}" not found in config`);
-    if (!entry.jobs) entry.jobs = {};
-    const jobs = entry.jobs;
-
-    if (auth) {
-      // claude (Claude Code logs): enabled, with derived `path` if we have
-      // a repo. local-decisions: enabled, with the shared auth block.
-      const claudePath = repoPath ? repoPathToClaudeDir(repoPath) : undefined;
-      jobs['claude'] = {
-        ...(jobs['claude'] ?? {}),
+    if (!cfg.projects[name]) {
+      const entry: ProjectEntry = {
+        db: dbPath,
         enabled: true,
-        parameters: {
-          ...(jobs['claude']?.parameters ?? {}),
-          ...(claudePath ? { path: claudePath } : {}),
-        },
+        repoPath: params.repoPath,
+        created: new Date().toISOString(),
       };
-      jobs['indexer'] = {
-        ...(jobs['indexer'] ?? {}),
-        enabled: true,
-        parameters: {
-          ...(jobs['indexer']?.parameters ?? {}),
-          auth,
-        },
-      };
+      cfg.projects[name] = entry;
+    } else {
+      cfg.projects[name].db = dbPath;
+      cfg.projects[name].repoPath = params.repoPath;
     }
+    if (!cfg.active) cfg.active = name;
 
-    if (lspCommand) {
-      jobs['lsp'] = {
-        ...(jobs['lsp'] ?? {}),
-        enabled: true,
-        parameters: {
-          ...(jobs['lsp']?.parameters ?? {}),
-          lspCommand,
-          ...(repoPath ? { repoPath } : {}),
-        },
-      };
-    }
+    const entry = cfg.projects[name];
+    entry.core = { ...(entry.core ?? {}), embed: { ...(entry.core?.embed ?? {}), auth: params.embedAuth } };
+    entry.agent = { ...(entry.agent ?? {}), auth: params.uiAuth };
+    entry.jobs = { ...(entry.jobs ?? {}), ...buildJobsConfig(params) };
   });
 
-  console.log('\nSeeded job config:');
-  if (auth) console.log('  - claude (enabled) + indexer (enabled)');
-  if (lspCommand) console.log('  - lsp (enabled)');
+  console.log(`\nWrote config for "${name}":`);
+  console.log(`  Repo:        ${params.repoPath}`);
+  console.log(`  LSP:         ${params.lspCommand}`);
+  console.log(`  Agent logs:  ${params.agentLogs ? `${params.agentLogs.kind} @ ${params.agentLogs.path}` : 'none'}`);
+  console.log(`  Embed auth:  ${describeAuth(params.embedAuth)}`);
+  console.log(`  Indexer:     ${describeAuth(params.indexerAuth)}`);
+  console.log(`  UI agent:    ${describeAuth(params.uiAuth)}`);
+}
+
+function buildJobsConfig(params: InitParams): Record<string, JobConfig> {
+  const jobs: Record<string, JobConfig> = {};
+  jobs['lsp'] = {
+    enabled: true,
+    parameters: { lspCommand: params.lspCommand, repoPath: params.repoPath },
+  };
+  jobs['plans']     = { enabled: true, parameters: { plansDir: DEFAULT_PLANS_DIR } };
+  jobs['span-link'] = { enabled: true };
+  jobs['indexer']   = { enabled: true, parameters: { auth: params.indexerAuth } };
+
+  // Always declare all three agent-log jobs so `job list` shows the full
+  // menu — only the selected one is enabled.
+  const selected = params.agentLogs?.kind ?? null;
+  jobs['claude'] = {
+    enabled: selected === 'claude',
+    parameters: selected === 'claude' ? { path: params.agentLogs!.path } : {},
+  };
+  jobs['codex'] = {
+    enabled: selected === 'codex',
+    parameters: selected === 'codex' ? { statePath: params.agentLogs!.path } : {},
+  };
+  jobs['pi'] = {
+    enabled: selected === 'pi',
+    parameters: selected === 'pi' ? { sessionsPath: params.agentLogs!.path } : {},
+  };
+  return jobs;
+}
+
+function describeAuth(auth: AuthSettings): string {
+  if (auth.authType === 'openai-oauth') return 'openai-oauth (Codex)';
+  if (auth.url) return `apiKey @ ${auth.url} (${auth.model ?? ''})`;
+  return `apiKey @ ${auth.provider} (${auth.model ?? ''})`;
 }

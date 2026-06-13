@@ -4,7 +4,15 @@
  *
 
  * Project commands:
- *   init [--name <name>] [--repo <path>]   Create a new project DB
+ *   init <name>                             Enrol a project. First time: TTY
+ *                                           prompts for repo path, LSP command,
+ *                                           which agent's logs to import,
+ *                                           embedding auth, indexer auth, UI
+ *                                           agent auth — then writes config,
+ *                                           creates the DB, syncs types, takes
+ *                                           the first repo snapshot. Existing
+ *                                           name: re-syncs types + bootstraps
+ *                                           snapshot (idempotent, no prompts).
  *   use <name>                              Switch the active project
  *   list-projects                           List all registered projects
  *
@@ -48,7 +56,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Db, syncAllTypes, syncFromDir, parseQuery, executeQuery, formatDeepNode, formatSpanMd, createEmbedFn, loadConfig, resolveProjectEmbed, listEnabledProjects } from '@coffeectx/core';
 import type { InsertEntry } from '@coffeectx/core';
-import { initProject, interactiveSeedJobs, promptProjectName } from './init.js';
+import { runInit } from './init.js';
 import {
   loadProjects,
   setActiveProject,
@@ -111,44 +119,17 @@ const globalCfg = loadConfig();
 // ── init — does not need an existing DB ───────────────────────────────────────
 
 if (command === 'init') {
-  const nameArg = flag('--name') ?? positional(1);
-  const repoArg = flag('--repo');
-  const logsArg = flag('--logs-path');
-  const name = nameArg ?? (await promptProjectName());
-
+  const name = positional(1);
   if (!name) {
-    console.error('Project name cannot be empty.');
+    console.error('Usage: coffeectx init <name>');
     process.exit(1);
   }
 
-  const repoPath = repoArg ? resolve(repoArg) : undefined;
-  const logsPath = logsArg ? resolve(logsArg) : undefined;
-  const result = initProject(name, repoPath, logsPath);
-
-  console.log(result.alreadyExisted
-    ? `Re-initialized existing project "${result.name}"`
-    : `Initialized project "${result.name}"`);
-  console.log(`  DB:    ${result.dbPath}`);
-  if (result.repoPath) console.log(`  Repo:  ${result.repoPath}`);
-  if (result.logsPath) console.log(`  Logs:  ${result.logsPath}`);
-  console.log(`  Types: synced ${result.sync.types.synced.length} types`);
-
-  if (result.sync.types.errors.length > 0) {
-    console.error('  Sync errors:');
-    for (const { name: n, error } of result.sync.types.errors) {
-      console.error(`    ${n}: ${error}`);
-    }
-  }
-
-  // Interactive seed: when run from a TTY, offer to populate the new
-  // project's job config with coding-agent auth + LSP command in the same
-  // session. Skipping leaves everything Available-but-unconfigured.
-  if (process.stdin.isTTY) {
-    try {
-      await interactiveSeedJobs(result.name, result.repoPath);
-    } catch (err) {
-      console.error(`  init: seed failed — ${(err as Error).message}`);
-    }
+  try {
+    await runInit(name);
+  } catch (err) {
+    console.error(`init: ${(err as Error).message}`);
+    process.exit(1);
   }
 
   console.log(`\nProjects registry: ${PROJECTS_PATH}`);
@@ -669,7 +650,7 @@ switch (command) {
     console.log(`coffeectx-index — knowledge graph indexer
 
 Project commands:
-  init [--name <name>] [--repo <path>] [--logs-path <path>]  Create a new project DB
+  init <name>                                                  Enrol a project (first time: TTY prompts; existing name: idempotent re-init)
   use <name>                                                   Switch the active project
   list-projects                                                List all registered projects
 

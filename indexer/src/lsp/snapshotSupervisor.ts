@@ -22,6 +22,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
@@ -254,6 +255,17 @@ export class SnapshotSupervisor {
       mkdirSync(dir, { recursive: true });
       const snapshotPath = join(dir, `${ts}.${ext}`);
       copyFileSync(filePath, snapshotPath);
+      // Mirror the source mtime onto the snapshot file so a plain `stat` of
+      // the snapshot reflects when the writer actually touched the source —
+      // not the wall-clock moment we happened to copy it. JSONL's `mtimeMs`
+      // stays the canonical store; this is for tools that read snapshots
+      // through the filesystem rather than the index.
+      if (mtimeMs > 0) {
+        try {
+          const secs = mtimeMs / 1000;
+          utimesSync(snapshotPath, secs, secs);
+        } catch { /* non-fatal */ }
+      }
       const row: IndexRow = { repoPath: normRoot, relPath, ts, snapshotPath, size, mtimeMs };
       appendFileSync(this.indexPath, JSON.stringify(row) + '\n');
       this.latest.set(latestKey(normRoot, relPath), row);
@@ -343,4 +355,24 @@ function shouldIgnore(
 export function purgeSnapshots(projectName: string): void {
   const dir = join(SNAPSHOT_ROOT, sanitize(projectName));
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+}
+
+/**
+ * One-shot snapshot pass for `coffeectx init`: start a supervisor over
+ * `repoPath`, await its initial scan settling, stop it. The supervisor's
+ * stat-skip + `index.jsonl` semantics mean a subsequent daemon start sees
+ * the work already done and won't re-copy unchanged files.
+ *
+ * Watches only source code (`SOURCE_EXTENSIONS`). The plans watch root is
+ * outside a project repo and gets picked up by the daemon when the `plans`
+ * job is enabled — no point bootstrapping it here.
+ */
+export async function runFirstSnapshot(projectName: string, repoPath: string): Promise<void> {
+  if (!existsSync(repoPath)) return;
+  const sup = new SnapshotSupervisor({
+    projectName,
+    watches: [{ rootPath: repoPath, extensions: SOURCE_EXTENSIONS }],
+  });
+  try { await sup.start(); }
+  finally { await sup.stop(); }
 }
