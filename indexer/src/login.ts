@@ -54,7 +54,18 @@ export async function runLogin(providerLabel: string): Promise<void> {
         if (instructions) console.log(instructions);
         openInBrowser(url);
       },
+      onDeviceCode: ({ userCode, verificationUri }) => {
+        console.log(`\nDevice code: ${userCode}`);
+        console.log(`Enter it at: ${verificationUri}`);
+      },
       onPrompt: prompt => askPrompt(rl, prompt.message),
+      onSelect: async ({ message, options }) => {
+        console.log(`\n${message}`);
+        options.forEach((opt, i) => console.log(`  ${i + 1}. ${opt.label}`));
+        const answer = await askPrompt(rl, `Select [1-${options.length}]`);
+        const idx = Number(answer) - 1;
+        return options[idx]?.id;
+      },
       onProgress: msg => console.log(msg),
       signal: ac.signal,
     });
