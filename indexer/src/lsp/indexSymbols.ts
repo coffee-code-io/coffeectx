@@ -2,20 +2,29 @@
  * LSP-driven symbol indexer.
  *
  * Flow on each run:
- *   1. Drain the snapshot supervisor (or, on a fresh DB, walk the repo).
- *   2. For each (relPath → list of timestamped snapshots), pick the most
- *      recent snapshot whose contents parse successfully via the LSP server.
- *   3. Extract surviving symbol kinds:
+ *   1. Drain the snapshot supervisor since `lastConsumedTs`, dropping any
+ *      snapshot whose `ts > cutoffMs` (in-progress conversations — defer
+ *      until a future span closes).
+ *   2. Build a gap-aware interval index covering the whole timeline:
+ *      one `(startedAt, effectiveEnd]` slice per finalised `Span`, one
+ *      `(prev.effectiveEnd, next.startedAt]` gap between consecutive Spans,
+ *      one pre-first-Span gap, and a tail gap. Every eligible snapshot
+ *      belongs to exactly one interval.
+ *   3. For each (relPath, interval) bucket extract symbols and apply:
+ *        - Span buckets walk every snapshot — preserves the same-span
+ *          overwrite chain that captures mid-conversation add/delete pairs.
+ *        - Gap buckets collapse to the LATEST snapshot only — a single
+ *          version per (file, gap), representing "what the file looked
+ *          like at the end of that un-spanned slice". Gap rows live at
+ *          state `final` and are invisible to the span linker.
+ *   4. Surviving symbol kinds:
  *        - leaves     : LspMethod / LspConstructor / LspFunction (carry `source`)
  *        - enum-like  : LspEnum / LspInterface (carry `members` string list)
  *        - containers : LspClass / LspModule / LspNamespace (carry `children` $id refs)
- *   4. Pass 1: upsert leaves + enum-likes. Reuse the existing timeline if the
- *      hash matches; bump the version if it differs; create a new timeline
- *      otherwise.
- *   5. Pass 2: upsert containers with `children` set to the leaf $ids from
- *      pass 1.
- *   6. Tombstone any existing symbol whose file_path was reindexed in this
- *      run but which has no matching extracted symbol.
+ *   5. Tombstone any existing symbol whose file was reindexed but has no
+ *      matching extracted record.
+ *   6. Promote every `new` LSP row touched this run → `final` (linker then
+ *      flips Span-bracketed rows to `linked`; gap rows stay at `final`).
  *   7. GC consumed snapshots, keeping only the latest per relPath.
  *
  * The job stores its `lastConsumedTs` in `jobs.state_json` so re-runs only
@@ -43,6 +52,14 @@ export interface IndexResult {
   nodes: number;
   bumped: number;
   deleted: number;
+  /**
+   * Count of (file, gap-interval) buckets processed this run — i.e. how many
+   * times we wrote a single collapsed version for a slice of the timeline
+   * that no finalised Span brackets (manual edits between sessions, the
+   * pre-first-Span enrolment slice, …). Informational; gap rows stay at
+   * `final` and become invisible to the span linker.
+   */
+  unspanned: number;
   skipped: boolean;
   errors: Array<{ file: string; error: string }>;
 }
@@ -219,19 +236,36 @@ interface ExistingIndex {
   byFile: Map<string, ExistingSymbol[]>;
 }
 
-interface SpanInterval {
-  spanId: string;
-  startedAt: number;
-  effectiveEnd: number;
+/**
+ * One contiguous slice of the timeline a snapshot can fall into.
+ *
+ *   - `kind: 'span'` — a finalised `Span`. `bracketId` is the Span's id.
+ *   - `kind: 'gap'`  — the un-spanned slice before the first Span or between
+ *                       two consecutive Spans. `bracketId` is a synthetic
+ *                       `gap:<lo>:<hi>` label, stable across runs while the
+ *                       surrounding Spans don't change.
+ *
+ * `(lo, hi]` — exclusive lower, inclusive upper. `lo = -Infinity` for the
+ * pre-first-Span gap; `hi = +Infinity` is reserved for the no-Spans-at-all
+ * case (post-last-Span gaps within the cutoff window are unreachable because
+ * `effectiveEnd ≥ endedAt` ≥ `cutoffMs`).
+ */
+interface Interval {
+  bracketId: string;
+  kind: 'span' | 'gap';
+  lo: number;
+  hi: number;
 }
 
-/** Sorted-by-startedAt finalised-span intervals. Used by the indexer to
- *  bracket a snapshot's `mtimeMs` against the span that contains it. */
+/** Sorted-by-`lo` interval map covering the entire timeline ≤ cutoff. Used
+ *  by the LSP indexer to bracket a snapshot's `mtimeMs` against either the
+ *  Span it lives in or the gap between Spans. */
 interface IntervalIndex {
-  intervals: SpanInterval[];
-  /** Returns the spanId whose `(startedAt, effectiveEnd]` contains `ts`,
-   *  or null when no finalised span brackets the moment. */
-  lookup(ts: number): string | null;
+  intervals: Interval[];
+  /** Returns the interval whose `(lo, hi]` contains `ts`, or null when
+   *  `ts` exceeds every interval's `hi` (only possible above the cutoff —
+   *  filtered out upstream, so callers can treat null as "shouldn't happen"). */
+  lookup(ts: number): Interval | null;
 }
 
 function stableKey(typeName: string, filePath: string, name: string, containerName: string): string {
@@ -342,7 +376,7 @@ export async function indexWithLsp(
   options: IndexWithLspOptions = {},
 ): Promise<IndexResultWithCursor> {
   const result: IndexResultWithCursor = {
-    files: 0, nodes: 0, bumped: 0, deleted: 0, skipped: false, errors: [],
+    files: 0, nodes: 0, bumped: 0, deleted: 0, unspanned: 0, skipped: false, errors: [],
   };
 
   const { supervisor, lastConsumedTs = 0, cutoffMs } = options;
@@ -410,54 +444,80 @@ export async function indexWithLsp(
         aliveAtCursor.add(stableKey(sym.typeName, relPath, sym.name, sym.containerName));
       }
 
+      // Bucket the file's snapshots by their containing interval. Every ts
+      // ≤ cutoffMs falls in some interval (span or gap), so each snapshot
+      // joins exactly one bucket.
+      const byBracket = new Map<string, { interval: Interval; snaps: SnapshotEntry[] }>();
+      for (const entry of snapshots) {
+        const ts = entry.mtimeMs || entry.ts;
+        const interval = intervalIndex.lookup(ts);
+        if (!interval) continue;       // only possible above cutoff — filtered upstream
+        const bucket = byBracket.get(interval.bracketId) ?? { interval, snaps: [] };
+        bucket.snaps.push(entry);
+        byBracket.set(interval.bracketId, bucket);
+      }
+      // Process buckets chronologically so `aliveAtCursor` flows forward
+      // (span 1 → gap → span 2 → …). Span buckets walk every snapshot to
+      // preserve the same-span overwrite chain that captures mid-session
+      // add/delete pairs. Gap buckets collapse to ONLY the latest snapshot
+      // — the entire gap reduces to a single LSP-row version per timeline,
+      // representing "what the file looked like at the end of this
+      // un-spanned slice".
+      const ordered = [...byBracket.values()].sort((a, b) => a.interval.lo - b.interval.lo);
       let appliedAny = false;
-      for (let s = 0; s < snapshots.length; s++) {
-        const entry = snapshots[s]!;
-        // mtimeMs is when the writer (kernel) actually touched the file —
-        // it's also the value the span linker matches against. Bracket
-        // against finalised spans only; snapshots in an open/unindexed
-        // window are deferred (no rows written this run).
-        const snapshotTs = entry.mtimeMs || entry.ts;
-        const bracketSpanId = intervalIndex.lookup(snapshotTs);
-        if (bracketSpanId == null) continue;
+      for (const { interval, snaps } of ordered) {
+        const toApply = interval.kind === 'span' ? snaps : snaps.slice(-1);
+        let bucketApplied = false;
+        for (const entry of toApply) {
+          // mtimeMs is when the writer (kernel) actually touched the file
+          // — also what the span linker matches against. `ts` (chokidar
+          // wall-clock at copy time) is the fallback.
+          const snapshotTs = entry.mtimeMs || entry.ts;
 
-        let rawSymbols: (DocumentSymbol | SymbolInformation)[] | null = null;
-        let sourceLines: string[] | null = null;
-        try {
-          if (!existsSync(entry.snapshotPath)) continue;
-          const sourceText = readFileSync(entry.snapshotPath, 'utf-8');
-          rawSymbols = await client.documentSymbols(entry.snapshotPath);
-          sourceLines = sourceText.split('\n');
-        } catch {
-          continue;
-        }
-        const records: SymbolRecord[] = [];
-        if (isDocumentSymbolArray(rawSymbols!)) {
-          flattenDocumentSymbols(rawSymbols as DocumentSymbol[], '', records);
-        } else {
-          flattenSymbolInformation(rawSymbols as SymbolInformation[], records);
-        }
-        for (const rec of records) {
-          if (LEAF_TYPES.has(rec.typeName)) {
-            rec.source = sliceSource(sourceLines!, rec.line, rec.endLine);
+          let rawSymbols: (DocumentSymbol | SymbolInformation)[] | null = null;
+          let sourceLines: string[] | null = null;
+          try {
+            if (!existsSync(entry.snapshotPath)) continue;
+            const sourceText = readFileSync(entry.snapshotPath, 'utf-8');
+            rawSymbols = await client.documentSymbols(entry.snapshotPath);
+            sourceLines = sourceText.split('\n');
+          } catch {
+            continue;
           }
+          const records: SymbolRecord[] = [];
+          if (isDocumentSymbolArray(rawSymbols!)) {
+            flattenDocumentSymbols(rawSymbols as DocumentSymbol[], '', records);
+          } else {
+            flattenSymbolInformation(rawSymbols as SymbolInformation[], records);
+          }
+          for (const rec of records) {
+            if (LEAF_TYPES.has(rec.typeName)) {
+              rec.source = sliceSource(sourceLines!, rec.line, rec.endLine);
+            }
+          }
+          reindexedFiles.add(relPath);
+          await applyFileRecordsAtSnapshot(
+            db, relPath, records,
+            existingIndex, aliveAtCursor,
+            interval.bracketId, intervalIndex,
+            snapshotTs, newNodesThisRun, result,
+          );
+          appliedAny = true;
+          bucketApplied = true;
         }
-        reindexedFiles.add(relPath);
-        await applyFileRecordsAtSnapshot(
-          db, relPath, records,
-          existingIndex, aliveAtCursor,
-          bracketSpanId, intervalIndex,
-          snapshotTs, newNodesThisRun, result,
-        );
-        appliedAny = true;
+        if (bucketApplied && interval.kind === 'gap') result.unspanned += 1;
       }
 
       if (!appliedAny) {
-        result.errors.push({ file: relPath, error: 'no snapshot in finalised span' });
+        // Every snapshot for this file either vanished from disk between
+        // drain and read or failed to parse via the LSP server. A genuine
+        // problem (broken snapshot dir, TS-server crash), not the routine
+        // "manual edits between spans" case.
+        result.errors.push({ file: relPath, error: 'all snapshots failed to load or parse' });
         continue;
       }
     }
-    progress.done(`${result.nodes} new, ${result.bumped} bumped, ${result.deleted} deleted`);
+    progress.done(`${result.nodes} new, ${result.bumped} bumped, ${result.deleted} deleted, ${result.unspanned} unspanned`);
   } finally {
     await client.shutdown();
   }
@@ -496,8 +556,20 @@ export async function indexWithLsp(
   return result;
 }
 
+/**
+ * Build a gap-aware interval index covering the whole `(-Infinity, +Infinity]`
+ * timeline: one `'span'` interval per finalised Span and one `'gap'` interval
+ * for each un-spanned slice (before the first Span, between consecutive ones,
+ * and the post-last-Span tail). The tail gap's `hi` is `+Infinity`; callers
+ * filter by `cutoffMs` upstream so unbounded snapshots from in-progress
+ * conversations never reach here.
+ *
+ * Gap `bracketId` is synthetic (`gap:<lo>:<hi>`) so the same-bracket compare
+ * in `applyOne` works uniformly for spans and gaps without a new state.
+ */
 function buildSpanIntervalIndex(db: Db): IntervalIndex {
-  const intervals: SpanInterval[] = [];
+  interface RawSpan { spanId: string; startedAt: number; effectiveEnd: number }
+  const spans: RawSpan[] = [];
   for (const spanId of db.queryByNamedType(['Span'])) {
     const startFid = db.getMapFieldId(spanId, 'startedAt');
     const endFid = db.getMapFieldId(spanId, 'effectiveEnd');
@@ -509,21 +581,41 @@ function buildSpanIntervalIndex(db: Db): IntervalIndex {
     const startedAt = Number(startNode.atom.value);
     const effectiveEnd = Number(endNode.atom.value);
     if (!Number.isFinite(startedAt) || !Number.isFinite(effectiveEnd)) continue;
-    intervals.push({ spanId, startedAt, effectiveEnd });
+    spans.push({ spanId, startedAt, effectiveEnd });
   }
-  intervals.sort((a, b) => a.startedAt - b.startedAt);
+  spans.sort((a, b) => a.startedAt - b.startedAt);
+
+  const intervals: Interval[] = [];
+  let prevHi = -Infinity;
+  for (const s of spans) {
+    // Gap before this span (skip if it has zero width — adjacent spans).
+    if (s.startedAt > prevHi) {
+      intervals.push({ kind: 'gap', bracketId: gapId(prevHi, s.startedAt), lo: prevHi, hi: s.startedAt });
+    }
+    intervals.push({ kind: 'span', bracketId: s.spanId, lo: s.startedAt, hi: s.effectiveEnd });
+    prevHi = s.effectiveEnd;
+  }
+  // Tail gap covering everything after the last span. When there are no
+  // spans at all this is the single `(-Infinity, +Infinity]` bucket that
+  // captures every snapshot (existing-project enrolment case).
+  intervals.push({ kind: 'gap', bracketId: gapId(prevHi, Infinity), lo: prevHi, hi: Infinity });
+
   return {
     intervals,
-    lookup(ts: number): string | null {
+    lookup(ts: number): Interval | null {
       // Linear scan — interval counts are O(spans-per-project). For the
       // sizes we see (hundreds) this is fine; if it ever needs to scale
-      // swap in a binary search over the sorted-by-startedAt array.
+      // swap in a binary search over the sorted-by-lo array.
       for (const iv of intervals) {
-        if (ts > iv.startedAt && ts <= iv.effectiveEnd) return iv.spanId;
+        if (ts > iv.lo && ts <= iv.hi) return iv;
       }
       return null;
     },
   };
+}
+
+function gapId(lo: number, hi: number): string {
+  return `gap:${lo === -Infinity ? '*' : lo}:${hi === Infinity ? '*' : hi}`;
 }
 
 /**
@@ -531,15 +623,21 @@ function buildSpanIntervalIndex(db: Db): IntervalIndex {
  * per record whether to:
  *   - no-op (hash matches the existing alive head);
  *   - overwrite the head in place (existing is `new` AND lives in the same
- *     bracketing span as this snapshot — see types.ts InsertEntry.overwrite);
+ *     bracketing interval — span OR gap — as this snapshot; see
+ *     types.ts InsertEntry.overwrite);
  *   - bump a new `new` version (existing is sealed `final`/`linked` OR was
- *     born in a different span);
+ *     born in a different bracket);
  *   - create a fresh node (no prior entry — either truly new or post-
  *     resurrection where a previous tombstone broke continuity).
  * After records: any key in `aliveAtCursor` that's NOT in this snapshot's
  * records was deleted between snapshots — emit a delete+bumpVersion
  * tombstone with createdAt = snapshot mtime so the linker can attribute
- * it to the right span.
+ * it to the right span (or leave it as a gap-period tombstone if no
+ * span contains the moment).
+ *
+ * `bracketId` identifies the containing interval (span id, or a
+ * `gap:<lo>:<hi>` synthetic). It's used purely for the same-bracket
+ * comparison; never persisted on the row.
  *
  * `aliveAtCursor` is mutated to reflect the snapshot's view after return.
  * `newNodesThisRun` accumulates ids touched in state `new` for the final
@@ -551,7 +649,7 @@ async function applyFileRecordsAtSnapshot(
   records: SymbolRecord[],
   existingIndex: ExistingIndex,
   aliveAtCursor: Set<string>,
-  bracketSpanId: string,
+  bracketId: string,
   intervalIndex: IntervalIndex,
   snapshotTs: number,
   newNodesThisRun: Map<string, string>,
@@ -579,7 +677,7 @@ async function applyFileRecordsAtSnapshot(
       // and stamp createdAt forward if the existing head is `new` — the
       // version's "as-of" moment moves with the latest in-span snapshot.
       idByLocalKey.set(key, existing.id);
-      if (existing.state === 'new' && intervalIndex.lookup(existing.createdAt ?? -1) === bracketSpanId) {
+      if (existing.state === 'new' && intervalIndex.lookup(existing.createdAt ?? -1)?.bracketId === bracketId) {
         try {
           await db.insertEntries([{
             id: existing.id, type: rec.typeName, data: {},
@@ -612,11 +710,12 @@ async function applyFileRecordsAtSnapshot(
       return;
     }
 
-    // Existing head is alive but content differs. Overwrite if it's the
-    // same span's `new` row, otherwise bump.
-    const sameSpan = existing.state === 'new'
-      && intervalIndex.lookup(existing.createdAt ?? -1) === bracketSpanId;
-    if (sameSpan) {
+    // Existing head is alive but content differs. Overwrite if it's a
+    // same-bracket `new` row (same span, or same gap), otherwise bump a
+    // fresh version.
+    const sameBracket = existing.state === 'new'
+      && intervalIndex.lookup(existing.createdAt ?? -1)?.bracketId === bracketId;
+    if (sameBracket) {
       const r = await db.insertEntries([{
         id: existing.id, type: rec.typeName, data,
         overwrite: true, createdAt: snapshotTs, updatedAt: snapshotTs,

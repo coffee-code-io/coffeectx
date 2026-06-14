@@ -124,8 +124,8 @@ function buildLspJob(jobName: string, _config: CoffeectxConfig, _projectName: st
         throw new Error(`${r.errors.length} file error(s); first: ${first.file}: ${first.error}`);
       }
       return {
-        message: `${r.files} files, ${r.nodes} new, ${r.bumped} bumped, ${r.deleted} deleted`,
-        metrics: { files: r.files, nodes: r.nodes, bumped: r.bumped, deleted: r.deleted },
+        message: `${r.files} files, ${r.nodes} new, ${r.bumped} bumped, ${r.deleted} deleted, ${r.unspanned} unspanned`,
+        metrics: { files: r.files, nodes: r.nodes, bumped: r.bumped, deleted: r.deleted, unspanned: r.unspanned },
       };
     },
   };
