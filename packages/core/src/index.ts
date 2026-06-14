@@ -18,6 +18,7 @@ export {
   listEnabledProjects,
   COFFEECODE_DIR,
   COFFEECODE_HOME,
+  CLAUDE_DIR,
   PI_AGENT_DIR,
   CONFIG_PATH,
   DB_DIR,

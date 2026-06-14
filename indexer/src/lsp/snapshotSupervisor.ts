@@ -27,10 +27,10 @@ import {
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { extname, join, relative, sep } from 'node:path';
-import { homedir } from 'node:os';
 import chokidar, { type FSWatcher } from 'chokidar';
+import { COFFEECODE_DIR } from '@coffeectx/core';
 
-const SNAPSHOT_ROOT = join(homedir(), '.coffeecode', 'snapshots');
+const SNAPSHOT_ROOT = join(COFFEECODE_DIR, 'snapshots');
 
 export const SOURCE_EXTENSIONS = new Set([
   'ts', 'tsx', 'js', 'mjs', 'cjs', 'jsx',

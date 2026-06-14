@@ -4,9 +4,8 @@
  */
 
 import { existsSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { COFFEECODE_DIR, DB_DIR, loadConfig } from '@coffeectx/core';
+import { COFFEECODE_DIR, DB_DIR, CLAUDE_DIR, loadConfig } from '@coffeectx/core';
 
 /** Where backups live. Sibling of `db/` and `snapshots/`. */
 export const BACKUPS_DIR = join(COFFEECODE_DIR, 'backups');
@@ -17,8 +16,8 @@ export const SNAPSHOTS_DIR = join(COFFEECODE_DIR, 'snapshots');
 /** Where the global file-hashes JSON lives. Matches indexer/src/fileHashes.ts. */
 export const FILE_HASHES_PATH = join(COFFEECODE_DIR, 'file-hashes.json');
 
-/** Root of Claude Code's per-cwd session JSONLs. */
-export const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
+/** Root of Claude Code's per-cwd session JSONLs. Honors `$CLAUDE_CONFIG_DIR`. */
+export const CLAUDE_PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
 
 /**
  * Resolve the live DB path for a project. Honors `projects.<name>.db` in

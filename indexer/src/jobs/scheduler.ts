@@ -13,7 +13,7 @@
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, resolveJobEnv, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry, type NodeEvent } from '@coffeectx/core';
+import { loadConfig, resolveJobEnv, resolveJobParameters, CLAUDE_DIR, type Db, type CoffeectxConfig, type ProjectEntry, type NodeEvent } from '@coffeectx/core';
 import { CronExpressionParser } from 'cron-parser';
 import type { Job, JobContext, JobTrigger } from './types.js';
 import { withRunLog } from './runLog.js';
@@ -243,7 +243,7 @@ export class Scheduler {
       if (enabled) {
         const params = cfg?.parameters ?? {};
         const raw = typeof params['plansDir'] === 'string' ? (params['plansDir'] as string) : undefined;
-        const plansDir = expandTilde(raw ?? '~/.claude/plans');
+        const plansDir = raw ? expandTilde(raw) : join(CLAUDE_DIR, 'plans');
         watches.push({
           rootPath: plansDir,
           extensions: PLANS_EXTENSIONS,

@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import type { Db, CoffeectxConfig, AuthSettings, DeepNode, Skill, SkillTrigger } from '@coffeectx/core';
-import { loadAllSkills, parseTriggers } from '@coffeectx/core';
+import { loadAllSkills, parseTriggers, CLAUDE_DIR } from '@coffeectx/core';
 import { runUserJob } from '../agentRun/runUserJob.js';
 import { runSessionIndexer } from '../agentRun/runSessionIndexer.js';
 import type { Job, JobTrigger } from './types.js';
@@ -43,7 +43,7 @@ const DEFAULT_AGENTLOG_INTERVAL_MS = 30_000;
 const DEFAULT_PLANS_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_SKILL_FALLBACK_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
-const DEFAULT_PLANS_DIR = join(homedir(), '.claude', 'plans');
+const DEFAULT_PLANS_DIR = join(CLAUDE_DIR, 'plans');
 const DEFAULT_CODEX_STATE_PATH = join(homedir(), '.codex', 'state_5.sqlite');
 
 function projectJobParams(

@@ -54,6 +54,17 @@ export const CONFIG_PATH = join(COFFEECODE_DIR, 'config.yaml');
 export const DB_DIR = join(COFFEECODE_DIR, 'db');
 
 /**
+ * Root of Claude Code's per-user state — sessions, plans, settings.
+ * Resolved from `$CLAUDE_CONFIG_DIR` if set (matches Claude Code's own
+ * convention), defaults to `~/.claude/`. Exported so every reader (init,
+ * jobs, test-utils) goes through one resolver instead of hand-rolling
+ * `join(homedir(), '.claude', ...)` and drifting when Claude relocates.
+ */
+export const CLAUDE_DIR = process.env['CLAUDE_CONFIG_DIR'] && process.env['CLAUDE_CONFIG_DIR'].length > 0
+  ? process.env['CLAUDE_CONFIG_DIR']
+  : join(homedir(), '.claude');
+
+/**
  * Resolved location of pi.dev's per-user state (auth.json, settings.json,
  * sessions, themes, …). Co-located under `$COFFEECODE_DIR/.pi/agent` so a
  * single `COFFEECODE_HOME` override moves both coffeectx and pi state.

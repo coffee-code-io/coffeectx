@@ -7,8 +7,8 @@
  * project. Both would race on the same snapshot index.jsonl.
  */
 
-import { homedir } from 'node:os';
-import { loadConfig } from '@coffeectx/core';
+import { join } from 'node:path';
+import { CLAUDE_DIR, loadConfig } from '@coffeectx/core';
 import {
   PLANS_EXTENSIONS, SOURCE_EXTENSIONS, SnapshotSupervisor,
 } from '@coffeectx/indexer/dist/lsp/snapshotSupervisor.js';
@@ -24,7 +24,7 @@ export async function record(opts: RecordOptions): Promise<void> {
   const repoPath = config.projects[opts.project]?.repoPath;
   if (!repoPath) throw new Error(`project ${opts.project} has no repoPath set in config`);
 
-  const plansDir = readPlansDir(config.projects[opts.project]) ?? `${homedir()}/.claude/plans`;
+  const plansDir = readPlansDir(config.projects[opts.project]) ?? join(CLAUDE_DIR, 'plans');
   const supervisor = new SnapshotSupervisor({
     projectName: opts.project,
     watches: [

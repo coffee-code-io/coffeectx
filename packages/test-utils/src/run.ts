@@ -13,8 +13,9 @@
  */
 
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
-  Db, createEmbedFn, loadConfig, resolveProjectEmbed, syncAllTypes,
+  Db, createEmbedFn, loadConfig, resolveProjectEmbed, syncAllTypes, CLAUDE_DIR,
 } from '@coffeectx/core';
 import { indexAgentSessions } from '@coffeectx/indexer/dist/agentLog/indexLogs.js';
 import { ClaudeProvider } from '@coffeectx/indexer/dist/agentLog/providers/claude.js';
@@ -29,7 +30,7 @@ import { loadFileHashes } from '@coffeectx/indexer/dist/fileHashes.js';
 import { claudeLogsDirFor, projectDbPath } from './paths.js';
 
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
-const DEFAULT_PLANS_DIR = `${homedir()}/.claude/plans`;
+const DEFAULT_PLANS_DIR = join(CLAUDE_DIR, 'plans');
 
 export interface RunOptions {
   project: string;

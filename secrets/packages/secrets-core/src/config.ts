@@ -4,7 +4,20 @@ import path from 'node:path';
 import { parse, stringify } from 'yaml';
 import type { ProjectConfig, SecretProviderConfig, SecretsConfig, WhitelistRule } from './types.js';
 
-export const DEFAULT_CONFIG_PATH = '~/.coffeecode/secrets.yaml';
+/**
+ * Default secrets-config location. Resolved once at module load so a single
+ * `COFFEECODE_HOME` override moves the secrets file alongside the rest of
+ * coffeectx state. Standalone resolution (no @coffeectx/core dep) so the
+ * secrets stack stays self-contained and publishable on its own.
+ */
+function defaultConfigPath(): string {
+  const home = process.env['COFFEECODE_HOME'] && process.env['COFFEECODE_HOME'].length > 0
+    ? process.env['COFFEECODE_HOME']
+    : os.homedir();
+  return path.join(home, '.coffeecode', 'secrets.yaml');
+}
+
+export const DEFAULT_CONFIG_PATH = defaultConfigPath();
 
 export function expandHome(input: string): string {
   if (input === '~') return os.homedir();
