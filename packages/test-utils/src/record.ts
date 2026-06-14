@@ -7,6 +7,7 @@
  * project. Both would race on the same snapshot index.jsonl.
  */
 
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_DIR, loadConfig } from '@coffeectx/core';
 import {
