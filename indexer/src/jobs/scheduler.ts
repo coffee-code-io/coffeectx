@@ -236,9 +236,9 @@ export class Scheduler {
         watches.push({ rootPath: repoPath, extensions: SOURCE_EXTENSIONS });
       }
     }
-    const plansJob = this.jobs.get('plans');
+    const plansJob = this.jobs.get('plans-claude');
     if (plansJob) {
-      const cfg = projectJobs['plans'];
+      const cfg = projectJobs['plans-claude'];
       const enabled = cfg?.enabled ?? plansJob.defaultEnabled;
       if (enabled) {
         const params = cfg?.parameters ?? {};

@@ -33,6 +33,12 @@ export interface ProviderScanOptions {
   newerThan?: Date;
   /** Optional file-hash store for change detection across runs. */
   hashes?: FileHashStore;
+  /**
+   * Absolute path of the project repo. Providers that store sessions
+   * globally (codex) use it to filter by `session.cwd === repoPath`;
+   * providers whose storage is already cwd-scoped (claude, pi) ignore it.
+   */
+  repoPath?: string;
 }
 
 export interface ProviderScanResult {

@@ -42,7 +42,7 @@ export async function linkSpans(db: Db, opts: { repoPath?: string } = {}): Promi
   const result: SpanLinkResult = { scanned: 0, linked: 0, symbols: 0, plans: 0, errors: [] };
 
   const byFile = buildLspIndexByFile(db);
-  const plansByPath = buildPlanIndexByPath(db);
+  const planIndex = buildPlanIndex(db);
 
   for (const spanId of db.queryByNamedType(['Span'])) {
     const state = db.getNodeState(spanId);
@@ -60,6 +60,7 @@ export async function linkSpans(db: Db, opts: { repoPath?: string } = {}): Promi
       // uncapped pad so legacy data still links.
       const effectiveEnd = parseNumeric(atomText(node.entries['effectiveEnd']))
         ?? endedAt + SPAN_LINK_EPS_MS;
+      const spanSessionId = atomText(node.entries['sessionId']);
       const filesChanged = collectListAtoms(node.entries['filesChanged']);
       const existingSymbolCount = countListItems(node.entries['touchedSymbols']);
       const existingPlanCount = countListItems(node.entries['touchedPlans']);
@@ -75,7 +76,7 @@ export async function linkSpans(db: Db, opts: { repoPath?: string } = {}): Promi
 
       // ── Plans pass ──────────────────────────────────────────────────────
       const planIds = needsPlans
-        ? gatherTouchedPlans(filesChanged, startedAt, effectiveEnd, plansByPath)
+        ? gatherTouchedPlans(filesChanged, spanSessionId, startedAt, effectiveEnd, planIndex)
         : new Set<string>();
 
       // No-op early exit for already-`linked` spans with nothing to add.
@@ -284,37 +285,82 @@ interface PlanIndexed {
   createdAt: number | null;
 }
 
-function buildPlanIndexByPath(db: Db): Map<string, PlanIndexed[]> {
-  const out = new Map<string, PlanIndexed[]>();
+interface PlanIndex {
+  /** Claude (disk-watched) plans, keyed by absolute markdown path. */
+  byPath: Map<string, PlanIndexed[]>;
+  /** Codex (`<proposed_plan>`-extracted) plans, keyed by sessionId. The
+   *  Plan `path` is `codex-plan:<sessionId>:<uuid>` — there's no file on
+   *  disk to match via `filesChanged`, so we link by session + window. */
+  bySession: Map<string, PlanIndexed[]>;
+}
+
+function buildPlanIndex(db: Db): PlanIndex {
+  const byPath = new Map<string, PlanIndexed[]>();
+  const bySession = new Map<string, PlanIndexed[]>();
   for (const id of db.queryByNamedType(['Plan'])) {
     const path = readMapSymbol(db, id, 'path');
     if (!path) continue;
     const ts = db.getNodeTimestamps(id);
-    const bucket = out.get(path) ?? [];
-    bucket.push({ id, createdAt: ts?.createdAt ?? null });
-    out.set(path, bucket);
+    const entry: PlanIndexed = { id, createdAt: ts?.createdAt ?? null };
+
+    if (path.startsWith('codex-plan~')) {
+      // Format: codex-plan~<sessionId>~<uuid>. `~` separator chosen so the
+      // colon-heavy synthetic sessionId/uuid parse cleanly.
+      const rest = path.slice('codex-plan~'.length);
+      const firstTilde = rest.indexOf('~');
+      const sessionId = firstTilde >= 0 ? rest.slice(0, firstTilde) : rest;
+      const bucket = bySession.get(sessionId) ?? [];
+      bucket.push(entry);
+      bySession.set(sessionId, bucket);
+    } else {
+      const bucket = byPath.get(path) ?? [];
+      bucket.push(entry);
+      byPath.set(path, bucket);
+    }
   }
-  return out;
+  return { byPath, bySession };
 }
 
 function gatherTouchedPlans(
   filesChanged: string[],
+  sessionId: string | null,
   startedAt: number | null,
   effectiveEnd: number,
-  plansByPath: Map<string, PlanIndexed[]>,
+  index: PlanIndex,
 ): Set<string> {
   const out = new Set<string>();
+  // 1. Claude plans: path-keyed match against `filesChanged`. Plan files
+  //    live OUTSIDE repoPath (under ~/.claude/plans), so the agent-tool
+  //    absolute path is exactly what the plans indexer stored.
   for (const rawPath of filesChanged) {
-    // Plan files live OUTSIDE repoPath (under ~/.claude/plans), so no
-    // relativization is needed — the absolute path agent-tool inputs
-    // produced is exactly what the plans indexer wrote into Plan.path.
-    const plans = plansByPath.get(rawPath);
+    const plans = index.byPath.get(rawPath);
     if (!plans) continue;
     for (const p of plans) {
       if (p.createdAt == null) continue;
-      if (startedAt != null && p.createdAt <= startedAt) continue;
+      // Inclusive on the `startedAt` boundary: the plan whose ts equals the
+      // span's start is exactly what made that span begin (codex's
+      // <proposed_plan> arrival both stamps the Plan and seeds the span).
+      if (startedAt != null && p.createdAt < startedAt) continue;
       if (p.createdAt > effectiveEnd) continue;
       out.add(p.id);
+    }
+  }
+  // 2. Codex plans: session + window match. The Plan `path` carries no
+  //    file reference, so `filesChanged` can't find it. Constrain by
+  //    sessionId so a session's plan can't bleed into another session's
+  //    overlapping window.
+  if (sessionId) {
+    const plans = index.bySession.get(sessionId);
+    if (plans) {
+      for (const p of plans) {
+        if (p.createdAt == null) continue;
+        // Inclusive on the `startedAt` boundary: the plan whose ts equals the
+      // span's start is exactly what made that span begin (codex's
+      // <proposed_plan> arrival both stamps the Plan and seeds the span).
+      if (startedAt != null && p.createdAt < startedAt) continue;
+        if (p.createdAt > effectiveEnd) continue;
+        out.add(p.id);
+      }
     }
   }
   return out;

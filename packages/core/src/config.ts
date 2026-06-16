@@ -109,7 +109,10 @@ export function defaultPiSessionsDirFor(repoPath: string): string {
  */
 export interface EmbedSettings {
   auth?: AuthSettings;
-  /** Target embedding dimension. Defaults to 128. Must match the live DB. */
+  /** Target embedding dimension. Defaults to 1536 — matches the native
+   *  output of `text-embedding-3-small` (the default model in init). The
+   *  value is baked into the sqlite-vec virtual table at DB-create time,
+   *  so once the DB exists you cannot change it without rebuilding. */
   dimensions?: number;
 }
 
@@ -245,7 +248,7 @@ export interface CoffeectxConfig {
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_EMBED: EmbedSettings = { dimensions: 128 };
+const DEFAULT_EMBED: EmbedSettings = { dimensions: 1536 };
 
 const DEFAULT_TOOLS: ToolsSettings = {
   search: true, exact: true, regex: true, raw_query: true,
@@ -347,7 +350,7 @@ export function resolveProjectEmbed(cfg: CoffeectxConfig, projectName: string): 
     ...DEFAULT_EMBED,
     ...(cfg.projects[projectName]?.core?.embed ?? {}),
   };
-  if (!merged.dimensions) merged.dimensions = 128;
+  if (!merged.dimensions) merged.dimensions = 1536;
   return merged;
 }
 

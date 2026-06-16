@@ -47,11 +47,29 @@ const DEFAULT_EMBED_MODEL_BY_PROVIDER: Record<'openai' | 'openrouter', string> =
   openrouter: 'text-embedding-3-small',
 };
 
+/**
+ * Default vector dimension for known embedding model families. Returns null
+ * when the model isn't recognised — init then prompts the user. Numbers come
+ * straight from each provider's docs and match what `createOpenAIEmbed`
+ * passes through via the OpenAI `dimensions` request param.
+ */
+export function defaultEmbedDims(provider: string, model: string): number | null {
+  const m = model.toLowerCase();
+  // Accept bare `text-embedding-3-large` or namespaced `openai/text-embedding-3-large`.
+  if (/(^|\/)text-embedding-3-large$/.test(m)) return 3072;
+  if (/(^|\/)text-embedding-3-small$/.test(m)) return 1536;
+  if (/(^|\/)text-embedding-ada-002$/.test(m)) return 1536;
+  if (m.startsWith('nomic-embed-text')) return 768;
+  void provider;
+  return null;
+}
+
 export interface InitParams {
   repoPath: string;
   lspCommand: string;
   agentLogs: { kind: Exclude<AgentLogKind, 'none'>; path: string } | null;
   embedAuth: AuthSettings;     // always apiKey-mode
+  embedDimensions: number;     // resolved at init time, persisted to config
   indexerAuth: AuthSettings;
   uiAuth: AuthSettings;
 }
@@ -116,7 +134,11 @@ async function bootstrapDbAndSnapshot(
   mkdirSync(DB_DIR, { recursive: true });
 
   const cfg = loadConfig();
-  const db = new Db({ path: dbPath, embed: async () => new Float32Array(128) });
+  // syncAllTypes never embeds, so the stub fn / dims are inert — but pick
+  // the same default as the rest of the stack so a future change that does
+  // embed during type sync gets a consistent vec table.
+  const dims = cfg.projects[name]?.core?.embed?.dimensions ?? 1536;
+  const db = new Db({ path: dbPath, embed: async () => new Float32Array(dims), dimensions: dims });
   const sync = syncAllTypes(db, {
     builtinFilter: { include: cfg.types.include, exclude: cfg.types.exclude },
     userDir: cfg.types.userDir,
@@ -166,9 +188,9 @@ async function promptInitParams(): Promise<InitParams> {
   // 3. Which agent logs to import
   const agentLogs = await promptAgentLogs(repoPath);
 
-  // 4. Embed auth (apiKey only)
+  // 4. Embed auth + dimensions (apiKey only)
   console.log('\nEmbedding auth (apiKey only — OAuth/Codex tokens do not work for embeddings).');
-  const embedAuth = await promptEmbedAuth();
+  const { auth: embedAuth, dimensions: embedDimensions } = await promptEmbedAuth();
 
   // 5. Indexer auth (apiKey or openai-oauth)
   console.log('\nIndexer auth (used by the per-Span indexer job).');
@@ -178,7 +200,7 @@ async function promptInitParams(): Promise<InitParams> {
   console.log('\nUI agent auth (used by the right-sidebar chat in the webui).');
   const uiAuth = await promptAgentAuth();
 
-  return { repoPath, lspCommand, agentLogs, embedAuth, indexerAuth, uiAuth };
+  return { repoPath, lspCommand, agentLogs, embedAuth, embedDimensions, indexerAuth, uiAuth };
 }
 
 async function promptAgentLogs(
@@ -204,7 +226,7 @@ function defaultAgentLogPath(kind: Exclude<AgentLogKind, 'none'>, repoPath: stri
   return defaultPiSessionsDirFor(repoPath);
 }
 
-async function promptEmbedAuth(): Promise<AuthSettings> {
+async function promptEmbedAuth(): Promise<{ auth: AuthSettings; dimensions: number }> {
   const provider = await choose(
     '  Provider',
     EMBED_PROVIDERS.map(p => p),
@@ -214,7 +236,24 @@ async function promptEmbedAuth(): Promise<AuthSettings> {
   const apiKey = await askNonEmpty('  API key (visible in config.yaml)');
   const auth: AuthSettings = { authType: 'apiKey', provider, model, apiKey };
   validateAuth(auth, '<embed>');
-  return auth;
+
+  // Derive dimensions from the model when we recognise it; otherwise prompt.
+  // The number is baked into the vec table on first DB open and cannot be
+  // changed later without a full rebuild — get it right at init.
+  const derived = defaultEmbedDims(provider, model);
+  let dimensions: number;
+  if (derived !== null) {
+    dimensions = derived;
+    console.log(`  Dimensions: ${dimensions} (derived from model)`);
+  } else {
+    for (;;) {
+      const answer = await ask('  Dimensions', '1536');
+      const n = Number(answer);
+      if (Number.isInteger(n) && n > 0) { dimensions = n; break; }
+      console.log('  Dimensions must be a positive integer.');
+    }
+  }
+  return { auth, dimensions };
 }
 
 async function promptAgentAuth(): Promise<AuthSettings> {
@@ -264,7 +303,14 @@ function writeInitConfig(name: string, dbPath: string, params: InitParams): void
     if (!cfg.active) cfg.active = name;
 
     const entry = cfg.projects[name];
-    entry.core = { ...(entry.core ?? {}), embed: { ...(entry.core?.embed ?? {}), auth: params.embedAuth } };
+    entry.core = {
+      ...(entry.core ?? {}),
+      embed: {
+        ...(entry.core?.embed ?? {}),
+        auth: params.embedAuth,
+        dimensions: params.embedDimensions,
+      },
+    };
     entry.agent = { ...(entry.agent ?? {}), auth: params.uiAuth };
     entry.jobs = { ...(entry.jobs ?? {}), ...buildJobsConfig(params) };
   });
@@ -273,7 +319,7 @@ function writeInitConfig(name: string, dbPath: string, params: InitParams): void
   console.log(`  Repo:        ${params.repoPath}`);
   console.log(`  LSP:         ${params.lspCommand}`);
   console.log(`  Agent logs:  ${params.agentLogs ? `${params.agentLogs.kind} @ ${params.agentLogs.path}` : 'none'}`);
-  console.log(`  Embed auth:  ${describeAuth(params.embedAuth)}`);
+  console.log(`  Embed auth:  ${describeAuth(params.embedAuth)} (${params.embedDimensions} dims)`);
   console.log(`  Indexer:     ${describeAuth(params.indexerAuth)}`);
   console.log(`  UI agent:    ${describeAuth(params.uiAuth)}`);
 }
@@ -284,13 +330,19 @@ function buildJobsConfig(params: InitParams): Record<string, JobConfig> {
     enabled: true,
     parameters: { lspCommand: params.lspCommand, repoPath: params.repoPath },
   };
-  jobs['plans']     = { enabled: true, parameters: { plansDir: DEFAULT_PLANS_DIR } };
   jobs['span-link'] = { enabled: true };
   jobs['indexer']   = { enabled: true, parameters: { auth: params.indexerAuth } };
 
   // Always declare all three agent-log jobs so `job list` shows the full
   // menu — only the selected one is enabled.
   const selected = params.agentLogs?.kind ?? null;
+  // plans-claude is a Claude-only disk-watcher (`~/.claude/plans/`). For
+  // codex and pi projects, plans are extracted by the agent-log provider
+  // itself, so the job stays off here.
+  jobs['plans-claude'] = {
+    enabled: selected === 'claude',
+    parameters: { plansDir: DEFAULT_PLANS_DIR },
+  };
   jobs['claude'] = {
     enabled: selected === 'claude',
     parameters: selected === 'claude' ? { path: params.agentLogs!.path } : {},

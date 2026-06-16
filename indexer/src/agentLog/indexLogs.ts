@@ -27,6 +27,7 @@ import { classifyMessages, type ClassifiedEvent } from './classifier.js';
 import { computeSpans, SPAN_LINK_EPS_MS, type ComputedSpan } from './spans.js';
 import type { AgentLogProvider, ProviderScanOptions } from './provider.js';
 import { Progress } from '../jobs/progress.js';
+import { extractTitle, resolvePlanLinks } from '../plans/planExtract.js';
 
 function parseMs(iso: string | undefined): number {
   if (!iso) return Date.now();
@@ -130,6 +131,11 @@ export async function indexAgentSessions(
   // across crawls so this is sufficient — never re-emit a span whose key is
   // already in DB.
   const existingSpanKeys = loadExistingSpanKeys(db);
+  // Codex `<proposed_plan>` extraction emits a Plan node with a synthetic
+  // path `codex-plan:<sessionId>:<uuid>`. Build a set of already-present
+  // synthetic paths so re-imports are idempotent (Plan nodes don't have a
+  // version timeline; without dedup, every re-run would mint a duplicate).
+  const existingCodexPlanPaths = loadExistingCodexPlanPaths(db);
 
   if (events.length === 0 && scanned.sessions.size === 0) return result;
 
@@ -174,12 +180,44 @@ export async function indexAgentSessions(
       // linkage instead.
       if (event.kind === 'plan_accepted') continue;
       if (event.kind === 'todo_write') continue;
+      // `plan_proposed` becomes a Plan node, not a per-event row. Handled
+      // in the dedicated async pass below so DB-driven link resolution can
+      // happen.
+      if (event.kind === 'plan_proposed') continue;
       if (existingEventIdByUuid.has(event.uuid)) continue;
       const entry = eventToInsertEntry(event, summaryUuids.has(event.uuid));
       if (entry) {
         newEventBatchIndexByUuid.set(event.uuid, entries.length);
         entries.push(entry);
       }
+    }
+  }
+
+  // 2b) Plan rows from `plan_proposed` events (codex extracts plans from
+  //     assistant-message markup; see classifier's PROPOSED_PLAN_RE).
+  for (const [, sessionEvents] of eventsBySession) {
+    for (const event of sessionEvents) {
+      if (event.kind !== 'plan_proposed') continue;
+      const planPath = codexPlanPath(event.sessionId, event.uuid);
+      if (existingCodexPlanPaths.has(planPath)) continue;
+      const content = event.text ?? '';
+      if (!content.trim()) continue;
+      const title = extractTitle(content);
+      const { filePaths, symbolRefs } = await resolvePlanLinks(content, db);
+      entries.push({
+        type: 'Plan',
+        data: {
+          name: codexPlanName(event.sessionId, title),
+          path: planPath,
+          content,
+          ...(title ? { title } : {}),
+          relatedFiles: filePaths,
+          relatedSymbols: symbolRefs,
+        },
+        createdAt: parseMs(event.timestamp),
+        updatedAt: parseMs(event.timestamp),
+      });
+      existingCodexPlanPaths.add(planPath);
     }
   }
 
@@ -398,6 +436,42 @@ function loadExistingSessionIds(db: Db): Set<string> {
     if (node.kind === 'atom' && node.atom.kind === 'symbol') ids.add(node.atom.value);
   }
   return ids;
+}
+
+/** Set of `codex-plan:<sessionId>:<uuid>` paths already minted by previous
+ *  runs, used to dedup `plan_proposed` event emission. */
+function loadExistingCodexPlanPaths(db: Db): Set<string> {
+  const out = new Set<string>();
+  for (const mapId of db.queryByNamedType(['Plan'])) {
+    const fid = db.getMapFieldId(mapId, 'path');
+    if (!fid) continue;
+    const node = db.loadNode(fid);
+    if (node.kind === 'atom' && node.atom.kind === 'symbol' && node.atom.value.startsWith('codex-plan~')) {
+      out.add(node.atom.value);
+    }
+  }
+  return out;
+}
+
+/** Synthetic path for a codex-extracted plan — keyed by session + message
+ *  uuid so re-imports of the same rollout are idempotent. `~` separates
+ *  the two parts (neither sessionId nor uuid contain that character; both
+ *  the synthetic codex `codex:<id>:line:N` uuid format and the bare
+ *  `codex:<id>` session id are full of colons, so colon as delimiter
+ *  would be ambiguous when the linker later splits the path). */
+function codexPlanPath(sessionId: string, uuid: string): string {
+  return `codex-plan~${sessionId}~${uuid}`;
+}
+
+/** Human-readable Plan `name` field — short session-tagged title slug. */
+function codexPlanName(sessionId: string, title: string | null): string {
+  const sidTail = sessionId.replace(/^codex:/, '').slice(0, 8);
+  const slug = (title ?? 'untitled')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return `codex-${sidTail}-${slug || 'untitled'}`;
 }
 
 /**

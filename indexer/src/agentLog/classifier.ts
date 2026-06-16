@@ -8,6 +8,7 @@ export type EventKind =
   | 'agent_question'
   | 'agent_message'
   | 'plan_accepted'
+  | 'plan_proposed'
   | 'todo_write';
 
 export interface ClassifiedEvent {
@@ -15,7 +16,7 @@ export interface ClassifiedEvent {
   sessionId: string;
   uuid: string;
   timestamp: string;
-  text?: string;         // user_input | agent_message
+  text?: string;         // user_input | agent_message | plan_proposed (body)
   path?: string;         // file_create | file_edit
   content?: string;      // file_create | file_edit
   command?: string;      // shell_exec
@@ -83,6 +84,22 @@ function isMeaningfulAgentText(text: string): boolean {
 }
 
 /**
+ * Pull every `<proposed_plan>...</proposed_plan>` body out of an agent's
+ * message text. Codex uses this tag to surface a plan that the assistant
+ * wants the user to accept before execution. Returns the inner text of each
+ * match, trimmed; an empty array when no tag is present.
+ */
+const PROPOSED_PLAN_RE = /<proposed_plan>([\s\S]*?)<\/proposed_plan>/g;
+function extractProposedPlans(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(PROPOSED_PLAN_RE)) {
+    const body = m[1]!.trim();
+    if (body.length > 0) out.push(body);
+  }
+  return out;
+}
+
+/**
  * Classify a deduplicated list of raw log messages into structured events.
  *
  * Recall over precision — see SKIP_TOOLS for what's filtered. Assistant text
@@ -135,6 +152,22 @@ export function classifyMessages(messages: RawLogMessage[]): ClassifiedEvent[] {
         if (hasQuestion) continue;
         const text = item.text;
         if (!isMeaningfulAgentText(text)) continue;
+
+        // Codex agents emit plans inline, wrapped in <proposed_plan>...
+        // </proposed_plan> tags. Each pair becomes a `plan_proposed` event;
+        // indexLogs mints a Plan node from the body. The agent_message
+        // event still fires for the rest of the text (or the whole text
+        // when no tag is present) so the existing summary/seek logic
+        // doesn't lose the narrative.
+        const plans = extractProposedPlans(text);
+        for (const planText of plans) {
+          events.push({
+            kind: 'plan_proposed',
+            sessionId, uuid, timestamp,
+            text: planText,
+          });
+        }
+
         events.push({
           kind: 'agent_message',
           sessionId, uuid, timestamp,

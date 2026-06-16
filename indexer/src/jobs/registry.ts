@@ -233,11 +233,11 @@ function buildPiJob(config: CoffeectxConfig, projectName: string): Job {
 
 interface PlansJobState { lastConsumedTs?: number }
 
-function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
-  const params = projectJobParams(config, projectName, 'plans');
+function buildPlansClaudeJob(config: CoffeectxConfig, projectName: string): Job {
+  const params = projectJobParams(config, projectName, 'plans-claude');
   return {
-    name: 'plans',
-    description: 'Ingest Claude plan-mode markdown files from ~/.claude/plans/ via snapshot supervisor.',
+    name: 'plans-claude',
+    description: 'Ingest Claude plan-mode markdown files from ~/.claude/plans/ via snapshot supervisor. Codex plans are extracted from agent messages by the codex provider, not this job.',
     defaultEnabled: false,
     triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_PLANS_INTERVAL_MS) }],
     async run(ctx) {
@@ -245,7 +245,7 @@ function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
       if (!ctx.snapshotSupervisor) {
         return { message: 'no snapshot supervisor available — skipped' };
       }
-      const state = (ctx.db.getJobState<PlansJobState>('plans')) ?? {};
+      const state = (ctx.db.getJobState<PlansJobState>('plans-claude')) ?? {};
       const r = await indexPlans(ctx.db, {
         plansDir: resolve(plansDir),
         supervisor: ctx.snapshotSupervisor,
@@ -255,7 +255,7 @@ function buildPlansJob(config: CoffeectxConfig, projectName: string): Job {
         const first = r.errors[0]!;
         throw new Error(`${r.errors.length} plan error(s); first: ${first.path}: ${first.error}`);
       }
-      ctx.db.setJobState('plans', { ...state, lastConsumedTs: r.consumedTs });
+      ctx.db.setJobState('plans-claude', { ...state, lastConsumedTs: r.consumedTs });
       return {
         message: `${r.files} files, ${r.inserted} new Plan(s)`,
         metrics: { files: r.files, inserted: r.inserted, consumedTs: r.consumedTs },
@@ -538,7 +538,7 @@ export function buildJobs(_db: Db, config: CoffeectxConfig, projectName: string)
   jobs.push(buildClaudeJob(config, projectName));
   jobs.push(buildCodexJob(config, projectName));
   jobs.push(buildPiJob(config, projectName));
-  jobs.push(buildPlansJob(config, projectName));
+  jobs.push(buildPlansClaudeJob(config, projectName));
   jobs.push(buildSpanLinkJob());
   jobs.push(buildIndexerJob(config, projectName));
 

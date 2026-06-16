@@ -20,10 +20,9 @@
 
 import { readFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
-import { parseQuery, executeQuery } from '@coffeectx/core';
 import type { Db, InsertEntry } from '@coffeectx/core';
-import { extractIdentifiers } from '../agentLog/enricher.js';
 import type { SnapshotSupervisor } from '../lsp/snapshotSupervisor.js';
+import { extractTitle, resolvePlanLinks } from './planExtract.js';
 
 export interface IndexPlansOptions {
   /** Absolute path of the plans directory (the supervisor's watch root). */
@@ -44,11 +43,6 @@ export interface IndexPlansResult {
   /** Max snapshot ts consumed — caller persists via setJobState. */
   consumedTs: number;
 }
-
-/** Markdown link target — captures the URL/path inside `[label](target)`. */
-const MD_LINK_RE = /\[[^\]]*\]\(([^)\s]+)/g;
-/** Backtick-fenced inline code — captures whatever's between single backticks. */
-const INLINE_CODE_RE = /`([^`\n]{2,})`/g;
 
 export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<IndexPlansResult> {
   const result: IndexPlansResult = {
@@ -118,109 +112,5 @@ export async function indexPlans(db: Db, options: IndexPlansOptions): Promise<In
   return result;
 }
 
-/** Pull the first-line H1 or the first non-empty trimmed line, capped at 200 chars. */
-function extractTitle(content: string): string | null {
-  const lines = content.split(/\r?\n/);
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t) continue;
-    const m = t.match(/^#+\s+(.+)$/);
-    const candidate = m ? m[1]!.trim() : t;
-    if (!candidate) continue;
-    return candidate.length > 200 ? candidate.slice(0, 197) + '…' : candidate;
-  }
-  return null;
-}
-
-/**
- * Parse a plan's markdown body and resolve any references the graph can
- * represent at write time:
- *  - File paths land as plain Symbol strings in `Plan.relatedFiles`.
- *  - Identifier candidates (inline-code tokens) resolve to LSP symbol ids
- *    — single non-excluded ancestor or drop.
- */
-async function resolvePlanLinks(content: string, db: Db): Promise<{
-  filePaths: string[];
-  symbolRefs: { $id: string }[];
-}> {
-  const filePaths = extractFilePathCandidates(content);
-  const identifiers = extractIdentifierCandidates(content);
-
-  const symbolOwners = new Set<string>();
-  for (const ident of identifiers) {
-    const owner = await resolveSingleNamedOwnerIn(ident, db, LSP_SYMBOL_TYPES);
-    if (owner) symbolOwners.add(owner);
-  }
-
-  return {
-    filePaths,
-    symbolRefs: [...symbolOwners].map($id => ({ $id })),
-  };
-}
-
-/** `Plan.relatedSymbols` accepts these types only (matches AnyLspSymbol). A
- *  loose blacklist (e.g. exclude Plan) lets unrelated owners like AgentSession
- *  / Span through and the insert then rejects the whole batch. Whitelisting
- *  here matches the field's schema exactly. */
-const LSP_SYMBOL_TYPES = new Set([
-  'LspModule', 'LspNamespace', 'LspClass', 'LspInterface',
-  'LspEnum', 'LspFunction', 'LspMethod', 'LspConstructor',
-]);
-
-/** Pull every `[label](target)` target whose path looks like a file. */
-export function extractFilePathCandidates(content: string): string[] {
-  const out = new Set<string>();
-  for (const m of content.matchAll(MD_LINK_RE)) {
-    const target = m[1]!.trim();
-    if (!target) continue;
-    if (/^https?:/i.test(target)) continue;
-    if (/^mailto:/i.test(target)) continue;
-    if (target.startsWith('#')) continue;
-    const stripped = target.split(/[#:]/, 1)[0]!.trim();
-    if (stripped) out.add(stripped);
-  }
-  return [...out];
-}
-
-/** Pull identifier-shaped tokens from inline code spans. */
-export function extractIdentifierCandidates(content: string): string[] {
-  const codeSpans: string[] = [];
-  for (const m of content.matchAll(INLINE_CODE_RE)) {
-    codeSpans.push(m[1]!);
-  }
-  const all = new Set<string>();
-  for (const span of codeSpans) {
-    for (const id of extractIdentifiers(span)) all.add(id);
-  }
-  return [...all];
-}
-
-/** Resolve `value` to its single named-type ancestor whose type is in `allowed`. */
-async function resolveSingleNamedOwnerIn(
-  value: string, db: Db, allowed: Set<string>,
-): Promise<string | null> {
-  const symbolIds = await querySymbolExact(value, db);
-  if (symbolIds.length === 0) return null;
-  const owners = new Set<string>();
-  for (const sid of symbolIds) {
-    const p = db.findNamedParent(sid);
-    if (!p) continue;
-    if (!allowed.has(p.typeName)) continue;
-    owners.add(p.id);
-    if (owners.size > 1) return null;
-  }
-  return owners.size === 1 ? [...owners][0]! : null;
-}
-
-async function querySymbolExact(value: string, db: Db): Promise<string[]> {
-  try {
-    const q = parseQuery(`Symbol "${escapeStr(value)}"`);
-    return await executeQuery(q, db);
-  } catch {
-    return [];
-  }
-}
-
-function escapeStr(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
+// Title / link / identifier extraction helpers live in `./planExtract.ts` —
+// shared with the codex provider's in-message `<proposed_plan>` extractor.

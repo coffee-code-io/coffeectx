@@ -30,6 +30,7 @@
  */
 
 import { createReadStream, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import Database from 'better-sqlite3';
 import type { RawContent, RawLogMessage } from '../reader.js';
@@ -75,6 +76,11 @@ export class CodexProvider implements AgentLogProvider {
       return { sessions, messages };
     }
 
+    // Strict cwd filter when the indexer passes a repoPath: codex stores
+    // every session globally in one sqlite, so without this we'd bleed
+    // every other project's sessions into the active DB.
+    const cwdFilter = options.repoPath ? resolve(options.repoPath) : null;
+
     const db = new Database(this.opts.statePath, { readonly: true, fileMustExist: true });
     try {
       const rows = db
@@ -88,6 +94,7 @@ export class CodexProvider implements AgentLogProvider {
         .all() as ThreadRow[];
 
       for (const row of rows) {
+        if (cwdFilter && row.cwd !== cwdFilter) continue;
         // `created_at` is epoch SECONDS in older rows; `created_at_ms` is
         // epoch ms in newer rows. Prefer ms when present.
         const createdMs = typeof row.created_at_ms === 'number' && row.created_at_ms > 0
@@ -255,18 +262,29 @@ async function readCodexRollout(
       const inputStr = payload['input'];
       const callId = (payload['call_id'] as string | undefined) ?? recId;
       if (!name) continue;
-      const { toolName, parsed } = adaptCustomTool(name, typeof inputStr === 'string' ? inputStr : '');
-      out.push({
-        type: 'assistant',
-        uuid: recId,
-        parentUuid: null,
-        sessionId,
-        timestamp,
-        cwd,
-        message: {
-          role: 'assistant',
-          content: [{ type: 'tool_use', id: callId, name: toolName, input: parsed }],
-        },
+      // One custom_tool_call can encode multiple file ops (apply_patch with
+      // several `*** Add File:` / `*** Update File:` chunks). Emit one
+      // assistant tool_use per file so the classifier produces one
+      // FileOperation per file.
+      const ops = adaptCustomTool(name, typeof inputStr === 'string' ? inputStr : '');
+      ops.forEach((op, i) => {
+        out.push({
+          type: 'assistant',
+          uuid: ops.length > 1 ? `${recId}:${i}` : recId,
+          parentUuid: null,
+          sessionId,
+          timestamp,
+          cwd,
+          message: {
+            role: 'assistant',
+            content: [{
+              type: 'tool_use',
+              id: ops.length > 1 ? `${callId}:${i}` : callId,
+              name: op.toolName,
+              input: op.parsed,
+            }],
+          },
+        });
       });
       continue;
     }
@@ -325,36 +343,81 @@ function adaptToolInput(claudeName: string, codexInput: Record<string, unknown>)
 
 /**
  * Custom-tool calls (currently just `apply_patch`) carry a string `input`
- * rather than a JSON-encoded args object. We crack the patch header to
- * decide whether it's a Write (new file) or an Edit (in-place change), and
- * normalise the payload to the classifier's `Write` / `Edit` schema.
+ * rather than a JSON-encoded args object. We crack the patch into one
+ * per-file chunk per `*** (Add|Update|Delete) File:` header, normalising
+ * each into the classifier's `Write` / `Edit` schema. Multi-file patches —
+ * common when codex bootstraps a project — would otherwise lose every
+ * file except the first.
+ *
+ * Patch shape (codex / OpenAI tooling):
+ *
+ *   *** Begin Patch
+ *   *** Add File: foo.ts
+ *   +line1
+ *   +line2
+ *   *** Update File: bar.ts
+ *   @@
+ *    keep
+ *   -drop
+ *   +add
+ *   *** End Patch
  */
-function adaptCustomTool(name: string, input: string): { toolName: string; parsed: Record<string, unknown> } {
+function adaptCustomTool(
+  name: string,
+  input: string,
+): Array<{ toolName: string; parsed: Record<string, unknown> }> {
   const lower = name.toLowerCase();
   if (lower !== 'apply_patch') {
-    return { toolName: toClaudeToolName(name), parsed: { _raw: input } };
+    return [{ toolName: toClaudeToolName(name), parsed: { _raw: input } }];
   }
-  const addMatch = input.match(/^\*\*\* Add File: (.+)$/m);
-  const updateMatch = input.match(/^\*\*\* Update File: (.+)$/m);
-  if (addMatch) {
-    const filePath = addMatch[1]!.trim();
-    // Extract the additions to use as a preview.
-    const content = input
+
+  // Split the patch into chunks keyed by file. Each header line tags the
+  // op (Add/Update/Delete) and the path; the following lines (until the
+  // next header or `*** End Patch`) form that file's body.
+  const headerRe = /^\*\*\* (Add|Update|Delete) File: (.+)$/gm;
+  const chunks: Array<{ op: 'Add' | 'Update' | 'Delete'; path: string; body: string }> = [];
+  const matches: Array<{ op: 'Add' | 'Update' | 'Delete'; path: string; start: number; end: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = headerRe.exec(input)) !== null) {
+    matches.push({
+      op: m[1] as 'Add' | 'Update' | 'Delete',
+      path: m[2]!.trim(),
+      start: m.index + m[0]!.length + 1, // skip past the header line + its newline
+      end: -1,                            // patched below
+    });
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const next = matches[i + 1];
+    matches[i]!.end = next ? next.start - (`*** ${next.op} File: ${next.path}`.length + 1) : input.length;
+    chunks.push({
+      op: matches[i]!.op,
+      path: matches[i]!.path,
+      body: input.slice(matches[i]!.start, matches[i]!.end),
+    });
+  }
+
+  if (chunks.length === 0) {
+    // Unknown patch shape — surface the raw text as a placeholder Edit so
+    // we don't silently drop the tool_use.
+    return [{ toolName: 'Edit', parsed: { file_path: '', new_string: input } }];
+  }
+
+  return chunks.map(({ op, path, body }) => {
+    if (op === 'Delete') {
+      // Empty content signals deletion; classifier produces a file_edit
+      // event that at least lands the path in `filesChanged` so span
+      // linking still sees the touch.
+      return { toolName: 'Edit', parsed: { file_path: path, new_string: '' } };
+    }
+    // For Add / Update: the body is a unified-diff-ish slice. Pull the
+    // `+`-prefixed lines (excluding `+++` headers) as a preview of the
+    // new content — same heuristic the previous implementation used.
+    const content = body
       .split('\n')
       .filter(l => l.startsWith('+') && !l.startsWith('+++'))
       .map(l => l.slice(1))
       .join('\n');
-    return { toolName: 'Write', parsed: { file_path: filePath, content } };
-  }
-  if (updateMatch) {
-    const filePath = updateMatch[1]!.trim();
-    const newStr = input
-      .split('\n')
-      .filter(l => l.startsWith('+') && !l.startsWith('+++'))
-      .map(l => l.slice(1))
-      .join('\n');
-    return { toolName: 'Edit', parsed: { file_path: filePath, new_string: newStr } };
-  }
-  // Unknown patch shape — keep the raw text so it lands as a ShellExecution-like blob.
-  return { toolName: 'Edit', parsed: { file_path: '', new_string: input } };
+    if (op === 'Add') return { toolName: 'Write', parsed: { file_path: path, content } };
+    return { toolName: 'Edit', parsed: { file_path: path, new_string: content } };
+  });
 }
