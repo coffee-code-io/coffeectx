@@ -15,4 +15,6 @@ export type { BackupManifest } from './manifest.js';
 export {
   BACKUPS_DIR, SNAPSHOTS_DIR, FILE_HASHES_PATH, CLAUDE_PROJECTS_DIR,
   projectDbPath, projectSnapshotDir, claudeLogsDirFor, encodeClaudeProjectDir,
+  resolveAgentLogJob,
 } from './paths.js';
+export type { AgentLogJob, AgentLogKind } from './paths.js';

@@ -20,6 +20,7 @@ export {
   COFFEECODE_HOME,
   CLAUDE_DIR,
   PI_AGENT_DIR,
+  defaultPiSessionsDirFor,
   CONFIG_PATH,
   DB_DIR,
 } from './config.js';

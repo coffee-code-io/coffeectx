@@ -66,18 +66,35 @@ export const CLAUDE_DIR = process.env['CLAUDE_CONFIG_DIR'] && process.env['CLAUD
 
 /**
  * Resolved location of pi.dev's per-user state (auth.json, settings.json,
- * sessions, themes, …). Co-located under `$COFFEECODE_DIR/.pi/agent` so a
- * single `COFFEECODE_HOME` override moves both coffeectx and pi state.
+ * sessions, themes, …). Order of precedence:
+ *   1. `$PI_CODING_AGENT_DIR` env var — wins if the user exported it
+ *      explicitly (their intent overrides ours).
+ *   2. `$COFFEECODE_DIR/.pi/agent` — co-located under coffeectx state so a
+ *      single `COFFEECODE_HOME` override moves both worlds together.
  *
- * Pi resolves every one of its paths off the `PI_CODING_AGENT_DIR` env var
- * (see `getAgentDir()` in @earendil-works/pi-coding-agent — it reads
- * `process.env[ENV_AGENT_DIR]` at call time and falls back to
- * `~/.pi/agent/`). We set the env var here as a module-load side-effect,
- * unless the user already exported a value (their intent wins).
+ * Pi resolves every one of its paths off the same env var (see `getAgentDir()`
+ * in @earendil-works/pi-coding-agent — reads `process.env[ENV_AGENT_DIR]` at
+ * call time, falls back to `~/.pi/agent/`). We set the env var here when the
+ * user hasn't, so pi finds the co-located store.
  */
-export const PI_AGENT_DIR = join(COFFEECODE_DIR, '.pi', 'agent');
+export const PI_AGENT_DIR = process.env['PI_CODING_AGENT_DIR'] && process.env['PI_CODING_AGENT_DIR'].length > 0
+  ? process.env['PI_CODING_AGENT_DIR']
+  : join(COFFEECODE_DIR, '.pi', 'agent');
 if (!process.env['PI_CODING_AGENT_DIR']) {
   process.env['PI_CODING_AGENT_DIR'] = PI_AGENT_DIR;
+}
+
+/**
+ * Default pi.dev sessions directory for `repoPath`, matching the encoding
+ * in pi-coding-agent's `getDefaultSessionDir`
+ * (`node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js`):
+ * strip leading separator, replace remaining `/`, `\\`, `:` with `-`, wrap
+ * in `--…--`. Pure function — no fs side effects, unlike pi's own helper
+ * which mkdirs on read.
+ */
+export function defaultPiSessionsDirFor(repoPath: string): string {
+  const safe = `--${repoPath.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
+  return join(PI_AGENT_DIR, 'sessions', safe);
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────

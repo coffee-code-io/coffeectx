@@ -5,7 +5,7 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { COFFEECODE_DIR, DB_DIR, CLAUDE_DIR, loadConfig } from '@coffeectx/core';
+import { COFFEECODE_DIR, DB_DIR, CLAUDE_DIR, defaultPiSessionsDirFor, loadConfig } from '@coffeectx/core';
 
 /** Where backups live. Sibling of `db/` and `snapshots/`. */
 export const BACKUPS_DIR = join(COFFEECODE_DIR, 'backups');
@@ -74,6 +74,42 @@ export function claudeLogsDirFor(repoPath: string): string {
   return join(CLAUDE_PROJECTS_DIR, encodeClaudeProjectDir(repoPath));
 }
 
+/** Configured agent-log import for the project — claude/codex/pi/none. */
+export type AgentLogKind = 'claude' | 'codex' | 'pi';
+export interface AgentLogJob {
+  kind: AgentLogKind;
+  /** Source path read from `parameters` — directory for claude/pi, file for codex. */
+  path: string;
+}
+
+/**
+ * Pick the project's enabled agent-log job and return its source path. Reads
+ * config exactly the way the scheduler does — so the harness uses the same
+ * agent the daemon would. Returns null if none is enabled (the harness then
+ * skips the log-import step entirely). When more than one is enabled (a
+ * mis-configured project), the first encountered wins; init only ever
+ * enables one.
+ */
+export function resolveAgentLogJob(
+  projectEntry: { repoPath?: string; jobs?: Record<string, { enabled?: boolean; parameters?: Record<string, unknown> }> },
+): AgentLogJob | null {
+  const jobs = projectEntry.jobs ?? {};
+  // Field key per provider — must match indexer/src/jobs/registry.ts.
+  const candidates: Array<{ kind: AgentLogKind; paramKey: string; fallback?: () => string | undefined }> = [
+    { kind: 'claude', paramKey: 'path',         fallback: () => projectEntry.repoPath ? claudeLogsDirFor(projectEntry.repoPath) : undefined },
+    { kind: 'codex',  paramKey: 'statePath' },
+    { kind: 'pi',     paramKey: 'sessionsPath', fallback: () => projectEntry.repoPath ? defaultPiSessionsDirFor(projectEntry.repoPath) : undefined },
+  ];
+  for (const c of candidates) {
+    const job = jobs[c.kind];
+    if (!job?.enabled) continue;
+    const raw = job.parameters?.[c.paramKey];
+    const path = typeof raw === 'string' && raw.length > 0 ? raw : c.fallback?.();
+    if (path) return { kind: c.kind, path };
+  }
+  return null;
+}
+
 /** Layout under a backup directory. */
 export function backupSnapshotsDir(backupName: string): string {
   return join(backupDir(backupName), 'snapshots');
@@ -84,8 +120,8 @@ export function backupDbPath(backupName: string, project: string): string {
 export function backupHashesPath(backupName: string): string {
   return join(backupDir(backupName), 'file-hashes.json');
 }
-export function backupClaudeLogsDir(backupName: string): string {
-  return join(backupDir(backupName), 'claude-logs');
+export function backupAgentLogsDir(backupName: string): string {
+  return join(backupDir(backupName), 'agent-logs');
 }
 export function backupManifestPath(backupName: string): string {
   return join(backupDir(backupName), 'manifest.json');

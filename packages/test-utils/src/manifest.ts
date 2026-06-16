@@ -15,7 +15,13 @@ export interface BackupManifest {
     snapshots: { path: string; count: number; totalBytes: number };
     db:        { path: string; bytes: number };
     fileHashes:{ entryCount: number };
-    claudeLogs:{ path: string; sessions: number; totalBytes: number };
+    /**
+     * Agent-log capture from whichever provider the project had enabled
+     * (claude/codex/pi). `kind` is what restore reads to know how to put
+     * the bytes back. `sessions` for claude/pi is JSONL file count; for
+     * codex it's the rowcount in the sqlite if we can read it, else 0.
+     */
+    agentLogs: { kind: 'claude' | 'codex' | 'pi'; path: string; sessions: number; totalBytes: number };
   };
 }
 

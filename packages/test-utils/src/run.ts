@@ -2,9 +2,15 @@
  * Run the indexing pipeline once against the live (post-restore) state.
  *
  *   1. open project DB, sync types
- *   2. ClaudeProvider → indexAgentSessions
+ *   2. dispatch to the project's configured agent-log provider
+ *      (claude / codex / pi) → indexAgentSessions; skipped if none enabled
  *   3. (unless skipLsp) indexWithLsp against the existing snapshot index.jsonl
- *   4. linkSpans
+ *   4. plans + linkSpans
+ *
+ * Mirrors the daemon's set of jobs minus the per-Span indexer (which talks
+ * to an LLM and isn't a deterministic harness target). Other jobs the user
+ * may have enabled in config (skills, etc.) are deliberately not run here —
+ * trigger them manually via `coffeectx job trigger <name>` if needed.
  *
  * Steps are wrapped in try/finally so partial failure still closes the DB
  * + LSP client. The supervisor instance in step 3 is created without
@@ -18,7 +24,10 @@ import {
   Db, createEmbedFn, loadConfig, resolveProjectEmbed, syncAllTypes, CLAUDE_DIR,
 } from '@coffeectx/core';
 import { indexAgentSessions } from '@coffeectx/indexer/dist/agentLog/indexLogs.js';
+import type { AgentLogProvider } from '@coffeectx/indexer/dist/agentLog/provider.js';
 import { ClaudeProvider } from '@coffeectx/indexer/dist/agentLog/providers/claude.js';
+import { CodexProvider } from '@coffeectx/indexer/dist/agentLog/providers/codex.js';
+import { PiProvider } from '@coffeectx/indexer/dist/agentLog/providers/pi.js';
 import { linkSpans } from '@coffeectx/indexer/dist/agentLog/spanLink.js';
 import { indexWithLsp } from '@coffeectx/indexer/dist/lsp/indexSymbols.js';
 import {
@@ -27,7 +36,7 @@ import {
 } from '@coffeectx/indexer/dist/lsp/snapshotSupervisor.js';
 import { indexPlans } from '@coffeectx/indexer/dist/plans/indexPlans.js';
 import { loadFileHashes } from '@coffeectx/indexer/dist/fileHashes.js';
-import { claudeLogsDirFor, projectDbPath } from './paths.js';
+import { projectDbPath, resolveAgentLogJob, type AgentLogJob } from './paths.js';
 
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
 const DEFAULT_PLANS_DIR = join(CLAUDE_DIR, 'plans');
@@ -41,7 +50,8 @@ export interface RunOptions {
 }
 
 export interface RunResult {
-  logs: { sessions: number; events: number; spans: number; inserted: number; errors: number };
+  /** `kind` echoes which provider ran (or `null` if no log job was enabled). */
+  logs: { kind: AgentLogJob['kind'] | null; sessions: number; events: number; spans: number; inserted: number; errors: number };
   lsp: { files: number; nodes: number; bumped: number; deleted: number; skipped: boolean; errors: number } | null;
   plans: { files: number; inserted: number; errors: number };
   link: { scanned: number; linked: number; symbols: number; plans: number; errors: number };
@@ -55,7 +65,7 @@ export async function runFullChain(opts: RunOptions): Promise<RunResult> {
   const repoPath = projectEntry.repoPath;
   if (!repoPath) throw new Error(`project ${opts.project} has no repoPath set in config`);
 
-  const claudeLogsPath = readClaudeLogsPath(projectEntry) ?? claudeLogsDirFor(repoPath);
+  const agentLog = resolveAgentLogJob(projectEntry);
   const plansDir = readPlansDir(projectEntry) ?? DEFAULT_PLANS_DIR;
   const embedCfg = resolveProjectEmbed(config, opts.project);
   const embedFn = createEmbedFn(embedCfg);
@@ -74,7 +84,7 @@ export async function runFullChain(opts: RunOptions): Promise<RunResult> {
   });
 
   const result: RunResult = {
-    logs: { sessions: 0, events: 0, spans: 0, inserted: 0, errors: 0 },
+    logs: { kind: agentLog?.kind ?? null, sessions: 0, events: 0, spans: 0, inserted: 0, errors: 0 },
     lsp: null,
     plans: { files: 0, inserted: 0, errors: 0 },
     link: { scanned: 0, linked: 0, symbols: 0, plans: 0, errors: 0 },
@@ -91,21 +101,26 @@ export async function runFullChain(opts: RunOptions): Promise<RunResult> {
     //    snapshot.
     await supervisor.start();
     try {
-    // 1. Agent log
-    const provider = new ClaudeProvider({ paths: [claudeLogsPath] });
-    const hashes = loadFileHashes();
-    const r = await indexAgentSessions(db, provider, {
-      hashes,
-      repoPath,
-      closeBeforeMs: opts.closeBeforeMs,
-    });
-    result.logs = {
-      sessions: r.sessions,
-      events: r.events,
-      spans: r.spans,
-      inserted: r.inserted,
-      errors: r.errors.length,
-    };
+    // 1. Agent log — dispatch by the project's enabled provider.
+    if (agentLog) {
+      const provider = makeAgentLogProvider(agentLog);
+      const hashes = loadFileHashes();
+      const r = await indexAgentSessions(db, provider, {
+        hashes,
+        repoPath,
+        closeBeforeMs: opts.closeBeforeMs,
+      });
+      result.logs = {
+        kind: agentLog.kind,
+        sessions: r.sessions,
+        events: r.events,
+        spans: r.spans,
+        inserted: r.inserted,
+        errors: r.errors.length,
+      };
+    } else {
+      console.warn(`[run] no agent-log job enabled for ${opts.project} — skipping log import (lsp/plans/link still run)`);
+    }
 
     // 2. LSP
     if (!opts.skipLsp) {
@@ -160,9 +175,12 @@ export async function runFullChain(opts: RunOptions): Promise<RunResult> {
   return result;
 }
 
-function readClaudeLogsPath(projectEntry: { jobs?: Record<string, { parameters?: Record<string, unknown> }> }): string | undefined {
-  const path = projectEntry.jobs?.claude?.parameters?.['path'];
-  return typeof path === 'string' && path.length > 0 ? path : undefined;
+function makeAgentLogProvider(spec: AgentLogJob): AgentLogProvider {
+  switch (spec.kind) {
+    case 'claude': return new ClaudeProvider({ paths: [spec.path] });
+    case 'codex':  return new CodexProvider({ statePath: spec.path });
+    case 'pi':     return new PiProvider({ sessionsPath: spec.path });
+  }
 }
 
 function readLspCommand(projectEntry: { jobs?: Record<string, { parameters?: Record<string, unknown> }> }): string | undefined {

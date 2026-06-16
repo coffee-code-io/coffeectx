@@ -61,7 +61,7 @@ async function main(): Promise<void> {
       console.log(`[backup] wrote ${r.dir}`);
       console.log(`         project=${r.manifest.project}  recordedAt=${r.manifest.recordedAt}`);
       console.log(`         snapshots=${r.manifest.sources.snapshots.count} (${humanBytes(r.manifest.sources.snapshots.totalBytes)})`);
-      console.log(`         db=${humanBytes(r.manifest.sources.db.bytes)}  hashes=${r.manifest.sources.fileHashes.entryCount}  logs=${r.manifest.sources.claudeLogs.sessions} sessions`);
+      console.log(`         db=${humanBytes(r.manifest.sources.db.bytes)}  hashes=${r.manifest.sources.fileHashes.entryCount}  agent=${r.manifest.sources.agentLogs.kind}  sessions=${r.manifest.sources.agentLogs.sessions}`);
       return;
     }
 
@@ -135,7 +135,8 @@ async function main(): Promise<void> {
             'project=' + m.project.padEnd(16),
             'at=' + m.recordedAt,
             'snapshots=' + m.sources.snapshots.count,
-            'sessions=' + m.sources.claudeLogs.sessions,
+            'agent=' + m.sources.agentLogs.kind,
+            'sessions=' + m.sources.agentLogs.sessions,
           );
         } catch { /* skip malformed */ }
       }
@@ -187,7 +188,7 @@ function humanBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
 
-function printRun(r: { logs: Record<string, number>; lsp: Record<string, number | boolean> | null; plans: Record<string, number>; link: Record<string, number> }): void {
+function printRun(r: import('./run.js').RunResult): void {
   console.log('[run] logs: ', r.logs);
   console.log('[run] lsp:  ', r.lsp ?? '(skipped)');
   console.log('[run] plans:', r.plans);

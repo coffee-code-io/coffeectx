@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import type { Db, CoffeectxConfig, AuthSettings, DeepNode, Skill, SkillTrigger } from '@coffeectx/core';
-import { loadAllSkills, parseTriggers, CLAUDE_DIR } from '@coffeectx/core';
+import { loadAllSkills, parseTriggers, CLAUDE_DIR, defaultPiSessionsDirFor } from '@coffeectx/core';
 import { runUserJob } from '../agentRun/runUserJob.js';
 import { runSessionIndexer } from '../agentRun/runSessionIndexer.js';
 import type { Job, JobTrigger } from './types.js';
@@ -206,8 +206,12 @@ function buildPiJob(config: CoffeectxConfig, projectName: string): Job {
     defaultEnabled: false,
     triggers: [{ kind: 'timer', intervalMs: readIntervalMs(params, DEFAULT_AGENTLOG_INTERVAL_MS) }],
     async run(ctx) {
-      const sessionsPath = readString(ctx.parameters, 'sessionsPath');
-      if (!sessionsPath) return { message: 'no sessionsPath configured — skipped' };
+      // Fall back to pi's per-repo default (under PI_AGENT_DIR, which honors
+      // PI_CODING_AGENT_DIR). Project must at least have a repoPath for this
+      // to compute a useful default; otherwise skip.
+      const explicit = readString(ctx.parameters, 'sessionsPath');
+      const sessionsPath = explicit ?? (ctx.project.repoPath ? defaultPiSessionsDirFor(ctx.project.repoPath) : undefined);
+      if (!sessionsPath) return { message: 'no sessionsPath and no repoPath — skipped' };
 
       const provider = new PiProvider({ sessionsPath: resolve(sessionsPath) });
       const r = await indexAgentSessions(ctx.db, provider, {

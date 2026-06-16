@@ -17,6 +17,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   Db, syncAllTypes, loadConfig, updateConfig, validateAuth, CLAUDE_DIR,
+  defaultPiSessionsDirFor,
 } from '@coffeectx/core';
 import type { AuthSettings, JobConfig, ProjectEntry, SyncResult } from '@coffeectx/core';
 import { DB_DIR, dbPathForName, sanitizeName } from './projects.js';
@@ -199,7 +200,8 @@ function defaultAgentLogPath(kind: Exclude<AgentLogKind, 'none'>, repoPath: stri
     return join(CLAUDE_PROJECTS_DIR, repoPath.replace(/\//g, '-'));
   }
   if (kind === 'codex') return DEFAULT_CODEX_STATE_PATH;
-  return ''; // pi has no sensible default — user must supply
+  // pi: derive from PI_AGENT_DIR (honors PI_CODING_AGENT_DIR override).
+  return defaultPiSessionsDirFor(repoPath);
 }
 
 async function promptEmbedAuth(): Promise<AuthSettings> {

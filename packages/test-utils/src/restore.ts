@@ -1,7 +1,7 @@
 /**
  * Restore a project to a captured backup state. Order matters:
  *   1. Wipe live DB, snapshot store, and project-scoped hashes.
- *   2. Copy backup snapshots, DB, and claude logs back into their live
+ *   2. Copy backup snapshots, DB, and agent logs back into their live
  *      locations.
  *   3. Merge backup's filtered file-hashes into the live JSON.
  *
@@ -11,15 +11,15 @@
  */
 
 import {
-  cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync,
+  cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, rmSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { loadConfig } from '@coffeectx/core';
 import {
   FILE_HASHES_PATH,
-  backupClaudeLogsDir, backupDbPath, backupHashesPath,
+  backupAgentLogsDir, backupDbPath, backupHashesPath,
   backupManifestPath, backupSnapshotsDir,
-  claudeLogsDirFor, dbAndSiblings, projectDbPath, projectSnapshotDir,
+  dbAndSiblings, projectDbPath, projectSnapshotDir,
 } from './paths.js';
 import { readManifest, type BackupManifest } from './manifest.js';
 import { resetDb, resetHashes, resetSnapshots } from './reset.js';
@@ -40,8 +40,12 @@ export function restore(opts: RestoreOptions): BackupManifest {
   const projectEntry = config.projects[opts.project];
   if (!projectEntry) throw new Error(`unknown project: ${opts.project}`);
 
-  const repoPath = projectEntry.repoPath ?? manifest.repoPath;
-  const claudeLogsLive = readClaudeLogsPath(projectEntry) ?? claudeLogsDirFor(repoPath);
+  const _repoPath = projectEntry.repoPath ?? manifest.repoPath;
+  void _repoPath;
+  // Manifest is the source of truth for where the agent logs landed when
+  // the backup was taken — restore writes them back to the same path.
+  const logsLivePath = manifest.sources.agentLogs.path;
+  const logsKind = manifest.sources.agentLogs.kind;
 
   // ── Wipe live state ──────────────────────────────────────────────────────
   resetDb(opts.project);
@@ -86,21 +90,32 @@ export function restore(opts: RestoreOptions): BackupManifest {
     writeFileSync(FILE_HASHES_PATH, JSON.stringify(merged, null, 2) + '\n');
   }
 
-  // ── Restore claude logs ──────────────────────────────────────────────────
+  // ── Restore agent logs ───────────────────────────────────────────────────
   // We rm + cp rather than merge — the user explicitly opted into a
   // replay, so the live logs should match the backup byte-for-byte.
-  const logsBackup = backupClaudeLogsDir(opts.name);
-  if (existsSync(logsBackup)) {
-    if (existsSync(claudeLogsLive)) rmSync(claudeLogsLive, { recursive: true, force: true });
-    mkdirSync(dirname(claudeLogsLive), { recursive: true });
-    cpSync(logsBackup, claudeLogsLive, { recursive: true });
+  // For codex (single sqlite file) the backup contains `agent-logs/<basename>`;
+  // for claude / pi the backup root IS the live root.
+  const logsBackup = backupAgentLogsDir(opts.name);
+  if (logsLivePath && existsSync(logsBackup)) {
+    if (logsKind === 'codex') {
+      const fname = basename(logsLivePath);
+      const src = join(logsBackup, fname);
+      if (existsSync(src)) {
+        if (existsSync(logsLivePath)) rmSync(logsLivePath, { force: true });
+        mkdirSync(dirname(logsLivePath), { recursive: true });
+        cpSync(src, logsLivePath);
+      }
+    } else if (hasContents(logsBackup)) {
+      if (existsSync(logsLivePath)) rmSync(logsLivePath, { recursive: true, force: true });
+      mkdirSync(dirname(logsLivePath), { recursive: true });
+      cpSync(logsBackup, logsLivePath, { recursive: true });
+    }
   }
 
   return manifest;
 }
 
-function readClaudeLogsPath(projectEntry: { jobs?: Record<string, { parameters?: Record<string, unknown> }> }): string | undefined {
-  const params = projectEntry.jobs?.claude?.parameters;
-  const path = params?.['path'];
-  return typeof path === 'string' && path.length > 0 ? path : undefined;
+function hasContents(dir: string): boolean {
+  try { return statSync(dir).isDirectory() && readdirSync(dir).length > 0; }
+  catch { return false; }
 }

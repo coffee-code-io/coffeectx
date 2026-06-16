@@ -11,7 +11,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { loadConfig } from '@coffeectx/core';
 import { purgeSnapshots } from '@coffeectx/indexer/dist/lsp/snapshotSupervisor.js';
-import { FILE_HASHES_PATH, claudeLogsDirFor, dbAndSiblings, projectDbPath } from './paths.js';
+import { FILE_HASHES_PATH, dbAndSiblings, projectDbPath, resolveAgentLogJob } from './paths.js';
 
 export function resetDb(project: string): void {
   // SQLite in WAL mode keeps `-wal` and `-shm` siblings; removing only the
@@ -24,10 +24,11 @@ export function resetDb(project: string): void {
 
 export function resetHashes(project: string): void {
   const config = loadConfig();
-  const repoPath = config.projects[project]?.repoPath;
-  if (!repoPath) return;
+  const entry = config.projects[project];
+  const repoPath = entry?.repoPath;
+  if (!repoPath || !entry) return;
   if (!existsSync(FILE_HASHES_PATH)) return;
-  const claudeLogsDir = readClaudeLogsPath(config.projects[project] ?? {}) ?? claudeLogsDirFor(repoPath);
+  const agentLog = resolveAgentLogJob(entry);
   let all: Record<string, unknown>;
   try { all = JSON.parse(readFileSync(FILE_HASHES_PATH, 'utf-8')); }
   catch { return; }
@@ -35,7 +36,7 @@ export function resetHashes(project: string): void {
   const kept: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(all)) {
     if (k === lspKey) continue;
-    if (k.startsWith(claudeLogsDir)) continue;
+    if (agentLog && k.startsWith(agentLog.path)) continue;
     kept[k] = v;
   }
   writeFileSync(FILE_HASHES_PATH, JSON.stringify(kept, null, 2) + '\n');
@@ -44,10 +45,4 @@ export function resetHashes(project: string): void {
 /** Wipe the chokidar snapshot store for this project. */
 export function resetSnapshots(project: string): void {
   purgeSnapshots(project);
-}
-
-function readClaudeLogsPath(projectEntry: { jobs?: Record<string, { parameters?: Record<string, unknown> }> }): string | undefined {
-  const params = projectEntry.jobs?.claude?.parameters;
-  const path = params?.['path'];
-  return typeof path === 'string' && path.length > 0 ? path : undefined;
 }
