@@ -1,6 +1,6 @@
 {
   "name": "@coffeectx/core",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Core types, schema, and DB adapter for coffeectx",
   "type": "module",
   "main": "./dist/index.js",

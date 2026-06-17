@@ -1,6 +1,6 @@
 {
   "name": "@coffeectx/pi-plugin",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "pi.dev extension that exposes the coffeectx knowledge graph as tools. Install + reference from ~/.pi/agent/extensions/.",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,8 +15,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@coffeectx/core": "^0.1.5",
-    "@coffeectx/tools": "^0.1.5",
+    "@coffeectx/core": "^0.1.6",
+    "@coffeectx/tools": "^0.1.6",
     "typebox": "^1.1.38"
   },
   "peerDependencies": {
