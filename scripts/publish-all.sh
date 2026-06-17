@@ -17,8 +17,11 @@
 # Skips `@coffeectx/webui` because it's marked `private: true` (its built
 # assets ship bundled inside the indexer tarball via `webui-dist/`).
 #
-# Re-publishing the same version is a hard error from npm — bump the patch
-# version first (`npm version patch --workspaces --no-git-tag-version`).
+# Re-publishing the same version is a hard error from npm. For the common
+# case where some workspaces were bumped and others weren't, the loop below
+# checks `npm view <pkg>@<v> version` first and skips the package when that
+# version is already on the registry — instead of letting `npm publish` fail
+# with EPUBLISHCONFLICT and aborting the rest of the run.
 
 set -euo pipefail
 
@@ -56,11 +59,36 @@ PACKAGES=(
   @coffeectx/test-utils
 )
 
+published=0
+skipped=0
 for pkg in "${PACKAGES[@]}"; do
   echo
-  echo "==> Publishing $pkg..."
+  # Read the workspace's local version from its package.json. `npm pkg get
+  # -w <pkg>` returns a JSON object keyed by package name (`{"@x/y":"0.1.6"}`)
+  # — pluck the value out via node so we don't depend on jq.
+  local_version="$(node -e "
+    const r = require('child_process').execSync('npm pkg get version -w \"$pkg\"', {encoding:'utf-8'});
+    process.stdout.write(Object.values(JSON.parse(r))[0] || '');
+  " 2>/dev/null)"
+  if [[ -z "$local_version" ]]; then
+    echo "==> $pkg: could not read local version — skipping" >&2
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  # `npm view <pkg>@<v> version` prints the version when it exists on the
+  # registry, empty otherwise. Errors (404, network) also yield empty —
+  # safest because publish will reject if there's an actual conflict.
+  if [[ -n "$(npm view "$pkg@$local_version" version 2>/dev/null)" ]]; then
+    echo "==> $pkg@$local_version already published — skipping"
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  echo "==> Publishing $pkg@$local_version..."
   npm publish -w "$pkg"
+  published=$((published + 1))
 done
 
 echo
-echo "All ${#PACKAGES[@]} packages published successfully."
+echo "Done. Published $published, skipped $skipped (already on registry)."
