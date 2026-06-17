@@ -13,11 +13,10 @@
  */
 
 import { mkdirSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   Db, syncAllTypes, loadConfig, updateConfig, validateAuth, CLAUDE_DIR,
-  defaultPiSessionsDirFor,
+  CODEX_STATE_PATH, defaultPiSessionsDirFor,
 } from '@coffeectx/core';
 import type { AuthSettings, JobConfig, ProjectEntry, SyncResult } from '@coffeectx/core';
 import { DB_DIR, dbPathForName, sanitizeName } from './projects.js';
@@ -26,7 +25,8 @@ import { runFirstSnapshot } from './lsp/snapshotSupervisor.js';
 
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
 const CLAUDE_PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
-const DEFAULT_CODEX_STATE_PATH = join(homedir(), '.codex', 'state_5.sqlite');
+// Codex's session sqlite — derived from CODEX_HOME via core's resolver.
+const DEFAULT_CODEX_STATE_PATH = CODEX_STATE_PATH;
 const DEFAULT_PLANS_DIR = join(CLAUDE_DIR, 'plans');
 
 const AGENT_LOG_KINDS = ['claude', 'codex', 'pi', 'none'] as const;
@@ -222,7 +222,8 @@ function defaultAgentLogPath(kind: Exclude<AgentLogKind, 'none'>, repoPath: stri
     return join(CLAUDE_PROJECTS_DIR, repoPath.replace(/\//g, '-'));
   }
   if (kind === 'codex') return DEFAULT_CODEX_STATE_PATH;
-  // pi: derive from PI_AGENT_DIR (honors PI_CODING_AGENT_DIR override).
+  // pi: external pi installation, honors $PI_CODING_AGENT_DIR. Embedded pi
+  // state always lives under coffeecode and isn't surfaced here.
   return defaultPiSessionsDirFor(repoPath);
 }
 

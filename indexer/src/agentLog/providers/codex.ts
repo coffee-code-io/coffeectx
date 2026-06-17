@@ -1,5 +1,8 @@
 /**
- * Codex CLI provider — reads OpenAI Codex sessions from `~/.codex/`.
+ * Codex CLI provider — reads OpenAI Codex sessions from `$CODEX_HOME`
+ * (defaults to `~/.codex/`). The state sqlite path is configurable via
+ * `parameters.statePath`; otherwise registry.ts defaults to
+ * `CODEX_STATE_PATH` which honours the env var.
  *
  * Codex stores session metadata in a SQLite database (`state_5.sqlite`), with
  * each row in the `threads` table pointing at a `rollout_path` — the actual
@@ -42,7 +45,9 @@ import type {
 } from '../provider.js';
 
 export interface CodexProviderOptions {
-  /** Absolute path to Codex's state sqlite. Defaults to `~/.codex/state_5.sqlite`. */
+  /** Absolute path to Codex's state sqlite. Callers should derive this
+   *  from `CODEX_STATE_PATH` in `@coffeectx/core` (honours `$CODEX_HOME`)
+   *  rather than hardcoding `~/.codex/state_5.sqlite`. */
   statePath: string;
 }
 

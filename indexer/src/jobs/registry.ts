@@ -5,7 +5,7 @@
  *   - lsp[:<suffix>]    : one per `lsp` / `lsp:*` entry in project.jobs. Reads
  *                         `parameters.{repoPath, lspCommand, intervalMs}`.
  *   - claude            : index Claude Code session JSONLs.
- *   - codex             : index OpenAI Codex CLI sessions from ~/.codex/.
+ *   - codex             : index OpenAI Codex CLI sessions from $CODEX_HOME (defaults to ~/.codex/).
  *   - pi                : index pi.dev session JSONLs from a configured dir.
  *   - plans             : ingest Claude plan-mode markdown files.
  *   - span-link         : link Spans to LSP symbols + Plans at endedAt.
@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import type { Db, CoffeectxConfig, AuthSettings, DeepNode, Skill, SkillTrigger } from '@coffeectx/core';
-import { loadAllSkills, parseTriggers, CLAUDE_DIR, defaultPiSessionsDirFor } from '@coffeectx/core';
+import { loadAllSkills, parseTriggers, CLAUDE_DIR, CODEX_STATE_PATH, defaultPiSessionsDirFor } from '@coffeectx/core';
 import { runUserJob } from '../agentRun/runUserJob.js';
 import { runSessionIndexer } from '../agentRun/runSessionIndexer.js';
 import type { Job, JobTrigger } from './types.js';
@@ -44,7 +44,7 @@ const DEFAULT_PLANS_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_SKILL_FALLBACK_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
 const DEFAULT_PLANS_DIR = join(CLAUDE_DIR, 'plans');
-const DEFAULT_CODEX_STATE_PATH = join(homedir(), '.codex', 'state_5.sqlite');
+const DEFAULT_CODEX_STATE_PATH = CODEX_STATE_PATH;
 
 function projectJobParams(
   config: CoffeectxConfig,
@@ -171,7 +171,7 @@ function buildCodexJob(config: CoffeectxConfig, projectName: string): Job {
   const params = projectJobParams(config, projectName, 'codex');
   return {
     name: 'codex',
-    description: 'Index OpenAI Codex CLI sessions from ~/.codex/.',
+    description: 'Index OpenAI Codex CLI sessions from $CODEX_HOME (defaults to ~/.codex/).',
     // Every job now defaults to off — being in config.yaml is the explicit
     // signal that the user wants this job running.
     defaultEnabled: false,
