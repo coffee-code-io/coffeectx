@@ -11,15 +11,11 @@
  *   - a single global mutex: at most one job runs at a time
  */
 
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { loadConfig, resolveJobEnv, resolveJobParameters, CLAUDE_DIR, type Db, type CoffeectxConfig, type ProjectEntry, type NodeEvent } from '@coffeectx/core';
+import { loadConfig, resolveJobEnv, resolveJobParameters, type Db, type CoffeectxConfig, type ProjectEntry, type NodeEvent } from '@coffeectx/core';
 import { CronExpressionParser } from 'cron-parser';
 import type { Job, JobContext, JobTrigger } from './types.js';
 import { withRunLog } from './runLog.js';
-import {
-  PLANS_EXTENSIONS, SOURCE_EXTENSIONS, SnapshotSupervisor, type WatchSpec,
-} from '../lsp/snapshotSupervisor.js';
+import { resolveWatchSpecs, SnapshotSupervisor } from '../lsp/snapshotSupervisor.js';
 
 // Wrapper to keep the call-site name short. Returning the parsed iterator
 // (which has `.next()`) is all the scheduler needs.
@@ -220,37 +216,12 @@ export class Scheduler {
    * starting when at least one consumer exists.
    */
   private buildSnapshotSupervisor(): SnapshotSupervisor | null {
-    const projectJobs = this.config.projects[this.project.name]?.jobs ?? {};
-    const watches: WatchSpec[] = [];
-    const seenCodeRoots = new Set<string>();
-    for (const job of this.jobs.values()) {
-      if (job.name !== 'lsp' && !job.name.startsWith('lsp:')) continue;
-      const cfg = projectJobs[job.name];
-      const enabled = cfg?.enabled ?? job.defaultEnabled;
-      if (!enabled) continue;
-      const params = cfg?.parameters ?? {};
-      const raw = typeof params['repoPath'] === 'string' ? (params['repoPath'] as string) : undefined;
-      const repoPath = raw ? expandTilde(raw) : this.project.repoPath;
-      if (repoPath && !seenCodeRoots.has(repoPath)) {
-        seenCodeRoots.add(repoPath);
-        watches.push({ rootPath: repoPath, extensions: SOURCE_EXTENSIONS });
-      }
-    }
-    const plansJob = this.jobs.get('plans-claude');
-    if (plansJob) {
-      const cfg = projectJobs['plans-claude'];
-      const enabled = cfg?.enabled ?? plansJob.defaultEnabled;
-      if (enabled) {
-        const params = cfg?.parameters ?? {};
-        const raw = typeof params['plansDir'] === 'string' ? (params['plansDir'] as string) : undefined;
-        const plansDir = raw ? expandTilde(raw) : join(CLAUDE_DIR, 'plans');
-        watches.push({
-          rootPath: plansDir,
-          extensions: PLANS_EXTENSIONS,
-          allowDottedSegments: true,
-        });
-      }
-    }
+    const watches = resolveWatchSpecs(
+      this.config,
+      this.project.name,
+      this.project.repoPath,
+      this.jobs.keys(),
+    );
     if (watches.length === 0) return null;
     return new SnapshotSupervisor({ projectName: this.project.name, watches });
   }
@@ -517,12 +488,6 @@ function writeCatchupCursor(db: Db, jobName: string, cursor: number): void {
  * a single run. Safe because the scheduler holds a single-job-at-a-time
  * mutex — concurrent jobs would race on `process.env`.
  */
-function expandTilde(p: string): string {
-  if (p === '~') return homedir();
-  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
-  return p;
-}
-
 async function withScopedEnv<T>(env: Record<string, string>, fn: () => Promise<T>): Promise<T> {
   const keys = Object.keys(env);
   if (keys.length === 0) return fn();

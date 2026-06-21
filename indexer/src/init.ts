@@ -21,7 +21,7 @@ import {
 import type { AuthSettings, JobConfig, ProjectEntry, SyncResult } from '@coffeectx/core';
 import { dbPathForName, sanitizeName } from './projects.js';
 import { ask, choose, CancelError, close as closePrompt } from './prompt.js';
-import { runFirstSnapshot } from './lsp/snapshotSupervisor.js';
+import { resolveWatchSpecs, runFirstSnapshot } from './lsp/snapshotSupervisor.js';
 
 const DEFAULT_LSP_COMMAND = 'typescript-language-server --stdio';
 const CLAUDE_PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
@@ -174,20 +174,31 @@ async function bootstrapDbAndSnapshot(
     }
   }
 
+  // Compute the same watch list the daemon would. Crucially this means we
+  // do NOT snapshot `project.repoPath` directly — only the dirs that an
+  // enabled `lsp[:*]` job actually consumes (or falls back to). On a
+  // monorepo with narrow lsp:foo / lsp:bar subdir paths, that's the
+  // difference between snapshotting two small dirs and trying to walk the
+  // whole tree (chokidar then runs out of fs.watch slots).
+  const watches = resolveWatchSpecs(
+    cfg,
+    name,
+    cfg.projects[name]?.repoPath,
+    Object.keys(cfg.projects[name]?.jobs ?? {}),
+  );
   let snapshotted = false;
-  if (repoPath && existsSync(repoPath)) {
-    console.log(`  Snapshot: bootstrapping from ${repoPath}…`);
+  if (watches.length === 0) {
+    console.warn(`  Snapshot: skipped — no enabled lsp / plans-claude job to watch`);
+  } else {
+    const summary = watches.map(w => w.rootPath).join(', ');
+    console.log(`  Snapshot: bootstrapping ${watches.length} root(s): ${summary}`);
     try {
-      await runFirstSnapshot(name, repoPath);
+      await runFirstSnapshot(name, watches);
       snapshotted = true;
       console.log(`  Snapshot: done.`);
     } catch (err) {
       console.error(`  Snapshot: failed — ${(err as Error).message}`);
     }
-  } else if (repoPath) {
-    console.warn(`  Snapshot: skipped — repoPath does not exist: ${repoPath}`);
-  } else {
-    console.warn(`  Snapshot: skipped — no repoPath configured for this project`);
   }
 
   return { dbPath, repoPath, sync, snapshotted };

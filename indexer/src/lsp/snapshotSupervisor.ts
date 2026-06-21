@@ -26,9 +26,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
+import { homedir } from 'node:os';
 import { extname, join, relative, sep } from 'node:path';
 import chokidar, { type FSWatcher } from 'chokidar';
-import { COFFEECODE_DIR } from '@coffeectx/core';
+import { CLAUDE_DIR, COFFEECODE_DIR, type CoffeectxConfig } from '@coffeectx/core';
 
 const SNAPSHOT_ROOT = join(COFFEECODE_DIR, 'snapshots');
 
@@ -358,21 +359,85 @@ export function purgeSnapshots(projectName: string): void {
 }
 
 /**
- * One-shot snapshot pass for `coffeectx init`: start a supervisor over
- * `repoPath`, await its initial scan settling, stop it. The supervisor's
+ * Resolve the set of watch roots a project should snapshot. Used by both the
+ * scheduler at daemon-start AND init's first-snapshot pass so the two stay
+ * in lockstep — no surprise "init snapshotted the whole monorepo, then the
+ * daemon happily incremented from a much narrower root".
+ *
+ *   - One source-code root per enabled `lsp[:*]` job, taken from that job's
+ *     `parameters.repoPath` (falling back to the project-level `repoPath`
+ *     only when the job has none set). Deduped — multiple lsp:* jobs
+ *     pointing at the same dir contribute one watch root.
+ *   - The Claude plans dir, when `plans-claude` is enabled.
+ *
+ * The project-level `repoPath` is NEVER added directly — only through an
+ * lsp-job fallback. A project that has no enabled lsp jobs (e.g. lsp is off
+ * because the user hasn't picked a language server yet) won't watch the
+ * whole repo root, which on a monorepo is the difference between "boots
+ * fine" and "chokidar runs out of OS watcher slots".
+ */
+export function resolveWatchSpecs(
+  config: CoffeectxConfig,
+  projectName: string,
+  fallbackRepoPath: string | undefined,
+  jobNames: Iterable<string>,
+): WatchSpec[] {
+  const projectJobs = config.projects[projectName]?.jobs ?? {};
+  const watches: WatchSpec[] = [];
+  const seenCodeRoots = new Set<string>();
+  for (const jobName of jobNames) {
+    if (jobName !== 'lsp' && !jobName.startsWith('lsp:')) continue;
+    const cfg = projectJobs[jobName];
+    if (!cfg?.enabled) continue;
+    const params = cfg.parameters ?? {};
+    const raw = typeof params['repoPath'] === 'string' ? (params['repoPath'] as string) : undefined;
+    const repoPath = raw ? expandTilde(raw) : fallbackRepoPath;
+    if (repoPath && !seenCodeRoots.has(repoPath)) {
+      seenCodeRoots.add(repoPath);
+      watches.push({ rootPath: repoPath, extensions: SOURCE_EXTENSIONS });
+    }
+  }
+  const plansCfg = projectJobs['plans-claude'];
+  if (plansCfg?.enabled) {
+    const raw = typeof plansCfg.parameters?.['plansDir'] === 'string'
+      ? (plansCfg.parameters['plansDir'] as string) : undefined;
+    const plansDir = raw ? expandTilde(raw) : join(CLAUDE_DIR, 'plans');
+    watches.push({
+      rootPath: plansDir,
+      extensions: PLANS_EXTENSIONS,
+      allowDottedSegments: true,
+    });
+  }
+  return watches;
+}
+
+function expandTilde(p: string): string {
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  return p;
+}
+
+/**
+ * One-shot snapshot pass for `coffeectx init`: start a supervisor over the
+ * project's resolved watch roots (lsp jobs' repoPaths + plans dir when
+ * enabled), await its initial-scan settle, stop it. The supervisor's
  * stat-skip + `index.jsonl` semantics mean a subsequent daemon start sees
  * the work already done and won't re-copy unchanged files.
  *
- * Watches only source code (`SOURCE_EXTENSIONS`). The plans watch root is
- * outside a project repo and gets picked up by the daemon when the `plans`
- * job is enabled — no point bootstrapping it here.
+ * Mirrors `resolveWatchSpecs` exactly — must, since the daemon picks up
+ * from where init leaves off and a mismatch would re-snapshot bytes from
+ * any path covered by one but not the other.
+ *
+ * No-op when there are no roots to snapshot (e.g. lsp jobs all disabled
+ * and plans-claude off — nothing to bootstrap).
  */
-export async function runFirstSnapshot(projectName: string, repoPath: string): Promise<void> {
-  if (!existsSync(repoPath)) return;
-  const sup = new SnapshotSupervisor({
-    projectName,
-    watches: [{ rootPath: repoPath, extensions: SOURCE_EXTENSIONS }],
-  });
+export async function runFirstSnapshot(
+  projectName: string,
+  watches: WatchSpec[],
+): Promise<void> {
+  const live = watches.filter(w => existsSync(w.rootPath));
+  if (live.length === 0) return;
+  const sup = new SnapshotSupervisor({ projectName, watches: live });
   try { await sup.start(); }
   finally { await sup.stop(); }
 }
