@@ -1,6 +1,6 @@
 {
   "name": "@coffeectx/indexer",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "CLI indexer — uses an LLM agent to read repos/logs/artifacts and populate the coffeectx knowledge graph",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,11 +24,11 @@
     "ui": "node dist/ui/index.js"
   },
   "dependencies": {
-    "@coffeectx/core": "^0.1.6",
-    "@coffeectx/secrets-core": "^0.1.6",
-    "@coffeectx/secrets-pi": "^0.1.6",
-    "@coffeectx/server": "^0.1.6",
-    "@coffeectx/tools": "^0.1.6",
+    "@coffeectx/core": "^0.1.7",
+    "@coffeectx/secrets-core": "^0.1.7",
+    "@coffeectx/secrets-pi": "^0.1.7",
+    "@coffeectx/server": "^0.1.7",
+    "@coffeectx/tools": "^0.1.7",
     "@earendil-works/pi-ai": "^0.79.6",
     "@earendil-works/pi-coding-agent": "^0.79.6",
     "@fastify/cors": "^10.0.0",

@@ -20,8 +20,8 @@
     "typescript": "^5.4.5"
   },
   "dependencies": {
-    "@coffeectx/core": "^0.1.6",
-    "@coffeectx/indexer": "^0.1.6",
-    "@coffeectx/server": "^0.1.6"
+    "@coffeectx/core": "^0.1.7",
+    "@coffeectx/indexer": "^0.1.7",
+    "@coffeectx/server": "^0.1.7"
   }
 }
