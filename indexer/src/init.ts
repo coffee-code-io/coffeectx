@@ -13,13 +13,13 @@
  */
 
 import { mkdirSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   Db, syncAllTypes, loadConfig, updateConfig, validateAuth, CLAUDE_DIR,
-  CODEX_STATE_PATH, defaultPiSessionsDirFor,
+  CODEX_STATE_PATH, defaultPiSessionsDirFor, COFFEECODE_DIR,
 } from '@coffeectx/core';
 import type { AuthSettings, JobConfig, ProjectEntry, SyncResult } from '@coffeectx/core';
-import { DB_DIR, dbPathForName, sanitizeName } from './projects.js';
+import { dbPathForName, sanitizeName } from './projects.js';
 import { ask, choose, CancelError, close as closePrompt } from './prompt.js';
 import { runFirstSnapshot } from './lsp/snapshotSupervisor.js';
 
@@ -119,9 +119,28 @@ export async function runInit(name: string): Promise<InitResult> {
   }
 
   const dbPath = dbPathForName(safe);
+  // Ensure every directory we're about to write to exists up front — fresh
+  // installs (or `COFFEECODE_HOME` pointing at a brand-new sandbox dir)
+  // may not have `~/.coffeecode/` yet, in which case `updateConfig` would
+  // throw before we ever reach DB creation.
+  ensureCoffeectxDirs(dbPath);
   writeInitConfig(safe, dbPath, params);
   const res = await bootstrapDbAndSnapshot(safe, dbPath, params.repoPath);
   return { name: safe, alreadyExisted: false, ...res };
+}
+
+/**
+ * Recursively mkdir every directory init writes into:
+ *   - `$COFFEECODE_DIR` itself (parent of `config.yaml`)
+ *   - the actual `dbPath` parent — not the hardcoded `DB_DIR`, since
+ *     re-inits may carry a custom path from an existing config entry.
+ *
+ * `mkdirSync({recursive: true})` is a no-op if the dir already exists, so
+ * calling this from both `runInit` and `bootstrapDbAndSnapshot` is safe.
+ */
+function ensureCoffeectxDirs(dbPath: string): void {
+  mkdirSync(COFFEECODE_DIR, { recursive: true });
+  mkdirSync(dirname(dbPath), { recursive: true });
 }
 
 // ── DB + first-snapshot bootstrap ────────────────────────────────────────────
@@ -131,7 +150,9 @@ async function bootstrapDbAndSnapshot(
   dbPath: string,
   repoPath?: string,
 ): Promise<Omit<InitResult, 'name' | 'alreadyExisted'>> {
-  mkdirSync(DB_DIR, { recursive: true });
+  // Cover the re-init path too: existing.db may live outside the default
+  // DB_DIR (custom config entry), so mkdir the actual parent.
+  ensureCoffeectxDirs(dbPath);
 
   const cfg = loadConfig();
   // syncAllTypes never embeds, so the stub fn / dims are inert — but pick
